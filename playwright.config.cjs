@@ -24,7 +24,7 @@ module.exports = defineConfig({
   retries: 0,
   timeout: 90_000,
   expect: { timeout: 15_000 },
-  reporter: [["list"]],
+  reporter: [["list"], ["junit", { outputFile: "test-results/ui-junit.xml" }]],
   use: {
     baseURL: "http://127.0.0.1:8871",
     viewport: { width: 1440, height: 960 },

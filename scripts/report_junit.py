@@ -25,7 +25,7 @@ def main():
     counts = {key: sum(int(suite.get(key, "0")) for suite in suites)
               for key in ("tests", "failures", "errors", "skipped")}
     seconds = sum(float(suite.get("time", "0")) for suite in suites)
-    summary = f"Python {platform.python_version()}; {counts}; {seconds:.3f}s"
+    summary = f"{counts}; {seconds:.3f}s (reporter Python {platform.python_version()})"
     print(f"::notice title={title}::" + escaped(summary), flush=True)
     for case in tree.iter("testcase"):
         for failure in [*case.findall("failure"), *case.findall("error")]:
