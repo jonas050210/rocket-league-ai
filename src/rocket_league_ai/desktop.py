@@ -126,6 +126,9 @@ def launch(args):
             nonlocal route_index
             if not timer.isActive():
                 return  # Qt may resolve a pending JS callback while destroying the page.
+            # Use explicit JSON: QVariant conversion of JS objects differs between Qt bindings.
+            if isinstance(snapshot, str):
+                snapshot = json.loads(snapshot)
             if (isinstance(snapshot, dict) and snapshot.get("ready")
                     and (snapshot.get("route"), snapshot.get("heading")) == routes[route_index]):
                 route_index += 1
@@ -143,11 +146,11 @@ def launch(args):
                 application.exit(0)
             elif time.monotonic() > deadline:
                 timer.stop()
-                print("Desktop smoke failed: six views did not connect/load in time", file=sys.stderr)
+                print(f"Desktop smoke failed: six views did not connect/load in time; last snapshot: {snapshot!r}", file=sys.stderr)
                 application.exit(1)
 
         timer.timeout.connect(lambda: page.runJavaScript(
-            "({ready: Boolean(window.__RLAI_READY__ && document.querySelector('#connection.online') "
+            "JSON.stringify({ready: Boolean(window.__RLAI_READY__ && document.querySelector('#connection.online') "
             "&& document.querySelectorAll('[data-nav]').length === 6), "
             "route: document.querySelector('[data-nav][aria-current=page]')?.dataset.nav, "
             "heading: document.querySelector('main h1')?.textContent})", result,

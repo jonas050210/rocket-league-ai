@@ -84,7 +84,7 @@ Early browser runs exposed 5–15-second Rust collection stalls. Faulthandler an
 
 ## 5. Native Qt / Python 3.12 CI status
 
-**Configured, result pending at initial commit.** See `.github/workflows/verify.yml` and the feature-branch pull request for the actual run. Do not count a configured workflow as executed verification.
+**Initial CI run [39036179565](https://github.com/jonas050210/rocket-league-ai/actions/runs/39036179565): Python 3.12 setup/package/non-desktop tests passed, native Qt step failed; browser step was skipped.** A follow-up adds bounded JUnit summaries/failure annotations and portable JSON handling for Qt JavaScript callbacks; re-verification is pending. Raw Actions log downloads redirect to a host unavailable in this sandbox, so the failure must not be silently reclassified as a pass. See `.github/workflows/verify.yml` and the feature-branch pull request for the actual run. Do not count a configured workflow as executed verification.
 
 The job uses Ubuntu 24.04/Python 3.12 and normal apt native dependencies, the exact uv/npm locks, lint/compile/package, all non-desktop tests, actual native Qt under Xvfb, then actual-browser tests. Official action revisions are SHA-pinned, permission is contents-read only, and no CUDA pass is asserted on a CPU runner.
 

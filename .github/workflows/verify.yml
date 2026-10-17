@@ -22,13 +22,13 @@ jobs:
       MKL_NUM_THREADS: "1"
       UV_PYTHON_DOWNLOADS: never
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22.22.3"
           cache: npm
@@ -47,26 +47,37 @@ jobs:
           npm ci
       - name: Lint, compile and package
         run: |
-          uv run --no-sync ruff check src tests
+          uv run --no-sync ruff check src tests scripts
           uv run --no-sync python -m compileall -q src
           npm run check
           uv build
       - name: Unit/API/storage/autonomy plus actual PPO subprocess tests
-        run: uv run --no-sync pytest -q -m 'not desktop'
+        run: |
+          mkdir -p .rlai
+          status=0
+          uv run --no-sync pytest -q -m 'not desktop' --junitxml=.rlai/python-junit.xml || status=$?
+          uv run --no-sync python scripts/report_junit.py .rlai/python-junit.xml 'Unit and real PPO tests'
+          exit "$status"
       - name: Actual native Qt window, detached backend and real worker independence
         env:
           RLAI_NATIVE_TEST: "1"
           QT_OPENGL: software
           QTWEBENGINE_DISABLE_SANDBOX: "1"
           QTWEBENGINE_CHROMIUM_FLAGS: --disable-gpu --disable-dev-shm-usage
-        run: xvfb-run -a -s '-screen 0 1440x1000x24' uv run --no-sync pytest -q -m desktop --basetemp=native-test-results
+        run: |
+          status=0
+          xvfb-run -a -s '-screen 0 1440x1000x24' uv run --no-sync pytest -q -m desktop \
+            --basetemp=native-test-results --junitxml=.rlai/native-junit.xml || status=$?
+          uv run --no-sync python scripts/report_junit.py .rlai/native-junit.xml 'Native Qt desktop tests'
+          exit "$status"
       - name: Actual browser lifecycle with isolated real CPU workers
+        if: ${{ !cancelled() && (success() || failure()) }}
         env:
           RLAI_TEST_CUDA_UNAVAILABLE: "1"
         run: npm test
       - name: Upload disposable UI verification artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: ui-verification
           path: |
