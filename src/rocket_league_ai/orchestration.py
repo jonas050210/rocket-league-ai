@@ -395,7 +395,7 @@ class Orchestrator:
             self.benchmark_stop.clear()
             self.store.event("info", "benchmark_started",
                              f"Benchmark started: {len(spec.candidates())} candidate(s), {spec.repeats} repeat(s) each, "
-                             f"warm-up {spec.warmup_iterations} + {spec.measure_iterations} measured iterations "
+                             f"warm-up {spec.warmup_iterations} + up to {spec.effective_measure_iterations} measured iterations "
                              f"of {spec.batch_size} agent steps. Each measurement is a real bounded training run.")
             thread = threading.Thread(target=self._run_benchmark, args=(session["id"], spec),
                                       daemon=True, name="benchmark")
@@ -610,7 +610,7 @@ class Orchestrator:
                 measured = max(completed - spec.warmup_iterations, 0)
                 elapsed = time.monotonic() - started_at
                 time_reached = elapsed >= spec.measurement_seconds and measured >= spec.min_iterations
-                ceiling_reached = measured >= spec.measure_iterations
+                ceiling_reached = measured >= spec.effective_measure_iterations
                 if time_reached or ceiling_reached:
                     stop_reason = "time" if time_reached else "iteration ceiling"
                     try:

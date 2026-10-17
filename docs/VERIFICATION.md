@@ -264,7 +264,14 @@ Two defects were found and fixed by these runs:
    geometry/pixel assertions exist to catch; the earlier pixel check sampled a
    point that the field outline also covered, which is why it passed before.
 
-A third defect was found by code review against the refresh loop, not by a
+A third defect was found by re-reading the runbook against the validators:
+the fixed 1,900-iteration ceiling times a 1,024 or 2,048 batch exceeded the
+1,000,000-step cap, so step 3's "compare batch 1024 and 2048" was rejected
+with a 422. The ceiling is now clamped to what fits (`effective_measure_iterations`:
+1,900 / 975 / 487 at batch 512 / 1,024 / 2,048), the stop logic uses the
+clamped value, and a test pins the mapping.
+
+A fourth defect was found by code review against the refresh loop, not by a
 browser run: clicking "Advanced · complete validated configuration" opened the
 JSON editor, and the next one-second poll rebuilt the panel and closed it
 again. Opening the disclosure now enters the same edit-guard as typing, so the

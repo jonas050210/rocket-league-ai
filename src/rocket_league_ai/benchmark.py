@@ -69,17 +69,32 @@ class BenchmarkSpec(BaseModel):
                     f"batch_size {self.batch_size} must be divisible by 2 * n_proc ({2 * n_proc}) "
                     f"for {n_proc} environment process(es)"
                 )
-        steps = (self.warmup_iterations + self.measure_iterations) * self.batch_size
-        if steps > MAX_MEASUREMENT_STEPS:
+        # ``measure_iterations`` is only a ceiling. It is clamped to what fits
+        # in the per-run step cap, so raising batch_size (512 -> 4096) never
+        # turns an otherwise valid sweep into a validation error; the run is
+        # stopped by the wall clock long before the ceiling anyway.
+        if self.min_iterations > self.effective_measure_iterations:
             raise ValueError(
-                f"one measurement run would need {steps:,} agent steps; the benchmark cap is "
-                f"{MAX_MEASUREMENT_STEPS:,}. Reduce batch_size or iteration counts."
+                f"min_iterations {self.min_iterations} exceeds the "
+                f"{self.effective_measure_iterations} measured iterations that fit in the "
+                f"{MAX_MEASUREMENT_STEPS:,}-step cap at batch_size {self.batch_size}"
             )
-        if self.min_iterations > self.measure_iterations:
-            raise ValueError("min_iterations must not exceed measure_iterations")
         if self.timeout_seconds <= self.measurement_seconds:
             raise ValueError("timeout_seconds must exceed the measurement window")
         return self
+
+    @property
+    def effective_measure_iterations(self) -> int:
+        """The iteration ceiling that actually fits in one measurement budget.
+
+        The step cap is a hard safety bound, so a high ceiling combined with a
+        large batch is clamped here instead of rejecting the whole spec. With
+        the defaults (batch 512) the requested 1,900 iterations fit and the
+        wall-clock window is the only stop in practice.
+        """
+        warmup = self.warmup_iterations
+        available = MAX_MEASUREMENT_STEPS // self.batch_size - warmup
+        return max(1, min(self.measure_iterations, available))
 
     def candidates(self) -> list[dict]:
         return [

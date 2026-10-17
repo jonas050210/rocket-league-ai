@@ -27,10 +27,22 @@ def iterations(count, *, collection=0.4, learning=0.1, episodes_each=2):
 def test_spec_rejects_unbounded_or_duplicate_candidates():
     with pytest.raises(ValidationError):
         BenchmarkSpec(devices=["cpu", "cpu"])
-    with pytest.raises(ValidationError):  # (1 + 500) * 4096 exceeds the per-run step cap
-        BenchmarkSpec(batch_size=4096, measure_iterations=500)
     with pytest.raises(ValidationError):  # 2 devices x 4 n_proc x ... > 8 candidates is fine, 5 values is not
         BenchmarkSpec(n_proc_values=[1, 2, 3, 4, 5, 6, 7, 8, 1][:5], devices=["cpu", "cuda:0"], batch_size=128)
+
+
+def test_measurement_ceiling_is_clamped_to_the_step_cap():
+    # The whole runbook compares batch 512/1024/2048; a high ceiling must be
+    # clamped, never reject the sweep.
+    assert BenchmarkSpec(batch_size=512).effective_measure_iterations == 1900
+    assert BenchmarkSpec(batch_size=2048).effective_measure_iterations == 487
+    assert BenchmarkSpec(batch_size=4096, measure_iterations=500).effective_measure_iterations == 243
+    assert BenchmarkSpec(batch_size=4096, measure_iterations=10).effective_measure_iterations == 10
+    spec = BenchmarkSpec(batch_size=2048)
+    budget = spec.measurement_config(TrainingConfig(), {"device": "cpu", "n_proc": 2}).total_timesteps
+    # Every warm-up and measured iteration must fit inside the run budget.
+    assert (spec.warmup_iterations + spec.effective_measure_iterations) * 2048 <= budget
+    assert budget <= MAX_MEASUREMENT_STEPS
 
 
 def test_measurement_config_is_bounded_and_preserves_strategy():
@@ -130,7 +142,8 @@ def test_benchmark_api_runs_injected_measurements(client, manager, monkeypatch):
 
 def test_benchmark_api_validation(client):
     assert client.post("/api/benchmarks", json={"devices": ["tpu"]}).status_code == 422
-    assert client.post("/api/benchmarks", json={"batch_size": 4096, "measure_iterations": 500}).status_code == 422
+    assert client.post("/api/benchmarks", json={"repeats": 9}).status_code == 422
+    assert client.post("/api/benchmarks", json={"timeout_seconds": 30, "measurement_seconds": 40}).status_code == 422
     assert client.post("/api/benchmarks", json={"batch_size": 128, "n_proc_values": [1, 2, 4, 8, 6]}).status_code == 422
     assert client.post("/api/benchmarks", json={"measurement_seconds": 30, "timeout_seconds": 30}).status_code == 422
 

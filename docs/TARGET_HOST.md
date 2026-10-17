@@ -56,7 +56,10 @@ In Benchmark, for the first target-host session:
 - This runs 8 candidates × 3 repeats of genuine training runs, each stopped
   after 20 s of measured updates (plus startup), with a hard timeout. Expect
   roughly 8–15 minutes on this host; it is a benchmark session, not training.
-- Afterwards compare batch 1024 and 2048 in separate sessions.
+- Afterwards compare batch 1024 and 2048 in separate sessions. Leave the
+  iteration ceiling at 1,900: it is clamped automatically (975 at batch 1,024,
+  487 at 2,048) so the per-run step cap still holds. The 20 s window remains
+  the normal stop in every case.
 - Automatic adoption is limited to **device and n_proc** and requires three
   repeats with CV ≤ 0.10 and GPU telemetry for a CUDA winner. The previous
   plan is stored, and "Revert automatic default" creates a reviewed proposal.
