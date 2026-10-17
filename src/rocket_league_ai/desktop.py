@@ -150,8 +150,10 @@ def launch(args):
                 application.exit(1)
 
         timer.timeout.connect(lambda: page.runJavaScript(
+            # Six views is the navigation contract; keep this in sync with
+            # app.js `names`, the desktop route list above and test_desktop.py.
             "JSON.stringify({ready: Boolean(window.__RLAI_READY__ && document.querySelector('#connection.online') "
-            "&& document.querySelectorAll('[data-nav]').length === 7), "
+            "&& document.querySelectorAll('[data-nav]').length === 6), "
             "route: document.querySelector('[data-nav][aria-current=page]')?.dataset.nav, "
             "heading: document.querySelector('main h1')?.textContent})", result,
         ))

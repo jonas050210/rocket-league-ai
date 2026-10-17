@@ -292,6 +292,13 @@ which is recorded here because it was a real design bug and not a flake:
   window ≥ 4.5 s and a bounded iteration count. The controller poll was also
   reduced from 0.25 s to 0.1 s to bound that overshoot.
 
+A third and fourth CI-only defect followed: a window-stopped run ends as
+`stopped` (the test asserted `completed`), and the native Qt smoke still
+hard-coded `[data-nav] length === 7`, so it never reported ready after
+Configuration moved into Training. Both are fixed; a new static contract test
+pins the Qt predicate to the client's `names` map and to its headings, so this
+class of drift fails in the fast Python step instead of only under Xvfb.
+
 The 20-second benchmark was **not executed** in this sandbox because it has no
 RocketSim/Torch/GPU; the 409 above is the honest boundary, not a pass. CI
 executes the real CPU worker and the 5 s window above. Native Qt, WSLg, the
