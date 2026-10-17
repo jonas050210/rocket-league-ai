@@ -203,6 +203,7 @@ class FoundationController(PPOAgentController):
             "episodes": self.episodes, "goal_episodes": self.goal_episodes,
             "episodic_return": float(np.mean(self.episode_returns)) if self.episode_returns else None,
             "win_rate": None, "device": self.app_config.device,
+            "self_play_enabled": self.app_config.self_play_enabled,
             "gpu_peak_bytes": torch.cuda.max_memory_allocated() if self.app_config.device.startswith("cuda") else None,
             "gpu_reserved_bytes": torch.cuda.memory_reserved() if self.app_config.device.startswith("cuda") else None,
         })

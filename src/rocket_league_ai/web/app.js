@@ -1,4 +1,4 @@
-/* One offline client shared by Qt and the local diagnostic browser. No simulated metrics. */
+/* Offline Web Control Room client. No simulated metrics. */
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) =>
   String(value ?? "").replace(
@@ -10,6 +10,7 @@ const esc = (value) =>
   );
 const icons = {
   dashboard: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
+  roadmap: "M4 19h16 M4 15l4-4 4 2 6-6 M18 7h-4 M18 7v4",
   training: "m9 5 10 7-10 7V5Z M4 5v14",
   monitoring: "M3 12h4l3-8 4 16 3-8h4",
   models: "m12 3 9 5-9 5-9-5 9-5Z M3 12l9 5 9-5 M3 16l9 5 9-5",
@@ -41,13 +42,14 @@ const icon = (name) =>
   `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[name] || icons.info}"/></svg>`;
 const names = {
   dashboard: "Dashboard",
+  roadmap: "Roadmap",
   training: "Training",
   monitoring: "Monitoring",
   models: "Models",
   visualization: "Visualization",
   benchmark: "Benchmark",
 };
-// The approved plan now lives on Training. Keep old links working.
+// Keep old links working.
 const legacyRoutes = { configuration: "training" };
 const resolveRoute = (hash) => {
   const key = legacyRoutes[hash] || hash;
@@ -77,12 +79,19 @@ let route = "dashboard",
   chartKind = "reward",
   selectedRun = null,
   pendingProposal = null;
-let configDraft = null,
-  configRaw = null,
-  planEditing = false,
+let selectedPreset = "all_in_one_complete",
+  trainingMaxSteps = 50000000,
+  trainingInputActive = false,
   logLevel = "all",
   logSearch = "",
   refreshPromise = null;
+const formatDuration = (seconds) => {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0 Sek.";
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))} Sek.`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} Min.`;
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} Std.`;
+  return `${(seconds / 86400).toFixed(1)} Tage`;
+};
 let benchmarkForm = {
   devices: ["cpu", "cuda:0"],
   n_proc_values: [1, 2, 4, 8],
@@ -100,6 +109,16 @@ let benchmarkForm = {
 };
 let evaluationForm = { opponent_id: "random-v1", games: 20, seed: 1000, parallel_workers: 1, scenario_environment: "", extra_seeds: "" };
 let replay = { id: null, data: null, frame: 0, playing: false, speed: 1, follow: false, zoom: 1, raf: null, accumulator: 0 };
+let liveMatchForm = {
+  mode: "human_vs_ai",
+  scenario: "mixed-scenarios-v1",
+  team_size: 1,
+  boost_mode: "standard",
+  arena_map: "DFHStadium",
+  speed: 1,
+  launch_client: true,
+};
+let arenaView3D = true;
 let busy = false,
   toastTimer,
   lastConnectedAt = null;
@@ -294,7 +313,7 @@ function readiness() {
   const rows = [
     [
       "Backend service",
-      "Independent of the desktop window",
+      "Independent of the browser tab",
       connected,
       "CONNECTED",
     ],
@@ -353,6 +372,73 @@ function dashboard() {
     `<div class="two-col"><section class="panel active-run"><div class="panel-header"><h2>Active experiment</h2>${statusPill(state.active_run?.status)}</div><div class="run-stage"><div class="run-copy"><h2>${state.active_run ? esc(run.name) : "Your next run<br>starts here."}</h2><p>${state.active_run ? "Real 1v1 simulation, one shared policy, and an explicit plan. Your run continues independently of this window." : "A focused foundation for a self-trained agent. Start small, observe clearly, and build on verified results."}</p><a class="button secondary" href="#training">${icon(state.active_run ? "monitoring" : "training")}${state.active_run ? "View training run" : "Open training controls"}${icon("arrow")}</a></div>${fieldArt()}</div><div class="run-footer"><span>${icon("cpu")}<b>HEADLESS</b></span><span>1v1 Soccar <b>·</b> Tick skip 8</span><span>${icon("lock")}User-initiated only</span></div></section>${readiness()}</div><div class="two-col">${chart(run)}${resources(system)}</div><div class="two-col balanced">${recentActivity()}<section class="panel"><div class="panel-header"><div><h2>Policy health</h2><p>Learning is not the same as winning</p></div>${icon("trophy")}</div><div class="metric-pairs"><div class="metric-pair"><span>Policy entropy</span><strong>${number(m.entropy, 3)}</strong></div><div class="metric-pair"><span>Evaluation win rate</span><strong>${(state.evaluation_comparison || [])[0] ? `${number(state.evaluation_comparison[0].win_rate * 100, 0)}% vs ${esc(state.evaluation_comparison[0].opponent_id)}` : "Not evaluated"}</strong></div></div><div class="panel-body"><div class="system-note">${icon("info")}<span>${(state.evaluation_comparison || [])[0] ? `Best measured checkpoint by lower 95% bound over ${state.evaluation_comparison[0].games} games. See Models for intervals and opponents.` : "No win rate is inferred from self-play reward. Evaluate a checkpoint in Models against a frozen scripted baseline."}</span></div></div></section></div>`
   );
 }
+function roadmap() {
+  const milestones = state.roadmap || [];
+  const avgSps = state.average_steps_per_second || 1500;
+  const highestStep = state.highest_step || 0;
+  const latestCkpt = state.latest_checkpoint;
+  const completedCount = milestones.filter((m) => m.completed).length;
+  const cards = milestones
+    .map((m) => {
+      const done = m.completed;
+      const presetObj = (state.presets || []).find((p) => p.id === m.preset);
+      const skillsHtml = (m.skills || [])
+        .map((skill) => `<span class="skill-chip">${icon("check")}${esc(skill)}</span>`)
+        .join("");
+      return `<section class="panel milestone-card ${done ? "milestone-done" : ""}" style="margin-top:16px">
+        <div class="panel-header">
+          <div>
+            <span class="eyebrow">MEILENSTEIN ${m.stage} · PRESET: ${esc(presetObj?.label || m.preset)}</span>
+            <h2>${esc(m.title)}</h2>
+            <p>${esc(m.summary)}</p>
+          </div>
+          ${statusPill(done ? "completed" : m.progress_percent > 0 ? "running" : "idle")}
+        </div>
+        <div class="panel-body">
+          <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:16px">
+            ${stat("Ziel-Steps (ca.)", number(m.target_steps), "Steps", done ? "Meilenstein erreicht!" : `Noch ${number(m.remaining_steps)} Steps ab aktuellem Stand`, "bolt")}
+            ${stat("Dauer (ca.)", done ? "Fertig ✓" : formatDuration(m.estimated_seconds), "", `Berechnet mit Ø ${number(avgSps, 0)} steps/s`, "clock")}
+            ${stat("Gesamt-Fortschritt", number(m.progress_percent, 1), "%", `${number(m.current_steps)} / ${number(m.target_steps)} Steps`, "trophy")}
+          </div>
+          <div class="progress-wrapper" style="padding:0;margin-bottom:14px">
+            <div class="progress-track" role="progressbar" aria-label="${esc(m.title)} progress" aria-valuenow="${m.progress_percent}" aria-valuemin="0" aria-valuemax="100">
+              <div class="progress-fill" style="width:${m.progress_percent}%"></div>
+            </div>
+          </div>
+          <div class="skill-list">${skillsHtml}</div>
+          <div class="config-actions" style="margin-top:16px">
+            ${button(
+              "start-milestone",
+              done ? "Weitertrainieren (Stufe ausbauen)" : "Start Training",
+              "play",
+              "primary",
+              !writable() || !idle(),
+              `data-milestone-id="${esc(m.id)}"`,
+            )}
+            <span class="subtle" style="margin-left:12px">
+              ${latestCkpt ? `Trainiert nahtlos weiter ab Checkpoint (${number(latestCkpt.step)} Steps)` : "Startet ab 0 Steps und speichert automatisch Checkpoints"}
+            </span>
+          </div>
+        </div>
+      </section>`;
+    })
+    .join("");
+
+  return (
+    heading(
+      "Roadmap",
+      "Meilensteine deiner KI mit benötigten Steps und Live-Dauer auf Basis deiner bisherigen Ø Steps/s.",
+      `<div style="display:flex;gap:10px;align-items:center">${button("start-auto-roadmap", "Alle Stufen durchtrainieren (500M Autopilot)", "bolt", "primary", !writable() || !idle())}<span class="pill muted-pill">${completedCount}/${milestones.length} ERREICHT</span></div>`,
+    ) +
+    `<div class="stat-grid">
+      ${stat("Aktueller Stand", number(highestStep), "Steps", latestCkpt ? `Neuester Stand: ${short(latestCkpt.checkpoint_id, 15)}` : "Noch kein Checkpoint vorhanden", "bolt")}
+      ${stat("Deine Ø Speed", number(avgSps, 0), "steps/s", state.average_steps_measured ? "Gemessen aus deinen Trainings & Benchmarks" : "Schätzwert bis zum 1. Lauf", "clock")}
+      ${stat("Aktive Hardware", `${state.plan.device === "cuda:0" ? "CUDA" : "CPU"} · ${state.plan.n_proc} Envs`, "", `Batch ${number(state.plan.batch_size)} · Automatisch aus Benchmark`, "cpu")}
+      ${stat("Meilensteine", `${completedCount} / ${milestones.length}`, "", "Jeder Klick trainiert vom neuesten Stand weiter", "trophy")}
+    </div>` +
+    cards
+  );
+}
 function training() {
   const run = viewedRun(),
     m = runMetrics(run),
@@ -361,17 +447,17 @@ function training() {
     ? Math.min(((m.steps || 0) / run.config.total_timesteps) * 100, 100)
     : 0;
   const estimatedRemaining = run?.metrics?.steps_per_second
-    ? number(Math.max(0, (run.config.total_timesteps - (m.steps || 0)) / run.metrics.steps_per_second), 1)
+    ? formatDuration(Math.max(0, (run.config.total_timesteps - (m.steps || 0)) / run.metrics.steps_per_second))
     : "—";
   let body = run
-    ? `<div class="panel-header"><div><h2>Training lifecycle</h2><p>Update-boundary controls · atomic checkpoints</p></div>${statusPill(run.status)}</div><div class="panel-body"><div class="run-title"><div><h2>${esc(run.name)}</h2><span class="run-id">RUN / ${short(run.id, 12)}</span></div><span class="pill muted-pill">${esc(run.config.device)}</span></div><div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">${stat("PPO iterations", number(m.iterations), "", "Completed update boundaries", "refresh")}${stat("Optimizer updates", number(m.updates), "", "Upstream learner counter", "chart")}${stat("Episodes", number(m.episodes), "", "Completed, not estimated", "training")}${stat("Step throughput", number(m.steps_per_second), "steps/s", "Collection + PPO update timing", "clock")}</div></div><div class="progress-wrapper"><div class="progress-label"><span>Step budget</span><strong>${number(m.steps || 0)} / ${number(run.config.total_timesteps)} <span class="muted">(${number(progress, 1)}%)</span></strong></div><div class="progress-track" role="progressbar" aria-label="Training step budget" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${progress}%"></div></div></div>${run.status === "running" && estimatedRemaining !== "—" ? `<div class="estimated-remaining"><span>Est. remaining: ${estimatedRemaining}s</span></div>` : ""}<div class="control-buttons">${button("pause", "Pause", "pause", "secondary", !writable() || !live || run.status !== "running", `data-run-id="${run.id}"`)}${button("resume", "Resume", "play", "secondary", !writable() || !live || run.status !== "paused", `data-run-id="${run.id}"`)}${button("stop", "Stop run", "stop", "danger", !writable() || !live || !activeStatuses.has(run.status) || run.status === "stopping", `data-run-id="${run.id}"`)}<span class="control-note">${run.status === "paused" ? "Worker is alive; simulation and updates are paused." : ["pausing", "stopping"].includes(run.status) ? "Finishing the current update before acknowledging." : "Closing the GUI does not stop your run."}</span></div>`
+    ? `<div class="panel-header"><div><h2>Training lifecycle</h2><p>Update-boundary controls · atomic checkpoints</p></div>${statusPill(run.status)}</div><div class="panel-body"><div class="run-title"><div><h2>${esc(run.name)}</h2><span class="run-id">RUN / ${short(run.id, 12)}</span></div><span class="pill muted-pill">${esc(run.config.device)} · ${run.config.n_proc} ENV</span></div><div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">${stat("PPO iterations", number(m.iterations), "", "Completed update boundaries", "refresh")}${stat("Optimizer updates", number(m.updates), "", "Upstream learner counter", "chart")}${stat("Episodes", number(m.episodes), "", "Completed, not estimated", "training")}${stat("Step throughput", number(m.steps_per_second), "steps/s", "Collection + PPO update timing", "clock")}</div></div><div class="progress-wrapper"><div class="progress-label"><span>Step budget</span><strong>${number(m.steps || 0)} / ${number(run.config.total_timesteps)} <span class="muted">(${number(progress, 1)}%)</span></strong></div><div class="progress-track" role="progressbar" aria-label="Training step budget" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${progress}%"></div></div></div>${run.status === "running" && estimatedRemaining !== "—" ? `<div class="estimated-remaining"><span>Est. remaining: ${estimatedRemaining}</span></div>` : ""}<div class="control-buttons">${button("pause", "Pause", "pause", "secondary", !writable() || !live || run.status !== "running", `data-run-id="${run.id}"`)}${button("resume", "Resume", "play", "secondary", !writable() || !live || run.status !== "paused", `data-run-id="${run.id}"`)}${button("stop", "Stop run", "stop", "danger", !writable() || !live || !activeStatuses.has(run.status) || run.status === "stopping", `data-run-id="${run.id}"`)}<span class="control-note">${run.status === "paused" ? "Worker is alive; simulation and updates are paused." : ["pausing", "stopping"].includes(run.status) ? "Finishing the current update before acknowledging." : "Training runs independently in the background."}</span></div>`
     : empty(
         "training",
-        "Ready when you are.",
-        "Approve a small, explicit training plan. The backend will initialize the real headless environment only after you confirm.",
+        "Bereit für den nächsten Trainingslauf.",
+        "Wähle unten ein Preset, deine Max Steps oder die gewünschte Trainingsdauer und klicke auf Start Training.",
         button(
-          "start",
-          "Review training run",
+          "start-direct-training",
+          "Start Training",
           "play",
           "primary",
           !writable() || !idle(),
@@ -380,17 +466,17 @@ function training() {
   return (
     heading(
       "Training",
-      "A deliberate lifecycle. From first rollout to a recoverable checkpoint.",
+      "Wähle Preset, Max Steps oder ca. Dauer — trainiert automatisch vom neuesten Stand weiter.",
       button(
-        "start",
-        "New training run",
-        "plus",
+        "start-direct-training",
+        "Start Training",
+        "play",
         "primary",
         !writable() || !idle(),
       ),
     ) +
     runError(run) +
-    `<div class="two-col"><section class="panel">${body}</section><section class="panel"><div class="panel-header"><div><h2>${run ? "Experiment metadata" : "Approved plan"}</h2><p>Immutable for every started run</p></div>${icon("file")}</div><div class="metadata-list">${metadataRow("Device", (run?.config || state.plan).device)}${metadataRow("Environment", "1v1 · kickoff-v1")}${metadataRow("Observation / actions", "92 float32 / 90 discrete")}${metadataRow("Seed", (run?.config || state.plan).seed)}${metadataRow("Workers", (run?.config || state.plan).n_proc)}${metadataRow("Source commit", run?.metadata.git.commit ? short(run.metadata.git.commit, 10) + (run.metadata.git.dirty ? " (dirty)" : "") : "Recorded when run starts")}${metadataRow("Config hash", run ? short(run.config_hash, 16) : "Locked at run creation")}${metadataRow("Recovery", "Learner restored · episodes reset")}</div><div class="panel-body"><a class="text-button" href="#training" data-action="open-plan">Review approved plan below ${icon("arrow")}</a></div></section></div>${planPanel()}<section class="panel"><div class="panel-header"><div><h2>Experiment history</h2><p>Original records stay intact when you recover a run</p></div><span class="pill muted-pill">${state.runs.length} RUNS</span></div>${state.runs.length ? `<div class="table-wrap"><table><thead><tr><th>EXPERIMENT</th><th>CREATED</th><th>STEPS</th><th>STATUS</th><th></th></tr></thead><tbody>${state.runs.map((item) => `<tr><td><strong>${esc(item.name)}</strong><small>${short(item.id, 12)}${item.parent ? " · recovered lineage" : ""}</small></td><td>${date(item.created)}</td><td>${number(item.metrics.steps || 0)}</td><td>${statusPill(item.status)}</td><td>${button("select-run", "View run", "arrow", "ghost", false, `data-run-id="${item.id}"`)}</td></tr>`).join("")}</tbody></table></div>` : empty("file", "A clean experiment history", "No training has been started. Opening this application never launches a run.")}</section>`
+    `<div class="two-col"><section class="panel">${body}</section><section class="panel"><div class="panel-header"><div><h2>Aktiver Stand & Hardware</h2><p>Wird automatisch vom Benchmark & letzten Checkpoint übernommen</p></div>${icon("cpu")}</div><div class="metadata-list">${metadataRow("Neuester Stand", state.latest_checkpoint ? `${number(state.latest_checkpoint.step)} Steps (${short(state.latest_checkpoint.checkpoint_id, 15)})` : "0 Steps (Neustart)")}${metadataRow("Ø Geschwindigkeit", `${number(state.average_steps_per_second || 1500, 0)} steps/s`)}${metadataRow("Hardware (Benchmark)", `${state.plan.device} · ${state.plan.n_proc} Envs · Batch ${number(state.plan.batch_size)}`)}${metadataRow("Episoden-Limit", `${state.plan.episode_timeout_seconds}s`)}${metadataRow("Observation / Actions", "92 float32 / 90 discrete · Tick skip 8")}${metadataRow("Weitertrainieren", "Immer automatisch vom neuesten Stand")}</div><div class="panel-body"><a class="text-button" href="#roadmap">Oder direkt über die Meilenstein-Roadmap starten ${icon("arrow")}</a></div></section></div>${planPanel()}<section class="panel"><div class="panel-header"><div><h2>Experiment history</h2><p>Original records stay intact when you continue training</p></div><span class="pill muted-pill">${state.runs.length} RUNS</span></div>${state.runs.length ? `<div class="table-wrap"><table><thead><tr><th>EXPERIMENT</th><th>CREATED</th><th>STEPS</th><th>STATUS</th><th></th></tr></thead><tbody>${state.runs.map((item) => `<tr><td><strong>${esc(item.name)}</strong><small>${short(item.id, 12)}${item.parent ? " · fortgesetzt" : ""}</small></td><td>${date(item.created)}</td><td>${number(item.metrics.steps || 0)}</td><td>${statusPill(item.status)}</td><td>${button("select-run", "View run", "arrow", "ghost", false, `data-run-id="${item.id}"`)}</td></tr>`).join("")}</tbody></table></div>` : empty("file", "A clean experiment history", "No training has been started. Opening this application never launches a run.")}</section>`
   );
 }
 function stackPanel() {
@@ -464,7 +550,7 @@ function models() {
                 state.latest_valid[item.run_id] === item.id &&
                 valid.filter((value) => value.run_id === item.run_id).length <=
                   1;
-              return `<tr><td><button class="text-button" data-action="inspect-model" ${target}>${icon("file")}${esc(item.id.slice(0, 17))}</button><small>${esc(item.run_name)} · ${item.created ? date(item.created) : "Unknown date"}</small>${designated ? '<span class="model-designation">DESIGNATED BEST · MANUAL</span>' : ""}</td><td>${number(item.step)}</td><td><span class="${item.integrity === "valid" ? "model-check" : "bad-text"}">${icon(item.integrity === "valid" ? "check" : "info")}${esc(item.integrity)}</span></td><td>${latestEvaluation(item.id) ? `<small style="margin:0">${number(latestEvaluation(item.id).result.win_rate * 100, 0)}% vs ${esc(latestEvaluation(item.id).result.opponent_id)} (n=${latestEvaluation(item.id).result.games})</small>` : '<small style="margin:0">Not evaluated</small>'}</td><td class="actions">${button("recover-checkpoint", "Recover", "refresh", "secondary", !writable() || !idle() || item.integrity !== "valid" || !canRecover, target)}${button("designate", "Designate", "trophy", "ghost", !writable() || !idle() || item.integrity !== "valid" || designated, target)}${button("delete-checkpoint", "Delete", "delete", "ghost", !writable() || !idle() || item.integrity !== "valid" || designated || last, target)}</td></tr>`;
+              return `<tr><td><button class="text-button" data-action="inspect-model" ${target}>${icon("file")}${esc(item.id.slice(0, 17))}</button><small>${esc(item.run_name)} · ${item.created ? date(item.created) : "Unknown date"}</small>${designated ? '<span class="model-designation">DESIGNATED BEST · MANUAL</span>' : ""}</td><td>${number(item.step)}</td><td><span class="${item.integrity === "valid" ? "model-check" : "bad-text"}">${icon(item.integrity === "valid" ? "check" : "info")}${esc(item.integrity)}</span></td><td>${latestEvaluation(item.id) ? `<small style="margin:0">${number(latestEvaluation(item.id).result.win_rate * 100, 0)}% vs ${esc(latestEvaluation(item.id).result.opponent_id)} (n=${latestEvaluation(item.id).result.games})</small>` : '<small style="margin:0">Not evaluated</small>'}</td><td class="actions">${button("export-rlbot", "RLBot Export", "download", "ghost", !writable() || item.integrity !== "valid", target)}${button("recover-checkpoint", "Recover", "refresh", "secondary", !writable() || !idle() || item.integrity !== "valid" || !canRecover, target)}${button("designate", "Designate", "trophy", "ghost", !writable() || !idle() || item.integrity !== "valid" || designated, target)}${button("delete-checkpoint", "Delete", "delete", "ghost", !writable() || !idle() || item.integrity !== "valid" || designated || last, target)}</td></tr>`;
             })
             .join("")}</tbody></table></div>`
         : empty(
@@ -525,34 +611,68 @@ function retentionSection() {
   const total = candidates.reduce((sum, item) => sum + item.reclaimable_bytes, 0);
   return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Retention candidates</h2><p>Older checkpoints beyond the five newest per run · ${bytes(total)} reclaimable · protections unchanged</p></div><span class="pill muted-pill">SUGGESTIONS ONLY</span></div><div class="table-wrap"><table><thead><tr><th>CHECKPOINT</th><th>STEP</th><th>SIZE</th><th></th></tr></thead><tbody>${rows}</tbody></table></div><div class="panel-body"><p class="subtle">Nothing is deleted automatically. Each deletion is its own reviewed, confirmed proposal; the designated best and each run's last valid checkpoint never appear here.</p></div></section>`;
 }
-function configInput(
-  label,
-  key,
-  type = "number",
-  description = "",
-  options = null,
-) {
-  const value = configDraft[key];
-  const input = options
-    ? `<select id="cfg-${key}" data-config="${key}">${options.map(([v, label]) => `<option value="${v}" ${value === v ? "selected" : ""}>${label}</option>`).join("")}</select>`
-    : `<input id="cfg-${key}" data-config="${key}" type="${type}" value="${esc(value)}" ${type === "number" ? 'step="any"' : ""}>`;
-  return `<label class="field">${label}${input}${description ? `<small>${description}</small>` : ""}</label>`;
-}
 function planPanel() {
-  if (!configDraft) {
-    configDraft = structuredClone(state.plan);
-    configRaw = JSON.stringify(configDraft, null, 2);
-  }
-  return `<section class="panel plan-panel" id="plan-editor" style="margin-top:20px"><div class="panel-header"><div><h2>Approved plan</h2><p>Draft changes never affect a running experiment</p></div><span class="plan-badge"><i></i>Revision <span id="plan-revision">${state.plan_revision}</span></span></div><div class="panel-body"><div class="form-grid">${configInput("Experiment name", "name", "text")}${configInput(
-      "Learner device",
-      "device",
-      "text",
-      "CUDA is never silently replaced with CPU.",
-      [
-        ["cuda:0", "CUDA · device 0"],
-        ["cpu", "CPU · bounded correctness test"],
-      ],
-    )}${configInput("Total agent steps", "total_timesteps", "number", "Agent steps; 1v1 produces two per decision.")}${configInput("Steps per PPO iteration", "batch_size", "number", "Also sets collection size and 3× buffer capacity.")}${configInput("Environment processes", "n_proc", "number", "More processes use more CPU cores; benchmark to choose.")}${configInput("Minibatches", "n_minibatches", "number", "Must divide the batch; at least 16 samples each.")}${configInput("Learning rate", "learning_rate", "number")}${configInput("Entropy coefficient", "entropy_coefficient", "number")}${configInput("Random seed", "seed", "number")}${configInput("Checkpoint every N iterations", "checkpoint_every_iterations", "number", "Pause and stop also save at a safe boundary.")}</div><details class="advanced-config"><summary>Advanced · complete validated configuration</summary><textarea id="config-json" class="json-editor" aria-label="Complete training configuration" spellcheck="false">${esc(configRaw)}</textarea></details><div class="validation-message" id="validation-message" hidden role="status"></div><div class="config-actions">${button("reset-draft", "Reset draft", "refresh", "ghost", false)}${button("validate-config", "Validate draft", "check", "secondary", !writable())}${button("apply-config", "Review plan changes", "arrow", "primary", !writable() || !idle(), 'id="apply-config"')}</div><p class="subtle">Applying a plan creates a reviewed proposal. It changes future runs only; it never modifies an existing run or checkpoint.</p></div></section>`;
+  const presets = state.presets || [
+    { id: "warmup", label: "Quick Warmup", description: "Schneller Testlauf für Anstoß-Kontakte und erste PPO-Updates.", default_steps: 262144 },
+    { id: "kickoff_basics", label: "Grundlagen & Kickoff", description: "Zuverlässig zum Ball fahren, sichere Kickoffs und erste Torschüsse.", default_steps: 1000000 },
+    { id: "allround_striker", label: "Allround Striker & Positioning", description: "Angriffs-, Verteidigungs- und Open-Play-Szenarien mit Boost- & Schuss-Shaping.", default_steps: 10000000 },
+    { id: "pro_selfplay", label: "Pro 1v1 Self-Play", description: "Volles Pro-Reward-System, 2 PPO-Epochen und Self-Play gegen historische Checkpoints.", default_steps: 50000000 },
+    { id: "champion_master", label: "Champion Long-Run", description: "Meisterschafts-Finetuning mit Fokus auf Power-Shots, Aerials, Saves und taktischem Self-Play.", default_steps: 150000000 },
+  ];
+  const avgSps = Math.max(state.average_steps_per_second || 1500, 1);
+  const estSeconds = trainingMaxSteps / avgSps;
+  const estMinutes = Math.max(1, Math.round(estSeconds / 60));
+  const presetCards = presets
+    .map(
+      (p) =>
+        `<button type="button" class="preset-card ${selectedPreset === p.id ? "selected" : ""}" data-action="select-preset" data-preset="${esc(p.id)}" data-steps="${p.default_steps}"${disabled(!writable() || !idle())}>
+          <div class="preset-top"><strong>${esc(p.label)}</strong><span class="pill muted-pill">${number(p.default_steps)} Steps</span></div>
+          <p>${esc(p.description)}</p>
+        </button>`,
+    )
+    .join("");
+  const stepChips = [
+    [250000, "250k Steps"],
+    [1000000, "1M Steps"],
+    [10000000, "10M Steps"],
+    [50000000, "50M Steps"],
+    [150000000, "150M Steps"],
+    [500000000, "500M Steps"],
+  ]
+    .map(
+      ([val, label]) =>
+        `<button type="button" class="button ${trainingMaxSteps === val ? "secondary" : "ghost"}" data-action="set-max-steps" data-steps="${val}"${disabled(!writable() || !idle())}>${esc(label)}</button>`,
+    )
+    .join("");
+
+  return `<section class="panel plan-panel" id="plan-editor" style="margin-top:20px">
+    <div class="panel-header">
+      <div>
+        <h2>Training Setup · Presets, Max Steps & Ca. Zeit</h2>
+        <p>Hardware-Parameter (${esc(state.plan.device)} · ${state.plan.n_proc} Envs · Batch ${number(state.plan.batch_size)}) kommen automatisch aus dem Benchmark.</p>
+      </div>
+      <span class="plan-badge"><i></i>Ø ${number(avgSps, 0)} steps/s</span>
+    </div>
+    <div class="panel-body">
+      <div class="preset-grid">${presetCards}</div>
+      <div class="form-grid" style="margin-top:18px">
+        <label class="field">
+          Max Steps (Ziel-Schritte)
+          <input id="train-max-steps" type="number" min="128" max="1000000000" step="1024" value="${trainingMaxSteps}" ${disabled(!writable() || !idle())}>
+          <small>Trainiert automatisch vom neuesten Checkpoint weiter (${state.latest_checkpoint ? `aktuell bei ${number(state.latest_checkpoint.step)} Steps` : "Start bei 0 Steps"}).</small>
+        </label>
+        <label class="field">
+          Ca. Dauer in Minuten (Live-Umrechnung)
+          <input id="train-duration-minutes" type="number" min="1" max="10080" step="1" value="${estMinutes}" ${disabled(!writable() || !idle())}>
+          <small id="train-duration-readout">Geschätzte Trainingsdauer: <strong>ca. ${formatDuration(estSeconds)}</strong> bei Ø ${number(avgSps, 0)} steps/s</small>
+        </label>
+      </div>
+      <div class="config-actions" style="margin-top:12px;flex-wrap:wrap">${stepChips}</div>
+      <div class="config-actions" style="margin-top:18px">
+        ${button("start-direct-training", "Start Training (Sofort vom neuesten Stand)", "play", "primary", !writable() || !idle(), 'id="start-direct-training"')}
+      </div>
+    </div>
+  </section>`;
 }
 function visualization() {
   const recorded = (state.evaluations || []).filter(
@@ -564,14 +684,96 @@ function visualization() {
         `<option value="${item.id}" ${replay.id === item.id ? "selected" : ""}>${esc(item.result.candidate_checkpoint_id.slice(0, 24))} vs ${esc(item.result.opponent_id)} · ${item.result.games} games</option>`,
     )
     .join("");
+  const lm = state.live_match || { status: "idle", score: [0, 0], game_number: 1, elapsed_seconds: 0, client_message: "" };
+  const liveActive = lm.status === "running" || lm.status === "paused";
+  const latestCkpt = state.latest_checkpoint;
   return (
     heading(
-      "Visualization",
-      "Recorded evaluation replays, rendered locally. Training stays headless.",
-      `<span class="pill muted-pill">RECORDED REPLAY · TOP-DOWN</span>`,
+      "Live Arena & Visualization",
+      "Starte echte Rocket-League-Matches (RLBot) oder steuere die 120Hz Live-Simulation direkt per Hotkey [G], [Space], [R], [V].",
+      `<div style="display:flex;gap:8px;align-items:center"><span class="pill ${liveActive ? "" : "muted-pill"}">${liveActive ? `LIVE MATCH · ${lm.status.toUpperCase()}` : "RECORDED REPLAY · TOP-DOWN"}</span><button class="button ghost" data-action="toggle-arena-view">${arenaView3D ? "Ansicht: 3D Arena [V]" : "Ansicht: 2D Top-Down [V]"}</button></div>`,
     ) +
-    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer</h2><p>Real RocketSim trajectories recorded during evaluation — a schematic top-down view, not a 3D renderer</p></div>${statusPill(replay.playing ? "running" : replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && (writable() || readOnly) ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><button class="button ghost" data-action="export-replay" ${replay.data ? "" : "disabled"}>${icon("download")}Export JSON</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="field">Zoom<select id="replay-zoom"><option value="1" ${replay.zoom === 1 ? "selected" : ""}>1×</option><option value="2" ${replay.zoom === 2 ? "selected" : ""}>2×</option><option value="4" ${replay.zoom === 4 ? "selected" : ""}>4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay">${replay.data ? `<div class="replay-markers">${replayGoalMarkers()}</div>` : ""}<div class="replay-legend"><span><i class="legend-car filled"></i>Blue car</span><span><i class="legend-car outline"></i>Orange car</span><span><i class="legend-ball"></i>Ball</span><span>Field: x ±4096, y ±5120 · blue goal left</span></div><div class="replay-readout" id="replay-readout">${replay.data ? esc(replayReadout()) : "Run an evaluation from Models to record a replay. Opening this viewer never affects a training run."}</div></div><div class="viz-specs"><span>SOURCE<strong>Evaluation trajectory artifact</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>BOUNDARY<strong>No live 3D renderer (NumPy/renderer conflict documented)</strong></span></div></section>`
+    `<section class="panel" style="margin-bottom:20px">
+      <div class="panel-header">
+        <div>
+          <h2>Rocket League Live-Match & Hotkey-Steuerung</h2>
+          <p>${esc(lm.client_message || "Startet Rocket League (RLBot) mit deinem neuesten Checkpoint + interaktive 120Hz Live-Simulation im Browser.")}</p>
+        </div>
+        ${statusPill(lm.status === "running" ? "running" : lm.status === "paused" ? "paused" : "idle")}
+      </div>
+      <div class="panel-body">
+        <div class="stat-grid" style="margin-bottom:14px">
+          ${stat("Scoreboard (Blue : Orange)", `${lm.score?.[0] ?? 0} : ${lm.score?.[1] ?? 0}`, `Spiel #${lm.game_number || 1}`, `Spielzeit: ${number(lm.elapsed_seconds || 0, 1)}s`, "trophy")}
+          ${stat("Aktiver KI-Checkpoint", latestCkpt ? `${number(latestCkpt.step)} Steps` : "Smart Chaser (Demo)", latestCkpt ? latestCkpt.checkpoint_id.slice(0, 10) : "0 Checkpoints", latestCkpt ? `Run: ${latestCkpt.run_name}` : "Spielt sofort auch ohne Checkpoint", "models")}
+          ${stat("Hotkeys im Web", "[G] Start/Stop", "[Space] Weiter/Pause", "[R] Kickoff Reset · [T] Training · [V] 2D/3D", "bolt")}
+        </div>
+        <div class="replay-controls" style="margin-bottom:10px">
+          <label class="field">Spiel-Modus
+            <select id="live-match-mode">
+              <option value="human_vs_ai" ${liveMatchForm.mode === "human_vs_ai" ? "selected" : ""}>Du gegen KI (Rocket League / RLBot + Live Sim)</option>
+              <option value="ai_vs_ai" ${liveMatchForm.mode === "ai_vs_ai" ? "selected" : ""}>KI gegen KI (Showmatch / RLBot + Live Sim)</option>
+              <option value="sim_live" ${liveMatchForm.mode === "sim_live" ? "selected" : ""}>Nur Live-Simulation im Browser (120Hz RocketSim)</option>
+            </select>
+          </label>
+          <label class="field">Team-Größe
+            <select id="live-match-teams">
+              <option value="1" ${liveMatchForm.team_size === 1 ? "selected" : ""}>1v1 (2 Bots auf dem Feld)</option>
+              <option value="2" ${liveMatchForm.team_size === 2 ? "selected" : ""}>2v2 (4 Bots · Team Self-Play)</option>
+            </select>
+          </label>
+          <label class="field">Boost-Modus
+            <select id="live-match-boost">
+              <option value="standard" ${liveMatchForm.boost_mode === "standard" ? "selected" : ""}>Standard Boost (34 Pads)</option>
+              <option value="unlimited" ${liveMatchForm.boost_mode === "unlimited" ? "selected" : ""}>Unlimited Boost (Speedflip & Aerials)</option>
+              <option value="starved" ${liveMatchForm.boost_mode === "starved" ? "selected" : ""}>Low Boost (0–20 · Pad-Training)</option>
+            </select>
+          </label>
+          <label class="field">Map / Stadion
+            <select id="live-match-map">
+              <option value="DFHStadium" ${liveMatchForm.arena_map === "DFHStadium" ? "selected" : ""}>DFH Stadium (Classic)</option>
+              <option value="ChampionsField" ${liveMatchForm.arena_map === "ChampionsField" ? "selected" : ""}>Champions Field (RLCS)</option>
+              <option value="Mannfield_Night" ${liveMatchForm.arena_map === "Mannfield_Night" ? "selected" : ""}>Mannfield (Night)</option>
+              <option value="NeonFields" ${liveMatchForm.arena_map === "NeonFields" ? "selected" : ""}>Neon Fields (Cyber)</option>
+              <option value="UtopiaColiseum" ${liveMatchForm.arena_map === "UtopiaColiseum" ? "selected" : ""}>Utopia Coliseum</option>
+            </select>
+          </label>
+          <label class="field">Szenario & Mechanics
+            <select id="live-match-scenario">
+              <option value="mixed-scenarios-v1" ${liveMatchForm.scenario === "mixed-scenarios-v1" ? "selected" : ""}>10 Pro Drills (Speedflip, Save, Aerial, Wall, Shadow, Dribble)</option>
+              <option value="kickoff-v1" ${liveMatchForm.scenario === "kickoff-v1" ? "selected" : ""}>Standard Kickoff (Anstoß)</option>
+            </select>
+          </label>
+          <label class="field">Sim-Speed
+            <select id="live-match-speed">
+              <option value="0.5" ${liveMatchForm.speed === 0.5 ? "selected" : ""}>0.5× Slow-Mo</option>
+              <option value="1" ${liveMatchForm.speed === 1 ? "selected" : ""}>1× Echtzeit</option>
+              <option value="2" ${liveMatchForm.speed === 2 ? "selected" : ""}>2× Schnell</option>
+              <option value="4" ${liveMatchForm.speed === 4 ? "selected" : ""}>4× Turbo</option>
+            </select>
+          </label>
+          ${
+            liveActive
+              ? `${button("live-match-pause", lm.paused ? "Weiter [Space]" : "Pause [Space]", lm.paused ? "play" : "pause", "primary", !writable())}` +
+                `${button("live-match-reset", "Neuer Kickoff [R]", "refresh", "secondary", !writable())}` +
+                `${button("live-match-next", "Nächstes Spiel [N]", "arrow", "secondary", !writable())}` +
+                `${button("stop-live-match", "Match Stoppen [G]", "stop", "danger", !writable())}`
+              : `${button("start-live-match", "Rocket League / Live-Match Starten [G]", "play", "primary", !writable())}`
+          }
+        </div>
+      </div>
+    </section>` +
+    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer & Live-Arena (${arenaView3D ? "3D Perspektive" : "2D Top-Down"})</h2><p>Echte RocketSim 120Hz Physik mit 34 Boost-Pads, Ball-Höhenschatten, Schweif, Boost-Flammen und Live-Controller-Telemetrie</p></div>${statusPill(liveActive ? (lm.paused ? "paused" : "running") : replay.playing ? "running" : replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && (writable() || readOnly) ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><button class="button ghost" data-action="export-replay" ${replay.data ? "" : "disabled"}>${icon("download")}Export JSON</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="field">Zoom<select id="replay-zoom"><option value="1" ${replay.zoom === 1 ? "selected" : ""}>1×</option><option value="2" ${replay.zoom === 2 ? "selected" : ""}>2×</option><option value="4" ${replay.zoom === 4 ? "selected" : ""}>4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay">${replay.data ? `<div class="replay-markers">${replayGoalMarkers()}</div>` : ""}<div class="replay-legend"><span><i class="legend-car filled" style="background:#38bdf8;border-color:#38bdf8"></i>Blue car (Boost & Flame)</span><span><i class="legend-car outline" style="background:#fb923c;border-color:#fb923c"></i>Orange car (Boost & Flame)</span><span><i class="legend-ball"></i>Ball + Höhen-Schatten</span><span>34 Boost-Pads · Taste [Space] Weiter/Pause · [R] Kickoff · [G] Start/Stop</span></div><div class="replay-readout" id="replay-readout">${liveActive && lm.current_frame ? esc(liveMatchReadout(lm)) : replay.data ? esc(replayReadout()) : "Klicke oben auf 'Rocket League / Live-Match Starten [G]' für ein sofortiges Live-Spiel oder lade ein Evaluation-Replay."}</div></div><div class="viz-specs"><span>SOURCE<strong>${liveActive ? "Live RocketSim 120Hz + RLBot Bridge" : "Evaluation trajectory artifact"}</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car (120 Hz Physik)</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>STEUERUNG<strong>Hotkeys: [G] Match · [Space] Weiter/Pause · [R] Kickoff · [T] Training</strong></span></div></section>`
   );
+}
+function liveMatchReadout(lm) {
+  const frame = lm?.current_frame;
+  if (!frame) return "Live-Match startet…";
+  const ballSpeedKmh = frame.ball_velocity ? (Math.hypot(...frame.ball_velocity) * 0.036).toFixed(0) : "0";
+  const vec = frame.candidate_action_vector;
+  const actStr = vec
+    ? `Throttle ${vec[0]} · Steer ${vec[1]} · Boost ${vec[6] > 0.5 ? "AN" : "aus"} · Jump ${vec[5] > 0.5 ? "JA" : "nein"}`
+    : "";
+  return `LIVE Spiel #${lm.game_number || 1} · t=${(frame.t || 0).toFixed(1)}s · BLUE ${lm.score?.[0] ?? 0} – ${lm.score?.[1] ?? 0} ORANGE · Ball-Höhe z=${(frame.ball?.[2] || 0).toFixed(0)} uu · Speed ${ballSpeedKmh} km/h · ${actStr}`;
 }
 function replayReadout() {
   if (!replay.data) return "";
@@ -594,70 +796,163 @@ const FIELD = {
   ballRadius: 91.25, centreCircle: 500,
 };
 
+// Official 34 Soccar Boost Pad coordinates [wx, wy, isBig]
+const BOOST_PADS = [
+  [-3072, -4096, true], [3072, -4096, true], [-3584, 0, true], [3584, 0, true], [-3072, 4096, true], [3072, 4096, true],
+  [0, -4240, false], [-1792, -4184, false], [1792, -4184, false], [-940, -3308, false], [940, -3308, false],
+  [0, -2816, false], [-3584, -2484, false], [3584, -2484, false], [-1788, -2300, false], [1788, -2300, false],
+  [-2048, -1036, false], [0, -1024, false], [2048, -1036, false], [-1024, 0, false], [1024, 0, false],
+  [-2048, 1036, false], [0, 1024, false], [2048, 1036, false], [-1788, 2300, false], [1788, 2300, false],
+  [-3584, 2484, false], [3584, 2484, false], [0, 2816, false], [-940, 3308, false], [940, 3308, false],
+  [-1792, 4184, false], [1792, 4184, false], [0, 4240, false],
+];
+
 function replayMapping(width, height, { follow = false, centre = [0, 0], zoom = 1 } = {}) {
-  const margin = 24;
+  const margin = 28;
   const fit = Math.min((width - 2 * margin) / (2 * FIELD.y), (height - 2 * margin) / (2 * FIELD.x));
   const factor = (follow ? 2 : 1) * Math.max(0.5, Math.min(Number(zoom) || 1, 4));
   const scale = Math.max(fit * factor, 0.002);
   const cx = follow ? centre[0] : 0;
   const cy = follow ? centre[1] : 0;
   // World +y (towards the orange goal) is canvas +x; world +x is canvas up.
-  const px = (wx, wy) => [width / 2 + (wy - cy) * scale, height / 2 - (wx - cx) * scale];
+  const px = (wx, wy, wz = 0) => {
+    const baseX = width / 2 + (wy - cy) * scale;
+    const baseY = height / 2 - (wx - cx) * scale;
+    if (!arenaView3D || !wz) return [baseX, baseY];
+    return [baseX, baseY - wz * scale * 0.48];
+  };
   return { width, height, scale, margin, px };
 }
 
 function drawReplayField(ctx, mapping) {
   const { width: W, height: H, scale, px } = mapping;
-  ctx.fillStyle = "#000";
+  const mapName = state?.live_match?.arena_map || liveMatchForm.arena_map || "DFHStadium";
+  const themes = {
+    DFHStadium: { bg0: "#050912", bg1: "#091219", bg2: "#120a07", turfC: "rgba(18, 46, 34, 0.42)", border: "#e2e8f0" },
+    ChampionsField: { bg0: "#040817", bg1: "#0c1428", bg2: "#171105", turfC: "rgba(25, 38, 68, 0.48)", border: "#fde047" },
+    Mannfield_Night: { bg0: "#03060c", bg1: "#070b14", bg2: "#0c0712", turfC: "rgba(14, 24, 38, 0.52)", border: "#94a3b8" },
+    NeonFields: { bg0: "#0d041a", bg1: "#120624", bg2: "#1c0518", turfC: "rgba(42, 12, 68, 0.45)", border: "#f472b6" },
+    UtopiaColiseum: { bg0: "#0c120e", bg1: "#141c16", bg2: "#1c160c", turfC: "rgba(38, 56, 36, 0.45)", border: "#fcd34d" },
+  };
+  const theme = themes[mapName] || themes.DFHStadium;
+
+  // Deep stadium background
+  const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+  bgGrad.addColorStop(0, theme.bg0);
+  bgGrad.addColorStop(0.5, theme.bg1);
+  bgGrad.addColorStop(1, theme.bg2);
+  ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = "#fff";
-  ctx.lineWidth = 2;
+
+  // Pitch turf with subtle blue/orange half tint
+  const [tlX, tlY] = px(FIELD.x, -FIELD.y);
+  const [brX, brY] = px(-FIELD.x, FIELD.y);
+  const pitchW = brX - tlX;
+  const pitchH = brY - tlY;
+  const turfGrad = ctx.createLinearGradient(tlX, 0, brX, 0);
+  turfGrad.addColorStop(0, "rgba(14, 42, 74, 0.42)");
+  turfGrad.addColorStop(0.5, theme.turfC);
+  turfGrad.addColorStop(1, "rgba(74, 34, 14, 0.42)");
+  ctx.fillStyle = turfGrad;
+  ctx.fillRect(tlX, tlY, pitchW, pitchH);
+
+  // Vertical mow stripes
+  const stripeCount = 10;
+  for (let i = 0; i < stripeCount; i += 2) {
+    ctx.fillStyle = "rgba(255, 255, 255, 0.022)";
+    ctx.fillRect(tlX + (i / stripeCount) * pitchW, tlY, pitchW / stripeCount, pitchH);
+  }
+
+  // Penalty boxes
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+  ctx.lineWidth = 1.5;
+  for (const side of [-1, 1]) {
+    const [bx0, by0] = px(2000, side * FIELD.y);
+    const [bx1, by1] = px(-2000, side * (FIELD.y - 1400));
+    ctx.strokeRect(Math.min(bx0, bx1), Math.min(by0, by1), Math.abs(bx1 - bx0), Math.abs(by1 - by0));
+  }
+
+  // Outer pitch boundary with corner bevels
+  const bevel = 800;
+  const octPts = [
+    px(FIELD.x - bevel, -FIELD.y), px(FIELD.x, -FIELD.y + bevel),
+    px(FIELD.x, FIELD.y - bevel), px(FIELD.x - bevel, FIELD.y),
+    px(-FIELD.x + bevel, FIELD.y), px(-FIELD.x, FIELD.y - bevel),
+    px(-FIELD.x, -FIELD.y + bevel), px(-FIELD.x + bevel, -FIELD.y),
+  ];
+  ctx.strokeStyle = "#e2e8f0";
+  ctx.lineWidth = 2.2;
   ctx.lineJoin = "round";
-  const corners = [px(-FIELD.x, -FIELD.y), px(-FIELD.x, FIELD.y), px(FIELD.x, FIELD.y), px(FIELD.x, -FIELD.y)];
   ctx.beginPath();
-  corners.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+  octPts.forEach(([x, y], idx) => (idx ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
   ctx.closePath();
   ctx.stroke();
-  // Halfway line and centre circle.
+
+  // Halfway line and centre circle
   const [hx0, hy0] = px(-FIELD.x, 0), [hx1, hy1] = px(FIELD.x, 0);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
   ctx.beginPath(); ctx.moveTo(hx0, hy0); ctx.lineTo(hx1, hy1); ctx.stroke();
   const [cx, cy] = px(0, 0);
   ctx.beginPath(); ctx.arc(cx, cy, FIELD.centreCircle * scale, 0, Math.PI * 2); ctx.stroke();
-  // Goal mouths sit outside the back walls; a bracket is always visible.
-  ctx.font = "10px Inter, sans-serif";
+
+  // All 34 Boost Pads
+  for (const [wx, wy, isBig] of BOOST_PADS) {
+    const [px0, py0] = px(wx, wy);
+    ctx.beginPath();
+    ctx.arc(px0, py0, isBig ? Math.max(4.5, 165 * scale) : Math.max(2.2, 75 * scale), 0, Math.PI * 2);
+    ctx.fillStyle = isBig ? "rgba(250, 204, 21, 0.85)" : "rgba(250, 204, 21, 0.38)";
+    ctx.fill();
+    if (isBig) {
+      ctx.strokeStyle = "rgba(254, 240, 138, 0.9)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  // Goal mouths (with 3D crossbar arch when arenaView3D is enabled)
+  ctx.font = "600 10px Inter, sans-serif";
   ctx.textAlign = "center";
-  for (const [side, label] of [[-1, "BLUE GOAL"], [1, "ORANGE GOAL"]]) {
+  for (const [side, label, color] of [[-1, "BLUE GOAL", "#38bdf8"], [1, "ORANGE GOAL", "#fb923c"]]) {
     const wall = side * FIELD.y;
     const [gx0, gy0] = px(-FIELD.goalHalf, wall), [gx1, gy1] = px(FIELD.goalHalf, wall);
-    const outward = side > 0 ? 14 : -14;
+    const outward = side > 0 ? 18 : -18;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.moveTo(gx0, gy0); ctx.lineTo(gx1, gy1);
     ctx.moveTo(gx0, gy0); ctx.lineTo(gx0 + outward, gy0);
     ctx.moveTo(gx1, gy1); ctx.lineTo(gx1 + outward, gy1);
     ctx.stroke();
-    ctx.fillStyle = "#b8b8b8";
-    ctx.fillText(label, (gx0 + gx1) / 2 + outward, gy0 - 8);
-    ctx.fillStyle = "#fff";
+    if (arenaView3D) {
+      const [top0x, top0y] = px(-FIELD.goalHalf, wall, FIELD.goalHeight);
+      const [top1x, top1y] = px(FIELD.goalHalf, wall, FIELD.goalHeight);
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(gx0, gy0); ctx.lineTo(top0x, top0y);
+      ctx.lineTo(top1x, top1y); ctx.lineTo(gx1, gy1);
+      ctx.stroke();
+    }
+    ctx.fillStyle = color;
+    ctx.fillText(label, (gx0 + gx1) / 2 + outward * 1.4, Math.min(gy0, gy1) - 8);
   }
   ctx.textAlign = "left";
 }
 
 function drawReplayEmpty(ctx, mapping, message) {
   const { width: W, height: H } = mapping;
-  // Knock a hole in the field marking so the empty-state copy stays readable
-  // instead of colliding with the halfway line and centre circle.
-  ctx.fillStyle = "#000";
-  ctx.fillRect(W / 2 - 250, H / 2 - 34, 500, 68);
-  ctx.strokeStyle = "#2a2a2a";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(W / 2 - 250, H / 2 - 34, 500, 68);
+  ctx.fillStyle = "rgba(5, 9, 18, 0.92)";
+  ctx.fillRect(W / 2 - 265, H / 2 - 38, 530, 76);
+  ctx.strokeStyle = "#334155";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(W / 2 - 265, H / 2 - 38, 530, 76);
   ctx.fillStyle = "#fff";
   ctx.textAlign = "center";
   ctx.font = "600 16px Inter, sans-serif";
-  ctx.fillText("No replay loaded", W / 2, H / 2 - 10);
-  ctx.fillStyle = "#b8b8b8";
+  ctx.fillText("No replay loaded · Bereit für Live-Match [G]", W / 2, H / 2 - 8);
+  ctx.fillStyle = "#94a3b8";
   ctx.font = "12px Inter, sans-serif";
-  ctx.fillText(message, W / 2, H / 2 + 14);
+  ctx.fillText(message, W / 2, H / 2 + 16);
   ctx.textAlign = "left";
 }
 
@@ -666,7 +961,9 @@ function drawReplayFrame() {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height;
-  const frame = replay.data?.frames?.[replay.frame];
+  const lm = state?.live_match;
+  const liveActive = lm && (lm.status === "running" || lm.status === "paused") && lm.current_frame;
+  const frame = liveActive ? lm.current_frame : replay.data?.frames?.[replay.frame];
   const mapping = replayMapping(W, H, {
     follow: replay.follow && !!frame,
     centre: frame ? [frame.ball[0], frame.ball[1]] : [0, 0],
@@ -674,55 +971,138 @@ function drawReplayFrame() {
   });
   drawReplayField(ctx, mapping);
   if (!frame) {
-    drawReplayEmpty(ctx, mapping, "Run an evaluation in Models, then load its trajectory here.");
+    drawReplayEmpty(ctx, mapping, "Drücke [G] oder klicke oben auf 'Rocket League / Live-Match Starten', um sofort live zu spielen!");
     return;
   }
   const { px, scale } = mapping;
+
+  // Draw ball motion trail from recent frames
+  const historyFrames = liveActive
+    ? (lm.recent_frames || [])
+    : (replay.data?.frames ? replay.data.frames.slice(Math.max(0, replay.frame - 18), replay.frame + 1) : []);
+  if (historyFrames.length > 1) {
+    for (let i = 1; i < historyFrames.length; i++) {
+      const prevB = historyFrames[i - 1].ball;
+      const currB = historyFrames[i].ball;
+      const [x0, y0] = px(prevB[0], prevB[1], prevB[2] || 0);
+      const [x1, y1] = px(currB[0], currB[1], currB[2] || 0);
+      const alpha = (i / historyFrames.length) * 0.45;
+      ctx.strokeStyle = `rgba(56, 189, 248, ${alpha})`;
+      ctx.lineWidth = Math.max(1.5, (i / historyFrames.length) * 4);
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+  }
+
+  // Draw cars with ground shadow, team color, nose, boost flame, and boost bar
   for (const car of frame.cars) {
-    const [x, y] = px(car.position[1], car.position[0]);
+    const carZ = Number(car.position[2]) || 17;
+    const [gx, gy] = px(car.position[0], car.position[1], 0);
+    const [x, y] = px(car.position[0], car.position[1], carZ);
+    const isBlue = car.team === "blue";
+    const teamColor = isBlue ? "#38bdf8" : "#fb923c";
+
+    // Airborne shadow and height tether
+    if (carZ > 35 && arenaView3D) {
+      ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+      ctx.beginPath(); ctx.ellipse(gx, gy, 10, 5, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(x, y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     ctx.save();
     ctx.translate(x, y);
-    // RLGym yaw 0 points along world +x; canvas +y is down, so this rotation
-    // maps +x to up and +y to right.
     ctx.rotate(Number(car.yaw) || 0);
-    ctx.lineWidth = 2;
-    if (car.team === "blue") {
-      ctx.fillStyle = "#fff";
-      ctx.fillRect(-3, -11, 6, 22);
-    } else {
-      ctx.strokeStyle = "#fff";
-      ctx.strokeRect(-3, -11, 6, 22);
+
+    // Boost flame behind car
+    const vec = isBlue ? frame.candidate_action_vector : frame.opponent_action_vector;
+    const boosting = car.is_boosting || (vec && vec[6] > 0.5 && (car.boost ?? 33) > 0);
+    if (boosting) {
+      ctx.fillStyle = "#facc15";
+      ctx.beginPath();
+      ctx.moveTo(-3.5, 11);
+      ctx.lineTo(0, 21 + Math.random() * 5);
+      ctx.lineTo(3.5, 11);
+      ctx.closePath();
+      ctx.fill();
     }
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(-1.5, -13, 3, 3);  // nose marker
+
+    // Supersonic ring
+    if (car.is_supersonic) {
+      ctx.strokeStyle = "rgba(250, 204, 21, 0.75)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(0, 0, 15, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    // Car body
+    ctx.fillStyle = teamColor;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.6;
+    ctx.fillRect(-4.5, -11, 9, 22);
+    ctx.strokeRect(-4.5, -11, 9, 22);
+    // Windshield + nose marker
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(-3, -6, 6, 6);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(-2, -13.5, 4, 3);
     ctx.restore();
+
+    // Boost meter bar above car
+    const boostPct = Math.max(0, Math.min(100, Number(car.boost ?? 0))) / 100;
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
+    ctx.fillRect(x - 14, y - 20, 28, 4);
+    ctx.fillStyle = boostPct > 0.5 ? "#facc15" : boostPct > 0.15 ? "#fb923c" : "#ef4444";
+    ctx.fillRect(x - 14, y - 20, 28 * boostPct, 4);
   }
-  const [bx, by] = px(frame.ball[1], frame.ball[0]);
-  const radius = Math.max(5, FIELD.ballRadius * scale);
-  if ((frame.ball[2] || 0) > 150) {
-    ctx.strokeStyle = "#b8b8b8";
+
+  // Draw ball ground shadow + 3D elevated ball
+  const ballZ = Number(frame.ball[2]) || 93.15;
+  const [bgx, bgy] = px(frame.ball[0], frame.ball[1], 0);
+  const [bx, by] = px(frame.ball[0], frame.ball[1], ballZ);
+  const radius = Math.max(5.5, FIELD.ballRadius * scale * (1 + Math.min(ballZ, 1200) / 3500));
+
+  if (ballZ > 110) {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+    ctx.beginPath(); ctx.ellipse(bgx, bgy, Math.max(4, radius * 0.85), Math.max(3, radius * 0.5), 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.32)";
     ctx.setLineDash([2, 3]);
-    ctx.beginPath(); ctx.arc(bx, by, radius + 5, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(bgx, bgy); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.beginPath(); ctx.arc(bx, by, radius + 4, 0, Math.PI * 2); ctx.stroke();
     ctx.setLineDash([]);
   }
+
   ctx.beginPath();
   ctx.arc(bx, by, radius, 0, Math.PI * 2);
-  ctx.fillStyle = "#fff";
+  ctx.fillStyle = "#ffffff";
   ctx.fill();
-  ctx.strokeStyle = "#000";
+  ctx.strokeStyle = "#0f172a";
   ctx.lineWidth = 2;
   ctx.stroke();
-  // Score/time overlay, independent of the HTML readout.
-  ctx.fillStyle = "#fff";
+
+  // Scoreboard & Telemetry HUD overlay
+  const score0 = liveActive ? (lm.score?.[0] ?? frame.score?.[0] ?? 0) : frame.score[0];
+  const score1 = liveActive ? (lm.score?.[1] ?? frame.score?.[1] ?? 0) : frame.score[1];
+  const ballSpeedKmh = frame.ball_velocity ? (Math.hypot(...frame.ball_velocity) * 0.036).toFixed(0) : "0";
+  ctx.fillStyle = "rgba(5, 9, 18, 0.78)";
+  ctx.fillRect(12, 10, 310, 38);
+  ctx.fillStyle = "#ffffff";
   ctx.font = "600 12px Inter, sans-serif";
-  ctx.fillText(`BLUE ${frame.score[0]}  –  ${frame.score[1]} ORANGE`, 16, 22);
-  ctx.fillStyle = "#b8b8b8";
+  ctx.fillText(`BLUE ${score0}  –  ${score1} ORANGE   ·   Ball ${ballSpeedKmh} km/h (z=${ballZ.toFixed(0)})`, 18, 25);
+  ctx.fillStyle = "#94a3b8";
   ctx.font = "11px Inter, sans-serif";
-  ctx.fillText(`t=${frame.t.toFixed(2)}s · frame ${replay.frame + 1}/${replay.data.frames.length}`, 16, 38);
+  ctx.fillText(
+    liveActive
+      ? `LIVE Spiel #${lm.game_number || 1} · t=${(frame.t || 0).toFixed(1)}s · ${lm.paused ? "PAUSIERT [Space]" : "LÄUFT [Space=Pause, R=Kickoff]"}`
+      : `t=${frame.t.toFixed(2)}s · frame ${replay.frame + 1}/${replay.data.frames.length}`,
+    18,
+    41,
+  );
+
   const readout = document.getElementById("replay-readout");
-  if (readout) readout.textContent = replayReadout();
+  if (readout) readout.textContent = liveActive ? liveMatchReadout(lm) : replayReadout();
   const scrub = document.getElementById("replay-scrub");
-  if (scrub && document.activeElement !== scrub) scrub.value = replay.frame;
+  if (!liveActive && scrub && document.activeElement !== scrub) scrub.value = replay.frame;
 }
 
 window.__RLAI_GEOMETRY__ = {
@@ -788,16 +1168,19 @@ function startReplayTimer() {
 
 function benchmark() {
   const running = state.benchmark?.running;
-  const check = (list, value) => (list.includes(value) ? "checked" : "");
   return (
     heading(
       "Benchmark",
-      "Real bounded training runs that find a fast, stable configuration for this hardware.",
+      "Vollautomatischer High-Scale Stufentest (~10 Min · je 20s pro Stufe). Das beste Ergebnis wird automatisch für das Training übernommen.",
       running
-        ? button("stop-benchmark", "Stop benchmark", "stop", "secondary", !writable())
+        ? button("stop-benchmark", "Cancel benchmark", "stop", "danger", !writable())
         : button("start-benchmark", "Start benchmark", "play", "primary", !writable() || !idle()),
     ) +
-    `<section class="panel"><div class="panel-header"><div><h2>Benchmark configuration</h2><p>Each candidate runs for a fixed wall-clock window; nothing is simulated</p></div>${icon("cpu")}</div><div class="panel-body"><div class="form-grid"><fieldset class="field"><legend>Learner devices</legend><label class="approval-check"><input type="checkbox" data-benchmark-list="devices" value="cpu" ${check(benchmarkForm.devices, "cpu")}> CPU simulation + CPU PPO</label><label class="approval-check"><input type="checkbox" data-benchmark-list="devices" value="cuda:0" ${check(benchmarkForm.devices, "cuda:0")}> CPU simulation + CUDA PPO</label></fieldset><fieldset class="field"><legend>Parallel environments</legend>${[1, 2, 4, 8].map((value) => `<label class="approval-check"><input type="checkbox" data-benchmark-list="n_proc_values" value="${value}" ${check(benchmarkForm.n_proc_values, value)}> ${value} env process${value > 1 ? "es" : ""}</label>`).join("")}</fieldset><label class="field">Batch / iteration agent steps<input type="number" data-benchmark="batch_size" value="${benchmarkForm.batch_size}" min="128" step="128"><small>Also the collection size, as in the training adapter.</small></label><label class="field">Measurement window (seconds)<input type="number" data-benchmark="measurement_seconds" value="${benchmarkForm.measurement_seconds}" min="5" max="600"><small>Excludes startup and warm-up. 20 s is the default.</small></label><label class="field">Warm-up iterations<input type="number" data-benchmark="warmup_iterations" value="${benchmarkForm.warmup_iterations}" min="0" max="10"><small>Excluded from all statistics.</small></label><label class="field">Max measured iterations<input type="number" data-benchmark="measure_iterations" value="${benchmarkForm.measure_iterations}" min="1" max="1900"><small>Best-effort ceiling: the stop is acknowledged at the next update boundary, so a few extra updates can be measured. Clamped to the per-run step cap at large batches.</small></label><label class="field">Minimum measured iterations<input type="number" data-benchmark="min_iterations" value="${benchmarkForm.min_iterations}" min="1" max="20"><small>Slow CPU safety: keep measuring until this many exist.</small></label><label class="field">Repeats per candidate<input type="number" data-benchmark="repeats" value="${benchmarkForm.repeats}" min="1" max="5"><small>3 repeats are required for automatic adoption.</small></label><label class="field">CPU limit %<input type="number" data-benchmark="max_cpu_percent" value="${benchmarkForm.max_cpu_percent}" min="1" max="100"></label><label class="field">Memory limit %<input type="number" data-benchmark="max_memory_percent" value="${benchmarkForm.max_memory_percent}" min="1" max="100"></label><label class="field">VRAM limit %<input type="number" data-benchmark="max_gpu_memory_percent" value="${benchmarkForm.max_gpu_memory_percent}" min="1" max="100"><small>Requires nvidia-smi telemetry.</small></label><label class="field">Hard timeout (seconds)<input type="number" data-benchmark="timeout_seconds" value="${benchmarkForm.timeout_seconds}" min="30" max="3600"><small>Stops a stuck candidate, not the normal window.</small></label></div><label class="approval-check"><input type="checkbox" data-benchmark-flag="auto_default" ${benchmarkForm.auto_default ? "checked" : ""}> Adopt the winner's device and environment-process count automatically</label><p class="subtle">Automatic adoption is limited to execution fields (device and n_proc). Batch size, network, reward, seed and every strategy field stay at the approved plan. A previous plan is stored for one-click revert. Each measurement run is disposable and does not appear in Training history or checkpoint inventory.</p></div></section><div id="benchmark-live">${benchmarkLive()}</div><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Stability before speed</h2><p>How a recommendation is earned</p></div>${icon("shield")}</div><div class="panel-body"><p class="subtle">A candidate must complete every repeat, keep throughput variation (CV) at or below 0.25, and stay within the resource limits. A CUDA candidate without GPU telemetry is excluded. Automatic adoption needs at least 3 repeats and CV at or below 0.10. Maximum utilization alone never wins.</p></div></section><section class="panel"><div class="panel-header"><div><h2>Throughput ≠ learning</h2><p>Kept deliberately separate</p></div>${icon("info")}</div><div class="panel-body"><p class="subtle">Simulation steps/s, PPO steps/s and episodes/min are measured independently. Whether a configuration actually plays better is decided only by checkpoint evaluation in Models.</p></div></section></div>`
+    `<section class="panel"><div class="panel-header"><div><h2>Automatic High-Scale Benchmark (30 Stufen × 20 Sekunden)</h2><p>Keine manuellen Einstellungen nötig — testet automatisch von klein bis extrem hoch und übernimmt den Sieger sofort</p></div>${icon("cpu")}</div><div class="panel-body"><div class="stat-grid">${stat("Environments (n_proc)", "1 → 32", "Envs", "Stufen: 1, 2, 4, 6, 8, 12, 16, 24, 32", "cpu")}${stat("Batch & Iteration", "512 → 16.384", "Steps", "Aufsteigende PPO-Batch-Größen", "bolt")}${stat("Episoden-Längen", "15s → 90s", "Timeout", "Kurze bis lange Match-Episoden", "training")}${stat("Messfenster", "20 Sek.", "je Stufe", "30 Stufen = ca. 10 Min. Gesamtlaufzeit", "clock")}</div><div class="config-actions" style="margin-top:16px">${
+      running
+        ? button("stop-benchmark", "Cancel benchmark", "stop", "danger", !writable())
+        : button("start-benchmark", "Start benchmark", "play", "primary", !writable() || !idle())
+    }<span class="subtle" style="margin-left:12px">Aktuell im Training aktiv: <strong>${esc(state.plan.device)} · ${state.plan.n_proc} Envs · Batch ${number(state.plan.batch_size)} · Episode ${state.plan.episode_timeout_seconds}s</strong></span></div></div></section><div id="benchmark-live">${benchmarkLive()}</div>`
   );
 }
 function benchmarkChart(results) {
@@ -807,43 +1190,45 @@ function benchmarkChart(results) {
   const plotW = width - left - right, plotH = height - top - bottom;
   const values = completed.map((item) => item.aggregate.agent_steps_per_second);
   const maximum = Math.max(...values.map((item) => item.max || item.median), 1);
-  const barW = Math.max(18, plotW / completed.length - 18);
+  const barW = Math.max(12, plotW / completed.length - 10);
   const scale = (value) => top + plotH - (value / maximum) * plotH;
   const bars = completed.map((item, index) => {
     const rate = item.aggregate.agent_steps_per_second;
     const x = left + index * (plotW / completed.length) + (plotW / completed.length - barW) / 2;
     const y = scale(rate.median);
-    const label = `${item.candidate.device === "cuda:0" ? "CUDA" : "CPU"} ${item.candidate.n_proc}`;
-    return `<g><line x1="${x + barW / 2}" y1="${scale(rate.min)}" x2="${x + barW / 2}" y2="${scale(rate.max)}" stroke="#b8b8b8" stroke-width="1.5"/><line x1="${x + barW / 2 - 4}" y1="${scale(rate.max)}" x2="${x + barW / 2 + 4}" y2="${scale(rate.max)}" stroke="#b8b8b8"/><line x1="${x + barW / 2 - 4}" y1="${scale(rate.min)}" x2="${x + barW / 2 + 4}" y2="${scale(rate.min)}" stroke="#b8b8b8"/><rect x="${x}" y="${y}" width="${barW}" height="${top + plotH - y}" fill="#fff" opacity=".9"/><text x="${x + barW / 2}" y="${height - bottom + 16}" fill="#b8b8b8" font-size="11" text-anchor="middle">${esc(label)}</text><text x="${x + barW / 2}" y="${y - 6}" fill="#fff" font-size="11" text-anchor="middle">${number(rate.median, 0)}</text></g>`;
+    const label = `${item.candidate.n_proc}e/${item.candidate.batch_size || ""}`;
+    return `<g><line x1="${x + barW / 2}" y1="${scale(rate.min)}" x2="${x + barW / 2}" y2="${scale(rate.max)}" stroke="#b8b8b8" stroke-width="1.5"/><rect x="${x}" y="${y}" width="${barW}" height="${top + plotH - y}" fill="#fff" opacity=".9"/><text x="${x + barW / 2}" y="${height - bottom + 16}" fill="#b8b8b8" font-size="10" text-anchor="middle">${esc(label)}</text><text x="${x + barW / 2}" y="${y - 6}" fill="#fff" font-size="10" text-anchor="middle">${number(rate.median, 0)}</text></g>`;
   }).join("");
-  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Measured throughput</h2><p>Median agent steps/s with min–max whiskers · longer is better</p></div>${icon("chart")}</div><div class="chart"><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Benchmark throughput by candidate"><line x1="${left}" y1="${top + plotH}" x2="${width - right}" y2="${top + plotH}" stroke="#2a2a2a"/><line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotH}" stroke="#2a2a2a"/>${bars}</svg></div></section>`;
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Measured throughput</h2><p>Median agent steps/s pro getesteter Stufe · höher ist schneller</p></div>${icon("chart")}</div><div class="chart"><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Benchmark throughput by candidate"><line x1="${left}" y1="${top + plotH}" x2="${width - right}" y2="${top + plotH}" stroke="#2a2a2a"/><line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotH}" stroke="#2a2a2a"/>${bars}</svg></div></section>`;
 }
 function benchmarkHistory() {
   const sessions = state.benchmark_sessions || [];
   if (!sessions.length) return "";
-  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Session history</h2><p>Persisted measurements for this workspace</p></div><span class="pill muted-pill">${sessions.length} SESSIONS</span></div><div class="table-wrap"><table><thead><tr><th>SESSION</th><th>CREATED</th><th>STATUS</th><th>WINNER</th><th>WINDOW</th></tr></thead><tbody>${sessions.map((item) => `<tr><td><strong>${esc(item.id.slice(0, 12))}</strong><small>${item.spec?.devices?.join(" + ") || ""}</small></td><td>${date(item.created)}</td><td>${esc(item.status)}</td><td>${item.recommendation?.candidate ? `${esc(item.recommendation.candidate.device)} · ${item.recommendation.candidate.n_proc} env` : "—"}</td><td>${number(item.spec?.measurement_seconds || 0, 0)} s × ${number(item.spec?.repeats || 0, 0)} repeats</td></tr>`).join("")}</tbody></table></div></section>`;
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Session history</h2><p>Persisted measurements for this workspace</p></div><span class="pill muted-pill">${sessions.length} SESSIONS</span></div><div class="table-wrap"><table><thead><tr><th>SESSION</th><th>CREATED</th><th>STATUS</th><th>WINNER (AUTO-ADOPTED)</th><th>WINDOW</th></tr></thead><tbody>${sessions.map((item) => `<tr><td><strong>${esc(item.id.slice(0, 12))}</strong><small>${item.spec?.devices?.join(" + ") || ""}</small></td><td>${date(item.created)}</td><td>${esc(item.status)}</td><td>${item.recommendation?.candidate ? `${esc(item.recommendation.candidate.device)} · ${item.recommendation.candidate.n_proc} env${item.recommendation.candidate.batch_size ? ` · batch ${item.recommendation.candidate.batch_size}` : ""}` : "—"}</td><td>${number(item.spec?.measurement_seconds || 0, 0)} s</td></tr>`).join("")}</tbody></table></div></section>`;
 }
 function benchmarkLive() {
   const bench = state.benchmark || { session: null, results: [] };
   if (!bench.session)
-    return `<section class="panel" style="margin-top:20px"><div class="panel-body">${empty("chart", "No benchmark has been run yet.", "Start a benchmark to measure genuine candidate configurations on this host. Each candidate runs for about 20 seconds; results persist in session history.")}</div></section>${benchmarkHistory()}`;
+    return `<section class="panel" style="margin-top:20px"><div class="panel-body">${empty("chart", "No benchmark has been run yet.", "Klicke auf Start benchmark, um alle 30 Stufen (je 20s) automatisch durchzutesten und das beste Setup direkt fürs Training zu übernehmen.")}</div></section>${benchmarkHistory()}`;
   const session = bench.session;
-  const totalCandidates = (session.spec.devices?.length || 1) * (session.spec.n_proc_values?.length || 1);
+  const totalCandidates = session.spec.auto_sweep ? 30 : (session.spec.devices?.length || 1) * (session.spec.n_proc_values?.length || 1);
   const progress = Math.min(100, Math.round((bench.results.length / Math.max(totalCandidates, 1)) * 100));
   const rows = bench.results
-    .map((item) => {
+    .map((item, idx) => {
       const a = item.aggregate;
       const r = item.resources || {};
-      return `<tr><td>${esc(item.candidate.device)} · ${item.candidate.n_proc} env</td><td>${esc(item.status)}</td><td>${a ? number(a.agent_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.simulation_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.ppo_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.episodes_per_minute, 1) : "—"}</td><td>${a ? number(a.agent_steps_per_second.cv, 2) : "—"}</td><td>${r.cpu_percent_peak != null ? `${number(r.cpu_percent_peak, 0)}%` : "—"}</td><td>${r.gpu_percent_peak != null ? `${number(r.gpu_percent_peak, 0)}%` : "—"}</td><td>${r.gpu_memory_percent_peak != null ? `${number(r.gpu_memory_percent_peak, 0)}%` : "—"}</td><td>${item.error ? esc(item.error) : ""}</td></tr>`;
+      const cand = item.candidate || {};
+      return `<tr><td>#${cand.stage || idx + 1} · ${esc(cand.device)} · <strong>${cand.n_proc} env</strong>${cand.batch_size ? ` · batch ${number(cand.batch_size)}` : ""}${cand.episode_timeout_seconds ? ` · ep ${cand.episode_timeout_seconds}s` : ""}</td><td>${esc(item.status)}</td><td><strong>${a ? number(a.agent_steps_per_second.median, 1) : "—"}</strong></td><td>${a ? number(a.simulation_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.ppo_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.episodes_per_minute, 1) : "—"}</td><td>${a ? number(a.agent_steps_per_second.cv, 2) : "—"}</td><td>${r.cpu_percent_peak != null ? `${number(r.cpu_percent_peak, 0)}%` : "—"}</td><td>${r.gpu_percent_peak != null ? `${number(r.gpu_percent_peak, 0)}%` : "—"}</td><td>${r.gpu_memory_percent_peak != null ? `${number(r.gpu_memory_percent_peak, 0)}%` : "—"}</td><td>${item.error ? esc(item.error) : ""}</td></tr>`;
     })
     .join("");
   const rec = session.recommendation;
   const host = rec?.host;
   const adoption = rec?.adoption;
-  return `${benchmarkChart(bench.results)}<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark results</h2><p>Session ${esc(session.id.slice(0, 12))} · ${esc(session.status)} · ${date(session.created)} · ${bench.results.length}/${totalCandidates} candidates (${progress}%) · ${number(session.spec.measurement_seconds || 0, 0)} s window</p></div>${statusPill(session.status === "running" ? "running" : "idle")}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CANDIDATE</th><th>STATUS</th><th>AGENT/S</th><th>SIM/S</th><th>PPO/S</th><th>EP/MIN</th><th>CV</th><th>CPU</th><th>GPU</th><th>VRAM</th><th>ERROR</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">Measurements are running. Each candidate executes a real bounded training run; results appear as candidates complete.</p></div>'}${rec ? `<div class="panel-body"><div class="recommendation"><strong>Recommendation</strong><p>${esc(rec.explanation)}</p>${adoption?.status === "adopted" ? `<p class="subtle">Default updated: ${esc(Object.entries(adoption.changes || {}).map(([key, value]) => `${key} ${value.before} → ${value.after}`).join(" · "))} (plan revision ${adoption.plan_revision}).</p>` : ""}${rec.auto_default_blockers?.length ? `<p class="subtle">Not auto-adopted: ${esc(rec.auto_default_blockers.join("; "))}</p>` : ""}${host ? `<p class="subtle">Host: ${esc(host.cpu_model)} · ${number(host.cpu_count)} threads · ${esc(host.gpu_name || "GPU unverified")}${host.gpu_memory_total_mib ? ` · ${number(host.gpu_memory_total_mib)} MiB` : ""}</p>` : ""}${rec.candidate ? button("apply-benchmark-recommendation", "Review as configuration proposal", "arrow", "primary", !writable() || !idle()) : ""}${state.benchmark_adoption?.previous_plan ? button("revert-benchmark-adoption", "Revert automatic default", "refresh", "ghost", !writable() || !idle()) : ""}${(rec.excluded || []).map((item) => `<p class="subtle">Excluded ${esc(item.candidate.device)} · ${item.candidate.n_proc} env: ${esc(item.reasons.join("; "))}</p>`).join("")}</div></div>` : ""}${session.error ? `<div class="panel-body"><p class="bad-text">${esc(session.error)}</p></div>` : ""}</section>${benchmarkHistory()}`;
+  return `${benchmarkChart(bench.results)}<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark results</h2><p>Session ${esc(session.id.slice(0, 12))} · ${esc(session.status)} · ${date(session.created)} · ${bench.results.length}/${totalCandidates} Stufen (${progress}%) · ${number(session.spec.measurement_seconds || 20, 0)} s je Stufe</p></div>${statusPill(session.status === "running" ? "running" : "idle")}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>STAGE / CANDIDATE</th><th>STATUS</th><th>AGENT/S</th><th>SIM/S</th><th>PPO/S</th><th>EP/MIN</th><th>CV</th><th>CPU</th><th>GPU</th><th>VRAM</th><th>ERROR</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">Measurements are running. Each candidate executes a real 20-second training run; results appear as stages complete.</p></div>'}${rec ? `<div class="panel-body"><div class="recommendation"><strong>Automatisches Gewinner-Setup</strong><p>${esc(rec.explanation)}</p>${adoption?.status === "adopted" ? `<p class="subtle">Automatisch fürs Training übernommen: ${esc(Object.entries(adoption.changes || {}).map(([key, value]) => `${key} ${value.before} → ${value.after}`).join(" · "))} (Revision ${adoption.plan_revision}).</p>` : ""}${host ? `<p class="subtle">Host: ${esc(host.cpu_model)} · ${number(host.cpu_count)} threads · ${esc(host.gpu_name || "CPU mode")}</p>` : ""}</div></div>` : ""}${session.error ? `<div class="panel-body"><p class="bad-text">${esc(session.error)}</p></div>` : ""}</section>${benchmarkHistory()}`;
 }
 const views = {
   dashboard,
+  roadmap,
   training,
   monitoring,
   models,
@@ -857,14 +1242,9 @@ function render(force = false) {
   if (
     route === "training" &&
     $("#content").dataset.page === "training" &&
-    planEditing &&
+    trainingInputActive &&
     !force
   ) {
-    // Never rebuild a plan editor that the user is typing into once a second.
-    if ($("#plan-revision")) $("#plan-revision").textContent = state.plan_revision;
-    if ($("#apply-config")) $("#apply-config").disabled = !writable() || !idle();
-    const validate = $('[data-action="validate-config"]');
-    if (validate) validate.disabled = !writable();
     return;
   }
   if (route === "benchmark" && $("#content").dataset.page === "benchmark" && !force) {
@@ -960,66 +1340,28 @@ async function review(kind, payload = {}) {
   if (!authorized()) {
     toast(
       readOnly
-        ? "This diagnostic preview is read-only. Open the native desktop to control training."
+        ? "This diagnostic preview is read-only. Connect with the workspace capability URL to control training."
         : "Connect before changing the workspace.",
       true,
     );
     return;
   }
-  if (pendingProposal) return;
   const proposal = await api("proposals", { kind, payload });
-  // An unchanged plan was already approved and the user explicitly pressed
-  // "New training run". Do not ask again through a modal with an empty diff.
-  if (kind === "start_run" && !Object.keys(proposal.payload.changes || {}).length) {
-    const result = await api(`proposals/${proposal.id}/confirm`, {
-      confirmed: true,
-      expected_digest: proposal.digest,
-    });
+  const result = await api(`proposals/${proposal.id}/confirm`, {
+    confirmed: true,
+    expected_digest: proposal.digest,
+  });
+  if (result.run_id && ["start_run", "recover_run"].includes(proposal.kind)) {
     selectedRun = result.run_id;
     location.hash = "training";
-    toast("Run started with the approved plan.");
-    await refresh();
-    return result;
   }
-  pendingProposal = proposal;
-  const titles = {
-    start_run: "Start this training run?",
-    apply_config: "Apply this training plan?",
-    recover_run: "Recover from this checkpoint?",
-    designate_checkpoint: "Change the designated best?",
-    delete_checkpoint: "Permanently delete this checkpoint?",
-  };
-  $("#confirmation-icon").innerHTML = icon(
-    {
-      delete_checkpoint: "delete",
-      recover_run: "refresh",
-      designate_checkpoint: "trophy",
-      apply_config: "configuration",
-      start_run: "play",
-    }[kind],
+  toast(
+    proposal.kind === "delete_checkpoint"
+      ? "Checkpoint deleted."
+      : "Action executed immediately.",
   );
-  $("#confirmation-title").textContent = titles[kind];
-  $("#proposal-rationale").textContent = proposal.rationale;
-  $("#proposal-impact").textContent = proposal.impact;
-  const config = proposal.payload.config;
-  $("#proposal-target").textContent = config
-    ? `${config.name}\nDevice: ${config.device} · Seed: ${config.seed} · Envs: ${config.n_proc}\nSteps: ${number(config.total_timesteps)} · Batch: ${number(config.batch_size)} · Network: ${config.hidden_sizes.join(" × ")}`
-    : `Run: ${proposal.payload.run_id}\nCheckpoint: ${proposal.payload.checkpoint_id}`;
-
-  $("#proposal-diff").innerHTML =
-    proposal.payload.changes && Object.keys(proposal.payload.changes).length
-      ? `<table class="diff-table"><thead><tr><th>FIELD</th><th>APPROVED</th><th>PROPOSED</th></tr></thead><tbody>${Object.entries(
-          proposal.payload.changes,
-        )
-          .map(
-            ([key, value]) =>
-              `<tr><td>${esc(key)}</td><td>${esc(JSON.stringify(value.before))}</td><td>${esc(JSON.stringify(value.after))}</td></tr>`,
-          )
-          .join("")}</tbody></table>`
-      : "";
-  $("#approval-checkbox").checked = false;
-  $("#confirm-action").disabled = true;
-  $("#confirmation-dialog").showModal();
+  await refresh();
+  return result;
 }
 function draft() {
   try {
@@ -1147,7 +1489,103 @@ async function action(action, element) {
     await refresh();
     return;
   }
-  if (action === "start") return review("start_run");
+  if (action === "select-preset") {
+    selectedPreset = element.dataset.preset;
+    const defaultSteps = Number(element.dataset.steps);
+    const currentStep = state.latest_checkpoint?.step || 0;
+    if (Number.isFinite(defaultSteps) && defaultSteps > 0) {
+      trainingMaxSteps = defaultSteps > currentStep ? defaultSteps : currentStep + defaultSteps;
+    }
+    trainingInputActive = false;
+    render(true);
+    return;
+  }
+  if (action === "set-max-steps") {
+    const val = Number(element.dataset.steps);
+    const currentStep = state.latest_checkpoint?.step || 0;
+    if (Number.isFinite(val) && val > 0) {
+      trainingMaxSteps = val > currentStep ? val : currentStep + val;
+    }
+    trainingInputActive = false;
+    render(true);
+    return;
+  }
+  if (action === "start" || action === "start-direct-training") {
+    if (!authorized()) {
+      throw new Error("Connect to the authenticated backend before starting training.");
+    }
+    const maxInput = document.getElementById("train-max-steps");
+    const requestedSteps = maxInput ? Number(maxInput.value) : trainingMaxSteps;
+    trainingInputActive = false;
+    const result = await api("runs/start-direct", {
+      preset_id: selectedPreset,
+      max_steps: Number.isFinite(requestedSteps) && requestedSteps > 0 ? requestedSteps : trainingMaxSteps,
+      continue_from_latest: true,
+    });
+    selectedRun = result.run_id;
+    location.hash = "training";
+    toast(
+      result.resumed_from
+        ? `Training gestartet — führt nahtlos ab Checkpoint (${number(result.resumed_from.step)} Steps) fort.`
+        : "Training sofort gestartet.",
+    );
+    await refresh();
+    return;
+  }
+  if (action === "start-auto-roadmap") {
+    if (!authorized()) {
+      throw new Error("Connect to the authenticated backend before starting autopilot training.");
+    }
+    const result = await api("runs/start-direct", {
+      preset_id: "all_in_one_complete",
+      max_steps: 500000000,
+      continue_from_latest: true,
+    });
+    selectedRun = result.run_id;
+    location.hash = "training";
+    toast(
+      result.resumed_from
+        ? `500M-Autopilot gestartet — trainiert für ALLES mit 100% Hardware ab ${number(result.resumed_from.step)} Steps weiter!`
+        : "500M-Autopilot gestartet — trainiert für ALLES gleichzeitig mit 100% Hardware!",
+    );
+    await refresh();
+    return;
+  }
+  if (action === "start-milestone") {
+    if (!authorized()) {
+      throw new Error("Connect to the authenticated backend before starting milestone training.");
+    }
+    const milestoneId = element.dataset.milestoneId;
+    const result = await api("runs/start-direct", {
+      milestone_id: milestoneId,
+      continue_from_latest: true,
+    });
+    selectedRun = result.run_id;
+    location.hash = "training";
+    toast(
+      result.resumed_from
+        ? `Meilenstein-Training gestartet — trainiert ab ${number(result.resumed_from.step)} Steps weiter.`
+        : "Meilenstein-Training gestartet.",
+    );
+    await refresh();
+    return;
+  }
+  if (action === "export-rlbot") {
+    const runId = element.dataset.runId;
+    const checkpointId = element.dataset.checkpointId;
+    const bundle = await api(`checkpoints/${runId}/${checkpointId}/rlbot`);
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob),
+      link = document.createElement("a");
+    link.href = url;
+    link.download = `rlbot-bundle-${checkpointId}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("RLBot bundle exported (includes bot.cfg, agent.py, and checkpoint path).");
+    return;
+  }
   if (action === "recover")
     return review("recover_run", {
       run_id: element.dataset.runId,
@@ -1169,32 +1607,16 @@ async function action(action, element) {
       checkpoint_id: element.dataset.checkpointId,
     });
   if (action === "start-benchmark") {
-    const session = await api("benchmarks", benchmarkForm);
-    toast(`Benchmark started (${session.id.slice(0, 12)}). Real bounded runs are measuring candidates.`);
+    const session = await api("benchmarks/auto", {});
+    toast(`Auto-Benchmark gestartet (${session.id.slice(0, 12)}) · 30 Stufen × 20s.`);
     await refresh();
     return;
   }
   if (action === "stop-benchmark") {
     await api("benchmarks/stop", {});
-    toast("Benchmark stop requested. The current measurement run is stopping safely.");
+    toast("Benchmark stop requested. The current measurement stage is stopping safely.");
     await refresh();
     return;
-  }
-  if (action === "revert-benchmark-adoption") {
-    const previous = state.benchmark_adoption?.previous_plan;
-    if (!previous) throw new Error("No benchmark adoption record is available.");
-    return review("apply_config", { config: previous });
-  }
-  if (action === "apply-benchmark-recommendation") {
-    const candidate = state.benchmark?.session?.recommendation?.candidate;
-    if (!candidate) throw new Error("No stable benchmark recommendation is available.");
-    const config = structuredClone(state.plan);
-    config.device = candidate.device;
-    config.n_proc = candidate.n_proc;
-    // Only execution fields are evidence from a throughput benchmark. The
-    // session's batch size was not compared against alternatives, so it must
-    // not overwrite the approved learning configuration.
-    return review("apply_config", { config });
   }
   if (action === "start-evaluation") {
     const selected = $("#eval-checkpoint")?.value || "";
@@ -1301,6 +1723,103 @@ async function action(action, element) {
   }
   if (action === "apply-config")
     return review("apply_config", { config: draft() });
+  if (action === "toggle-arena-view") {
+    arenaView3D = !arenaView3D;
+    toast(`Arena-Ansicht gewechselt: ${arenaView3D ? "3D Perspektive" : "2D Top-Down"} [V]`);
+    drawReplayFrame();
+    render(true);
+    return;
+  }
+  if (action === "start-live-match") {
+    const mode = $("#live-match-mode")?.value || liveMatchForm.mode;
+    const scenario = $("#live-match-scenario")?.value || liveMatchForm.scenario;
+    const team_size = Number($("#live-match-teams")?.value || liveMatchForm.team_size || 1);
+    const boost_mode = $("#live-match-boost")?.value || liveMatchForm.boost_mode || "standard";
+    const arena_map = $("#live-match-map")?.value || liveMatchForm.arena_map || "DFHStadium";
+    const speed = Number($("#live-match-speed")?.value || liveMatchForm.speed || 1);
+    liveMatchForm = { mode, scenario, team_size, boost_mode, arena_map, speed, launch_client: mode !== "sim_live" };
+    const snap = await api("live-match/start", liveMatchForm);
+    if (state) state.live_match = snap;
+    location.hash = "visualization";
+    toast(snap.client_message || "Live-Match gestartet! Steuere mit [Space] Weiter/Pause, [R] Kickoff, [G] Stop.");
+    await refresh();
+    drawReplayFrame();
+    return;
+  }
+  if (action === "stop-live-match") {
+    const snap = await api("live-match/stop", {});
+    if (state) state.live_match = snap;
+    toast("Live-Match gestoppt [G].");
+    await refresh();
+    render(true);
+    return;
+  }
+  if (action === "live-match-pause") {
+    const snap = await api("live-match/control", { action: "toggle_pause" });
+    if (state) state.live_match = snap;
+    toast(snap.paused ? "Live-Match pausiert [Space]." : "Live-Match läuft weiter [Space].");
+    render(true);
+    return;
+  }
+  if (action === "live-match-reset" || action === "hotkey-reset-kickoff") {
+    const lm = state?.live_match;
+    if (lm && (lm.status === "running" || lm.status === "paused")) {
+      const snap = await api("live-match/control", { action: "reset_kickoff" });
+      if (state) state.live_match = snap;
+      toast("Neuer Kickoff ausgeführt [R]!");
+      drawReplayFrame();
+      return;
+    }
+    if (replay.data) {
+      replay.frame = 0;
+      drawReplayFrame();
+      toast("Replay auf Anfang zurückgesetzt [R].");
+      return;
+    }
+    toast("Starte zuerst ein Live-Match mit [G].");
+    return;
+  }
+  if (action === "live-match-next") {
+    const snap = await api("live-match/control", { action: "next_game" });
+    if (state) state.live_match = snap;
+    toast(`Nächstes Spiel (#${snap.game_number}) gestartet [N]!`);
+    render(true);
+    return;
+  }
+  if (action === "hotkey-toggle-game") {
+    const lm = state?.live_match;
+    if (lm && (lm.status === "running" || lm.status === "paused")) {
+      return action("stop-live-match", element);
+    }
+    return action("start-live-match", element);
+  }
+  if (action === "hotkey-toggle-pause") {
+    const lm = state?.live_match;
+    if (lm && (lm.status === "running" || lm.status === "paused")) {
+      return action("live-match-pause", element);
+    }
+    if (state?.active_run) {
+      const cmd = state.active_run.status === "paused" ? "resume" : "pause";
+      await api(`runs/${state.active_run.id}/control`, { command: cmd });
+      toast(cmd === "pause" ? "Training pausiert [Space]." : "Training fortgesetzt [Space].");
+      await refresh();
+      return;
+    }
+    if (replay.data) {
+      return action("replay-toggle", element);
+    }
+    toast("Kein aktives Live-Match oder Training zum Pausieren.");
+    return;
+  }
+  if (action === "hotkey-toggle-training") {
+    if (state?.active_run) {
+      await api(`runs/${state.active_run.id}/control`, { command: "stop" });
+      toast("Training-Stopp angefordert [T].");
+      await refresh();
+      return;
+    }
+    return action("start-direct-training", element);
+  }
 }
 document.addEventListener("click", async (event) => {
   if (event.target.closest(".advanced-config > summary")) {
@@ -1365,54 +1884,85 @@ document.addEventListener("input", (event) => {
     drawReplayFrame();
     return;
   }
-  if (event.target.dataset.benchmarkFlag) {
-    benchmarkForm[event.target.dataset.benchmarkFlag] = event.target.checked;
+  if (event.target.id === "live-match-mode") {
+    liveMatchForm.mode = event.target.value;
+    liveMatchForm.launch_client = event.target.value !== "sim_live";
     return;
   }
-  if (event.target.dataset.benchmarkList) {
-    const key = event.target.dataset.benchmarkList;
-    const value = key === "n_proc_values" ? Number(event.target.value) : event.target.value;
-    const list = new Set(benchmarkForm[key]);
-    if (event.target.checked) list.add(value); else list.delete(value);
-    benchmarkForm[key] = [...list];
-    return;
-  }
-  if (event.target.dataset.benchmark) {
-    benchmarkForm[event.target.dataset.benchmark] = Number(event.target.value);
-    return;
-  }
-  if (event.target.id === "config-json") {
-    planEditing = true;
-    configRaw = event.target.value;
-    $("#validation-message").hidden = true;
-    try {
-      const parsed = JSON.parse(configRaw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        configDraft = parsed;
-        document.querySelectorAll("[data-config]").forEach((input) => {
-          input.value = parsed[input.dataset.config] ?? "";
-        });
-      }
-    } catch {
-      /* Keep invalid text intact until the user explicitly validates it. */
+  if (event.target.id === "live-match-teams") {
+    liveMatchForm.team_size = Number(event.target.value) === 2 ? 2 : 1;
+    if (state?.live_match?.status === "running" || state?.live_match?.status === "paused") {
+      action("start-live-match", document.body);
     }
     return;
   }
-  const key = event.target.dataset.config;
-  if (key) {
-    planEditing = true;
-    const value =
-      event.target.type === "number"
-        ? Number(event.target.value)
-        : event.target.value;
-    configDraft = { ...configDraft, [key]: value };
-    if (key === "batch_size") {
-      configDraft.timesteps_per_iteration = value;
-      configDraft.buffer_size = value * 3;
+  if (event.target.id === "live-match-boost") {
+    liveMatchForm.boost_mode = event.target.value;
+    if (state?.live_match?.status === "running" || state?.live_match?.status === "paused") {
+      api("live-match/control", { action: "set_boost", boost_mode: liveMatchForm.boost_mode }).then((snap) => {
+        if (state) state.live_match = snap;
+      });
     }
-    configRaw = JSON.stringify(configDraft, null, 2);
-    $("#config-json").value = configRaw;
-    $("#validation-message").hidden = true;
+    return;
+  }
+  if (event.target.id === "live-match-map") {
+    liveMatchForm.arena_map = event.target.value;
+    if (state?.live_match?.status === "running" || state?.live_match?.status === "paused") {
+      api("live-match/control", { action: "set_map", arena_map: liveMatchForm.arena_map }).then((snap) => {
+        if (state) state.live_match = snap;
+        drawReplayFrame();
+      });
+    } else {
+      drawReplayFrame();
+    }
+    return;
+  }
+  if (event.target.id === "live-match-scenario") {
+    liveMatchForm.scenario = event.target.value;
+    if (state?.live_match?.status === "running" || state?.live_match?.status === "paused") {
+      api("live-match/control", { action: "set_scenario", scenario: liveMatchForm.scenario }).then((snap) => {
+        if (state) state.live_match = snap;
+      });
+    }
+    return;
+  }
+  if (event.target.id === "live-match-speed") {
+    liveMatchForm.speed = Number(event.target.value) || 1;
+    if (state?.live_match?.status === "running" || state?.live_match?.status === "paused") {
+      api("live-match/control", { action: "set_speed", speed: liveMatchForm.speed }).then((snap) => {
+        if (state) state.live_match = snap;
+      });
+    }
+    return;
+  }
+  if (event.target.id === "train-max-steps") {
+    trainingInputActive = true;
+    const val = Math.max(128, Number(event.target.value) || 128);
+    trainingMaxSteps = val;
+    const avgSps = Math.max(state?.average_steps_per_second || 1500, 1);
+    const estSeconds = val / avgSps;
+    const minInput = document.getElementById("train-duration-minutes");
+    if (minInput) minInput.value = String(Math.max(1, Math.round(estSeconds / 60)));
+    const readout = document.getElementById("train-duration-readout");
+    if (readout) {
+      readout.innerHTML = `Geschätzte Trainingsdauer: <strong>ca. ${formatDuration(estSeconds)}</strong> bei Ø ${number(avgSps, 0)} steps/s`;
+    }
+    return;
+  }
+  if (event.target.id === "train-duration-minutes") {
+    trainingInputActive = true;
+    const minutes = Math.max(1, Number(event.target.value) || 1);
+    const avgSps = Math.max(state?.average_steps_per_second || 1500, 1);
+    const estSeconds = minutes * 60;
+    const steps = Math.max(128, Math.round(estSeconds * avgSps));
+    trainingMaxSteps = steps;
+    const stepInput = document.getElementById("train-max-steps");
+    if (stepInput) stepInput.value = String(steps);
+    const readout = document.getElementById("train-duration-readout");
+    if (readout) {
+      readout.innerHTML = `Geschätzte Trainingsdauer: <strong>ca. ${formatDuration(estSeconds)}</strong> bei Ø ${number(avgSps, 0)} steps/s`;
+    }
+    return;
   }
 });
 $("#confirmation-dialog").addEventListener("cancel", (event) => {
@@ -1432,6 +1982,7 @@ window.addEventListener("hashchange", () => {
     refresh();
   }
   planEditing = false;
+  trainingInputActive = false;
   render(true);
 });
 {
@@ -1445,6 +1996,75 @@ document.addEventListener("visibilitychange", () => {
     render(true);
   }
 });
+const heldDriveKeys = new Set();
+function sendHumanDriveControls() {
+  if (route !== "visualization" || state?.live_match?.status !== "running") return;
+  const up = heldDriveKeys.has("ArrowUp") || heldDriveKeys.has("KeyW");
+  const down = heldDriveKeys.has("ArrowDown") || heldDriveKeys.has("KeyS");
+  const left = heldDriveKeys.has("ArrowLeft") || heldDriveKeys.has("KeyA");
+  const right = heldDriveKeys.has("ArrowRight") || heldDriveKeys.has("KeyD");
+  const boost = heldDriveKeys.has("ShiftLeft") || heldDriveKeys.has("ShiftRight");
+  const jump = heldDriveKeys.has("KeyJ");
+  const slide = heldDriveKeys.has("KeyK");
+  if (!up && !down && !left && !right && !boost && !jump && !slide) return;
+  const throttle = up ? 1.0 : down ? -1.0 : 1.0;
+  const steer = left ? -1.0 : right ? 1.0 : 0.0;
+  api("live-match/control", {
+    action: "human_input",
+    human_controls: { throttle, steer, boost: boost ? 1.0 : 0.0, jump: jump ? 1.0 : 0.0, handbrake: slide ? 1.0 : 0.0 },
+  }).catch(() => {});
+}
+document.addEventListener("keyup", (event) => {
+  heldDriveKeys.delete(event.code);
+});
+document.addEventListener("keydown", async (event) => {
+  const tag = (event.target?.tagName || "").toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable) return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const key = event.code;
+  if (
+    route === "visualization" &&
+    state?.live_match?.status === "running" &&
+    ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft", "ShiftRight", "KeyJ", "KeyK"].includes(key)
+  ) {
+    event.preventDefault();
+    heldDriveKeys.add(key);
+    sendHumanDriveControls();
+    return;
+  }
+  if (busy) return;
+  let mapped = null;
+  if (key === "KeyG") mapped = "hotkey-toggle-game";
+  else if (key === "Space") mapped = "hotkey-toggle-pause";
+  else if (key === "KeyR") mapped = "hotkey-reset-kickoff";
+  else if (key === "KeyN") mapped = "live-match-next";
+  else if (key === "KeyT") mapped = "hotkey-toggle-training";
+  else if (key === "KeyV") mapped = "toggle-arena-view";
+  else if (key === "KeyB") mapped = state?.benchmark?.running ? "stop-benchmark" : "start-benchmark";
+  if (!mapped) return;
+  event.preventDefault();
+  busy = true;
+  try {
+    await action(mapped, document.body);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    busy = false;
+    render();
+  }
+});
+async function pollLiveArena() {
+  if (!connected || !state?.live_match) return;
+  if (state.live_match.status !== "running") return;
+  try {
+    const snap = await api("live-match");
+    if (state) state.live_match = snap;
+    if (route === "visualization") drawReplayFrame();
+  } catch {
+    /* ignore transient poll error */
+  }
+}
 navigation();
 refresh();
 setInterval(refresh, 1000);
+setInterval(pollLiveArena, 180);

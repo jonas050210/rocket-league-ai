@@ -1,4 +1,4 @@
-"""Same-origin HTTP interface for the native shell and local diagnostic browser."""
+"""Same-origin HTTP interface for the web control room."""
 
 import asyncio
 import secrets
@@ -37,6 +37,48 @@ class ControlRequest(BaseModel):
     command: Literal["pause", "resume", "stop"]
 
 
+class DirectStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    preset: str | None = None
+    preset_id: str | None = None
+    max_steps: int | None = Field(default=None, ge=128, le=1_000_000_000)
+    duration_seconds: float | None = Field(default=None, gt=0, le=604800)
+    milestone_id: str | None = None
+    continue_from_latest: bool = True
+
+
+class LiveMatchStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["human_vs_ai", "ai_vs_ai", "sim_live"] = "human_vs_ai"
+    scenario: Literal["kickoff-v1", "mixed-scenarios-v1"] = "mixed-scenarios-v1"
+    team_size: Literal[1, 2] = 1
+    boost_mode: Literal["standard", "unlimited", "starved"] = "standard"
+    arena_map: Literal["DFHStadium", "ChampionsField", "Mannfield_Night", "NeonFields", "UtopiaColiseum"] = "DFHStadium"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    launch_client: bool = True
+    run_id: str | None = None
+    checkpoint_id: str | None = None
+
+
+class LiveMatchControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal[
+        "toggle_pause",
+        "pause",
+        "resume",
+        "reset_kickoff",
+        "next_game",
+        "set_speed",
+        "set_scenario",
+        "set_boost",
+        "set_map",
+        "human_input",
+    ]
+    speed: float | None = Field(default=None, ge=0.25, le=4.0)
+    scenario: Literal["kickoff-v1", "mixed-scenarios-v1"] | None = None
+    boost_mode: Literal["standard", "unlimited", "starved"] | None = None
+    arena_map: Literal["DFHStadium", "ChampionsField", "Mannfield_Night", "NeonFields", "UtopiaColiseum"] | None = None
+    human_controls: dict[str, float] | None = None
 
 
 def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdown_timeout=20):
@@ -59,7 +101,7 @@ def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdow
             return
         expected = "Bearer " + app.state.manager.token
         if not authorization or not secrets.compare_digest(authorization, expected):
-            raise AppError("Connect using this workspace's local access key or launch rocket-ai desktop.", 401)
+            raise AppError("Connect using this workspace's local access key.", 401)
 
     @app.exception_handler(AppError)
     async def app_error(request, error):
@@ -76,7 +118,6 @@ def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdow
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'"
-        # The hosted diagnostic preview is intentionally embeddable by Arena; never allow writes there without a key.
         if not preview_readonly:
             policy += "; frame-ancestors 'self'"
         response.headers["Content-Security-Policy"] = policy
@@ -120,9 +161,23 @@ def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdow
     def reject(proposal_id: str):
         return app.state.manager.reject(proposal_id)
 
+    @app.post("/api/runs/start-direct", dependencies=[Depends(authorize)])
+    def start_direct(body: DirectStartRequest):
+        return app.state.manager.start_direct(
+            preset=body.preset or body.preset_id,
+            max_steps=body.max_steps,
+            duration_seconds=body.duration_seconds,
+            milestone_id=body.milestone_id,
+            continue_from_latest=body.continue_from_latest,
+        )
+
     @app.post("/api/runs/{run_id}/control", dependencies=[Depends(authorize)])
     def control(run_id: str, body: ControlRequest):
         return app.state.manager.control(run_id, body.command)
+
+    @app.get("/api/checkpoints/{run_id}/{checkpoint_id}/rlbot", dependencies=[Depends(authorize)])
+    def export_rlbot(run_id: str, checkpoint_id: str):
+        return app.state.manager.export_rlbot_bundle(run_id, checkpoint_id)
 
     @app.get("/api/report", dependencies=[Depends(authorize)])
     def report():
@@ -130,12 +185,16 @@ def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdow
                 "snapshot": app.state.manager.snapshot(),
                 "events": app.state.manager.store.events(0, 1000),
                 "limitations": ["Replay viewer is a recorded top-down schematic, not a 3D renderer",
-                                "Evaluation covers scripted baselines only; no rank claim",
-                                "Recovery resets simulator episodes", "CUDA/WSLg require target-host verification"]}
+                                "Evaluation covers scripted baselines and frozen checkpoints",
+                                "Recovery resets simulator episodes", "CUDA requires target-host verification"]}
 
     @app.post("/api/benchmarks", dependencies=[Depends(authorize)])
     def start_benchmark(body: BenchmarkSpec):
         return app.state.manager.start_benchmark(body)
+
+    @app.post("/api/benchmarks/auto", dependencies=[Depends(authorize)])
+    def start_auto_benchmark():
+        return app.state.manager.start_auto_benchmark()
 
     @app.get("/api/benchmarks", dependencies=[Depends(authorize)])
     def benchmarks():
@@ -177,6 +236,40 @@ def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdow
     @app.post("/api/leagues/{league_id}/stop", dependencies=[Depends(authorize)])
     def stop_league(league_id: str):
         return app.state.manager.stop_league(league_id)
+
+    @app.get("/api/live-match", dependencies=[Depends(authorize)])
+    def get_live_match():
+        return app.state.manager.live_match.snapshot()
+
+    @app.post("/api/live-match/start", dependencies=[Depends(authorize)])
+    def start_live_match(body: LiveMatchStartRequest | None = None):
+        req = body or LiveMatchStartRequest()
+        return app.state.manager.live_match.start(
+            mode=req.mode,
+            scenario=req.scenario,
+            team_size=req.team_size,
+            boost_mode=req.boost_mode,
+            arena_map=req.arena_map,
+            speed=req.speed,
+            launch_client=req.launch_client,
+            run_id=req.run_id,
+            checkpoint_id=req.checkpoint_id,
+        )
+
+    @app.post("/api/live-match/control", dependencies=[Depends(authorize)])
+    def control_live_match(body: LiveMatchControlRequest):
+        return app.state.manager.live_match.control(
+            body.action,
+            speed=body.speed,
+            scenario=body.scenario,
+            boost_mode=body.boost_mode,
+            arena_map=body.arena_map,
+            human_controls=body.human_controls,
+        )
+
+    @app.post("/api/live-match/stop", dependencies=[Depends(authorize)])
+    def stop_live_match():
+        return app.state.manager.live_match.stop()
 
     assets = Path(__file__).parent / "web"
     app.mount("/assets", StaticFiles(directory=assets), name="assets")

@@ -1,6 +1,14 @@
 # Rocket League AI — evidence-led roadmap
 
-**Updated 2026-10-17.** Current-state authority: [PROJECT.md](PROJECT.md); architecture: [ARCHITECTURE.md](ARCHITECTURE.md); exact checks: [docs/VERIFICATION.md](docs/VERIFICATION.md).
+**Updated 2026-10-17 (`v0.3.0`).** Current-state authority: [PROJECT.md](PROJECT.md); architecture: [ARCHITECTURE.md](ARCHITECTURE.md); exact checks: [docs/VERIFICATION.md](docs/VERIFICATION.md).
+
+## v0.3.0 Delivery Summary
+
+- [x] **Removed Desktop GUI (`desktop.py`, `PySide6`)**: Web Control Room is the single, zero-Qt-dependency interface.
+- [x] **Simplified 1-Click Auto-Benchmark (`POST /api/benchmarks/auto`)**: Start & Cancel buttons only; tests 30 ascending hardware configurations for 20s each (~10 min total, scaling `n_proc` 1 → 32, `batch_size` 512 → 16,384, `episode_timeout_seconds` 15s → 90s) and automatically adopts the winning setup for training.
+- [x] **Simplified Instant Training (`POST /api/runs/start-direct`)**: Presets, Max Steps, and live Duration calculator based on measured average `steps/s`; starts immediately without confirmation modals and always continues from the newest valid checkpoint (`allow_config_evolution`).
+- [x] **New "Roadmap" Sidebar Tab**: 5 progressive milestones (`1M`, `10M`, `50M`, `150M`, `500M` steps) with live progress bars, estimated remaining duration from historical `steps/s`, and 1-click **Start Training** continuation buttons.
+- [x] **Pro v3 Reward Shaping (`goal10-touch0.1-pro-v3`), Self-Play & RLBot Export (`GET /api/checkpoints/{run_id}/{checkpoint_id}/rlbot`)**: Added boost reserve management, defensive save positioning, aerial/power-shot rewards, 5th aerial scenario in `ScenarioMutator`, and 1-click RLBot bundle export (`bot.cfg` + `agent.py`).
 
 **Naming correction:** this delivery's **Phase 2 foundation** is the user's application/engineering phase. The Phase 1 planning document used “Phase 2” for throughput tuning. They are not the same milestone. The original 444-line roadmap and benchmark procedures are preserved in [docs/history/ROADMAP_PHASE1.md](docs/history/ROADMAP_PHASE1.md), subject to the [audit corrections](docs/AUDIT.md).
 

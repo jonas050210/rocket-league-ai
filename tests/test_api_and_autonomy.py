@@ -206,3 +206,88 @@ def test_recovery_rechecks_source_profile_between_review_and_confirmation(manage
     assert manager.active is None and len(manager.store.runs()) == 1
     # Rejected preconditions do not execute or consume the reviewed action.
     assert manager.store.proposal(proposal["id"])["status"] == "pending"
+
+
+def test_direct_start_continues_from_latest_checkpoint_and_exports_rlbot(client, manager, monkeypatch):
+    monkeypatch.setattr(
+        "rocket_league_ai.orchestration.package_versions",
+        lambda: {"torch": "test", "numpy": "test", "rlgym-learn": "test"},
+    )
+    # Seed an existing run with a valid checkpoint at step 2048
+    base_cfg = TrainingConfig(device="cpu", n_proc=2, batch_size=2048, timesteps_per_iteration=2048, buffer_size=6144)
+    run = manager.store.create_run(base_cfg, experiment_metadata())
+    manager.store.update_run(run["id"], status="completed", metrics={**run["metrics"], "steps": 2048, "steps_per_second": 2400.0})
+    checkpoint = manager.checkpoints(run["id"]).publish(2048, run["config_hash"], unit_checkpoint_writer, {})
+
+    snap = client.get("/api/snapshot").json()
+    assert snap["highest_step"] == 2048
+    assert snap["latest_checkpoint"]["checkpoint_id"] == checkpoint["id"]
+    assert snap["average_steps_per_second"] >= 2000.0
+    assert len(snap["roadmap"]) == 5
+    assert snap["roadmap"][0]["current_steps"] == 2048
+
+    # Mock _launch so we don't spawn a real subprocess without torch
+    launched = {}
+
+    def fake_launch(config, *, parent=None):
+        launched["config"] = config
+        launched["parent"] = parent
+        return {"run_id": "newrun123"}
+
+    monkeypatch.setattr(manager, "_launch", fake_launch)
+
+    res = client.post(
+        "/api/runs/start-direct",
+        json={"milestone_id": "milestone-1", "continue_from_latest": True},
+    )
+    assert res.status_code == 200
+    assert launched["parent"]["run_id"] == run["id"]
+    assert launched["parent"]["checkpoint_id"] == checkpoint["id"]
+    assert launched["parent"]["allow_config_evolution"] is True
+    assert launched["config"].total_timesteps >= 1_000_000
+
+    # Test RLBot export endpoint
+    rlbot = client.get(f"/api/checkpoints/{run['id']}/{checkpoint['id']}/rlbot")
+    assert rlbot.status_code == 200
+    bundle = rlbot.json()
+    assert bundle["checkpoint_id"] == checkpoint["id"]
+    assert "[Locations]" in bundle["files"]["bot.cfg"]
+    assert "RLAIBot" in bundle["files"]["agent.py"]
+    assert "RLBotAgent" in bundle["files"]["agent.py"]
+
+
+def test_live_match_start_pause_kickoff_reset_and_stop(client, manager):
+    base_cfg = TrainingConfig(device="cpu", n_proc=1, batch_size=512, timesteps_per_iteration=512, buffer_size=1536)
+    run = manager.store.create_run(base_cfg, experiment_metadata())
+    manager.store.update_run(run["id"], status="completed")
+    checkpoint = manager.checkpoints(run["id"]).publish(512, run["config_hash"], unit_checkpoint_writer, {})
+
+    res = client.post(
+        "/api/live-match/start",
+        json={"mode": "human_vs_ai", "scenario": "mixed-scenarios-v1", "speed": 2.0, "launch_client": True},
+    )
+    assert res.status_code == 200
+    snap = res.json()
+    assert snap["status"] == "running"
+    assert snap["checkpoint"]["checkpoint_id"] == checkpoint["id"]
+    assert snap["export_dir"] is not None
+    assert snap["current_frame"] is not None
+    assert len(snap["current_frame"]["cars"]) == 2
+
+    paused = client.post("/api/live-match/control", json={"action": "toggle_pause"}).json()
+    assert paused["paused"] is True
+    assert paused["status"] == "paused"
+
+    resumed = client.post("/api/live-match/control", json={"action": "toggle_pause"}).json()
+    assert resumed["paused"] is False
+
+    reset = client.post("/api/live-match/control", json={"action": "reset_kickoff"}).json()
+    assert reset["status"] == "running"
+
+    next_g = client.post("/api/live-match/control", json={"action": "next_game"}).json()
+    assert next_g["game_number"] >= 2
+
+    stopped = client.post("/api/live-match/stop").json()
+    assert stopped["status"] == "stopped"
+
+

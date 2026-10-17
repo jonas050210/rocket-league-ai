@@ -270,3 +270,64 @@ def test_auto_adoption_changes_only_execution_fields(manager, monkeypatch):
     record = manager.store.setting("benchmark_adoption")
     assert record["previous_plan"]["n_proc"] == 1
     assert len(calls) == 3 and all(call[2] == 128 for call in calls)
+
+
+def test_auto_sweep_30_stages_and_high_scale_adoption(manager, monkeypatch):
+    from rocket_league_ai.benchmark import HIGH_SCALE_SWEEP_STAGES
+
+    assert len(HIGH_SCALE_SWEEP_STAGES) == 30
+    spec = BenchmarkSpec.default_auto_sweep("cpu")
+    assert spec.auto_sweep is True
+    assert spec.measurement_seconds == 20
+    assert spec.repeats == 1
+
+    monkeypatch.setattr(
+        "rocket_league_ai.orchestration.package_versions",
+        lambda: {"torch": "test", "numpy": "test", "rlgym-learn": "test"},
+    )
+    calls = []
+
+    def fake_measure(config, spec_obj):
+        calls.append((config.n_proc, config.batch_size, config.episode_timeout_seconds))
+        is_target = config.n_proc == 16 and config.batch_size == 8192 and config.episode_timeout_seconds == 60.0
+        iter_sec = 0.05 if is_target else 2.0
+        iters = [
+            {
+                "steps": (idx + 1) * config.batch_size,
+                "collection_seconds": iter_sec * 0.8,
+                "learning_seconds": iter_sec * 0.2,
+                "iteration_seconds": iter_sec,
+                "episodes": idx * 2,
+            }
+            for idx in range(4)
+        ]
+        return iters, {
+            "cpu_percent_peak": 45.0,
+            "memory_percent_peak": 30.0,
+            "gpu_percent_peak": None,
+            "gpu_memory_used_mib_peak": None,
+            "gpu_memory_percent_peak": None,
+            "gpu_peak_bytes": None,
+            "startup_seconds": 0.5,
+            "measurement_seconds": 20.0,
+            "stop_reason": "time",
+        }, "r" * 32, None
+
+    monkeypatch.setattr(manager, "_measure_once", fake_measure)
+    session = manager.start_auto_benchmark()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if manager.store.benchmark(session["id"])["status"] != "running":
+            break
+        time.sleep(0.05)
+
+    assert len(calls) == 30
+    stored = manager.store.benchmark(session["id"])
+    assert stored["status"] == "completed", stored
+    assert stored["recommendation"]["adoption"]["status"] == "adopted"
+    adopted = TrainingConfig.model_validate(manager.store.setting("plan"))
+    assert adopted.n_proc == 16
+    assert adopted.batch_size == 8192
+    assert adopted.timesteps_per_iteration == 8192
+    assert adopted.buffer_size == 24576
+

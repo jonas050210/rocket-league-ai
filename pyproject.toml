@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rocket-league-ai"
-version = "0.2.0"
-description = "Local-first desktop control plane for headless RocketSim reinforcement learning"
+version = "0.3.0"
+description = "Local-first web control plane for headless RocketSim reinforcement learning"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -26,7 +26,6 @@ training = [
   "numpy==1.26.4",
   "torch==2.9.1",
 ]
-desktop = ["PySide6==6.10.2"]
 
 [dependency-groups]
 dev = ["pytest==9.1.1", "httpx==0.28.1", "ruff==0.11.8"]
@@ -45,7 +44,6 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
   "integration: real RocketSim / RLGym Learn / PyTorch subprocess tests",
-  "desktop: native Qt WebEngine smoke test (requires desktop extra and native libraries)",
 ]
 
 [tool.ruff]
