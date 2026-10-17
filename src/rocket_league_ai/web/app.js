@@ -644,6 +644,8 @@ function benchmarkLive() {
   if (!bench.session)
     return `<section class="panel" style="margin-top:20px"><div class="panel-body">${empty("chart", "No benchmark has been run yet.", "Start a benchmark to measure genuine candidate configurations on this host. Results persist here and in the status report.")}</div></section>`;
   const session = bench.session;
+  const totalCandidates = (session.spec.devices?.length || 1) * (session.spec.n_proc_values?.length || 1);
+  const progress = Math.min(100, Math.round((bench.results.length / Math.max(totalCandidates, 1)) * 100));
   const rows = bench.results
     .map((item) => {
       const a = item.aggregate;
@@ -651,7 +653,7 @@ function benchmarkLive() {
     })
     .join("");
   const rec = session.recommendation;
-  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark results</h2><p>Session ${esc(session.id.slice(0, 12))} · ${esc(session.status)} · ${date(session.created)}</p></div>${statusPill(session.status === "running" ? "running" : "idle")}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CANDIDATE</th><th>STATUS</th><th>AGENT STEPS/S</th><th>SIM STEPS/S</th><th>PPO STEPS/S</th><th>EPISODES/MIN</th><th>CV</th><th>RESOURCE PEAKS</th><th>ERROR</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">Measurements are running. Each candidate executes real bounded training runs; results appear as candidates complete.</p></div>'}${rec ? `<div class="panel-body"><div class="recommendation"><strong>Recommendation</strong><p>${esc(rec.explanation)}</p>${rec.candidate ? button("apply-benchmark-recommendation", "Review as configuration proposal", "arrow", "primary", !writable() || !idle()) : ""}${(rec.excluded || []).map((item) => `<p class="subtle">Excluded ${esc(item.candidate.device)} · ${item.candidate.n_proc} env: ${esc(item.reasons.join("; "))}</p>`).join("")}</div></div>` : ""}${session.error ? `<div class="panel-body"><p class="bad-text">${esc(session.error)}</p></div>` : ""}</section>`;
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark results</h2><p>Session ${esc(session.id.slice(0, 12))} · ${esc(session.status)} · ${date(session.created)} · ${bench.results.length}/${totalCandidates} candidates (${progress}%)</p></div>${statusPill(session.status === "running" ? "running" : "idle")}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CANDIDATE</th><th>STATUS</th><th>AGENT STEPS/S</th><th>SIM STEPS/S</th><th>PPO STEPS/S</th><th>EPISODES/MIN</th><th>CV</th><th>RESOURCE PEAKS</th><th>ERROR</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">Measurements are running. Each candidate executes real bounded training runs; results appear as candidates complete.</p></div>'}${rec ? `<div class="panel-body"><div class="recommendation"><strong>Recommendation</strong><p>${esc(rec.explanation)}</p>${rec.candidate ? button("apply-benchmark-recommendation", "Review as configuration proposal", "arrow", "primary", !writable() || !idle()) : ""}${(rec.excluded || []).map((item) => `<p class="subtle">Excluded ${esc(item.candidate.device)} · ${item.candidate.n_proc} env: ${esc(item.reasons.join("; "))}</p>`).join("")}</div></div>` : ""}${session.error ? `<div class="panel-body"><p class="bad-text">${esc(session.error)}</p></div>` : ""}</section>`;
 }
 const views = {
   dashboard,

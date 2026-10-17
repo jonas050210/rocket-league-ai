@@ -34,6 +34,23 @@ A checkbox records evidence, not an aspiration. An interface, a configured CI jo
 
 The first two delivery verification gates have actual results in `docs/VERIFICATION.md`, not merely a configured job. The sandbox still lacks the native GUI runtime; the native pass is on Ubuntu/Xvfb CI with standard packages. The unchecked RTX/WSLg item is a separate operator-host gate, not an inferred pass or authorization to start another phase.
 
+## Implementation status — 2026-10-17 improvement-plan delivery
+
+Implemented and locally verified in this sandbox (CPU only, no GPU/display):
+P0 CI contracts repaired (seven views, evaluation capability), per-repeat
+benchmark statistics, stale metadata fixed; evaluation scaled (parallel
+games, frozen checkpoint opponents, progress, stop endpoint, additive schema
+migration); opt-in reward shaping (``shaped-v2``), ``mixed-scenarios-v1``
+starting states, exposed PPO ``clip_range``/``max_grad_norm``; next-experiment
+advice, checkpoint comparison UI, replay goal markers, light snapshots.
+
+Still open and **not** executed (target-host / operator decisions):
+N0 CUDA/WSLg certification, N1 soak, GPU benchmark sweeps, the 400-game
+baseline, the first shaping experiment, any budget increase and league
+scheduling. Prepared step-by-step in [docs/TARGET_HOST.md](docs/TARGET_HOST.md).
+No gameplay improvement is claimed anywhere: the only measured evaluation
+remains 0W/0L/4D of a 384-step checkpoint vs random.
+
 ## N0 — Next: target-host certification (before tuning or skill claims)
 
 **Entry:** foundation tests pass; user explicitly authorizes any test training plan. Keep current plan/checkpoints unchanged until reviewed.

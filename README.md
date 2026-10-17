@@ -59,6 +59,7 @@ Verified: **98 Python tests locally; 98 Python + 2 actual native Qt/Xvfb + 5 bro
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Implemented process/module/lifecycle/storage boundaries |
 | [ROADMAP.md](ROADMAP.md) | Evidence-led next gates; historical phase-number reconciliation |
 | [docs/SETUP.md](docs/SETUP.md) | WSL, native GUI, dependencies, launch and test commands |
+| [docs/TARGET_HOST.md](docs/TARGET_HOST.md) | Prepared (not executed) RTX 4060 Ti certification, benchmark sweeps, baseline and shaping-experiment procedures |
 | [docs/RECOVERY.md](docs/RECOVERY.md) | Failure diagnosis, explicit recovery, backup and security limits |
 | [docs/AUDIT.md](docs/AUDIT.md) | Audit performed before implementation; corrected assumptions |
 | [docs/UPSTREAM.md](docs/UPSTREAM.md) | Verified release defects and narrowly scoped adaptations |

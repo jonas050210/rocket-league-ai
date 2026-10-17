@@ -129,3 +129,27 @@ Executed and verified:
 | Replay artifact | 302 decision-rate frames over 4 games; sides alternate blue/orange; first-frame car/ball kickoff positions correct |
 
 Not executed here (target-host gates, unchanged): CUDA/RTX 4060 Ti throughput sweeps, WSLg native desktop certification, 400-game evaluation comparisons, 30-minute soak, sudden-power-loss storage test. Browser UI tests (`npm test`) were not re-run in this sandbox; the UI was verified by syntax check, API-level flows and the live backend above.
+
+## Addendum — improvement-plan delivery (2026-10-17, this session)
+
+Executed in the CPU sandbox (no GPU/display; CUDA gates remain open):
+
+- P0: desktop/browser contracts updated to the real seven views and the
+  implemented evaluation capability; benchmark aggregation is per repeat
+  (constructed-data test proves warm-ups of later repeats no longer leak);
+  run metadata no longer claims evaluation is unimplemented.
+- P1: genuine integration test plays a parallel (2 workers) mirror
+  evaluation — candidate vs its own frozen checkpoint, 4 games, completed
+  with progress persisted; checkpoint opponents are labelled
+  `checkpoint:<id>`; additive `progress` migration verified against an
+  old-schema database.
+- P2: shaped-v2 + mixed-scenarios config trains genuinely (256 steps) and
+  saves a valid checkpoint; mixed scenarios produce varied real resets;
+  shaping direction/normalization unit-tested from physics state.
+- P3: snapshot evaluations are light (detail verified only via the
+  evaluations API), next-experiment suggestions unit-tested, checkpoint
+  comparison and replay goal markers are frontend-only honest renderings.
+
+Not executed: browser/native CI suites for these commits (running on the
+PR), all RTX/WSLg items, the 400-game baseline, any shaping/budget
+experiment. See docs/TARGET_HOST.md for the prepared procedures.
