@@ -28,11 +28,11 @@ A checkbox records evidence, not an aspiration. An interface, a configured CI jo
 
 ### Delivery evidence that must remain explicit
 
-- [ ] Native Qt launch/close/reopen/bootstrap on an environment with the required native libraries: consult the execution record/CI result, never infer success from browser tests.
-- [ ] Python 3.12 full profile in CI: consult recorded result; local execution used Python 3.11.2.
+- [x] Native Qt launch/close/reopen/bootstrap: **2 actual Qt tests passed** under Ubuntu 24.04/Xvfb; verified separately from browser tests.
+- [x] Python **3.12.15** full profile in CI: **98 non-desktop + 2 native + 5 browser** tests passed with zero skips; local non-desktop execution also passed on 3.11.2.
 - [ ] Target WSLg/RTX 4060 Ti certification: **not done in this CPU-only sandbox**.
 
-The first two entries are delivery verification gates, not requests to implement an unrelated training phase. They can be marked passed only with real results in `docs/VERIFICATION.md`. Native Qt code and tests exist; the original sandbox lacked the native GUI runtime. CI is configured to test actual Qt under Xvfb with standard Ubuntu packages, not a fake desktop.
+The first two delivery verification gates have actual results in `docs/VERIFICATION.md`, not merely a configured job. The sandbox still lacks the native GUI runtime; the native pass is on Ubuntu/Xvfb CI with standard packages. The unchecked RTX/WSLg item is a separate operator-host gate, not an inferred pass or authorization to start another phase.
 
 ## N0 — Next: target-host certification (before tuning or skill claims)
 

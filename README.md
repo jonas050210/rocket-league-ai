@@ -47,7 +47,7 @@ npm ci                                    # browser test tooling only; not neede
 npm test                                  # drives real training through the actual UI
 ```
 
-Native Qt tests require a display/WSLg or Xvfb and explicit opt-in; see setup. The exact executed results, external warning, native/CI status and hardware limitations are in **[docs/VERIFICATION.md](docs/VERIFICATION.md)**. GPU/WSLg/long-duration certification on the target i7-12700F / RTX 4060 Ti 8 GB / 32 GB host is a separate gate; no throughput or win-rate claim is inferred from CPU/browser tests.
+Verified: **98 Python tests locally; 98 Python + 2 actual native Qt/Xvfb + 5 browser tests in Ubuntu 24.04/Python 3.12 CI**, with zero CI skips. Native Qt tests require a display/WSLg or Xvfb and explicit opt-in; see setup. The exact commands, external warning and hardware limitations are in **[docs/VERIFICATION.md](docs/VERIFICATION.md)**. GPU/WSLg/long-duration certification on the target i7-12700F / RTX 4060 Ti 8 GB / 32 GB host is a separate gate; no throughput or win-rate claim is inferred from CPU/browser tests.
 
 ## Project map
 

@@ -25,7 +25,7 @@ GitHub source heads inspected during the audit: RLGym `2fc8d435663454b7fe45d2556
 
 **Pydantic:** Learn 2.0.0 uses newer serialization interfaces. The selected 2.14.1 satisfies the actual Learn requirement; an older FastAPI-example pin is not interchangeable.
 
-**Wheel tags:** RocketSim's wheel filename is ABI3-compatible and imports/steps successfully on Python 3.11, but the internal WHEEL tags incorrectly declare `cp39-cp39`. `uv pip check` warns; standard `pip check` passes the dependency graph. Metadata is not patched. This remains an upstream packaging defect, not a claimed universal ABI certification.
+**Wheel tags:** RocketSim's wheel filename is ABI3-compatible and imports/steps successfully on Python 3.11 locally and 3.12 in CI, but the internal WHEEL tags incorrectly declare `cp39-cp39`. `uv pip check` warns; standard `pip check` passes the dependency graph. Metadata is not patched. This remains an upstream packaging defect, not a claimed universal ABI certification.
 
 ## 3. Shared-info startup offset defect (reproduced)
 

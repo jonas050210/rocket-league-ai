@@ -17,11 +17,11 @@ Commands run at repository root. `.venv/bin/...` explicitly selects the supporte
 | Executed command | Result / scope |
 |---|---|
 | `uv --system-certs sync --frozen --all-extras --python /usr/bin/python3.11` | Passed; exact locked training/desktop/developer profile installed |
-| `.venv/bin/ruff check src tests` | **Passed**, including the final loop-capture fix and source-profile regressions |
-| `.venv/bin/python -m compileall -q src` | **Passed** |
+| `.venv/bin/ruff check src tests scripts` | **Passed**, including the final loop-capture fix and source-profile regressions |
+| `.venv/bin/python -m compileall -q src scripts` | **Passed** |
 | `npm run check` | **Passed**, actual offline client syntax |
-| `.venv/bin/pytest -q -m 'not desktop'` | **98 passed, 2 deselected, 1 external warning, 45.09 s** (final sequential local Python run before CI submission) |
-| `RLAI_TEST_CUDA_UNAVAILABLE=1 npm test` | **5 passed, about 65.9 s**; real GUI lifecycle case 36.4 s. This run overlapped the Python suite, so do not treat timing as a benchmark |
+| `.venv/bin/pytest -q -m 'not desktop' --junitxml=.rlai/verification/python-final.xml` | **98 passed, 2 deselected, 1 external warning, 44.90 s** (final sequential local Python run) |
+| `RLAI_TEST_CUDA_UNAVAILABLE=1 npm test` | **5 passed, 47.7 s** wall time; real GUI lifecycle case 27.5 s; JUnit suite time 45.836 s, zero skips. Timing is not a target-host benchmark |
 | `uv --system-certs run --no-sync --python /usr/bin/python3.11 --with pip python -m pip check` | **Passed**: `No broken requirements found.` Temporary pip checker, no lock/dependency modification |
 | `uv --system-certs build --python /usr/bin/python3.11 --no-python-downloads` | **Passed**: sdist + `rocket_league_ai-0.2.0-py3-none-any.whl`; inspected 28 wheel entries including every offline UI and training asset |
 | `.venv/bin/python -m rocket_league_ai doctor --probe` | Simulation **passed**: 16 meshes, 8 ticks; CUDA unavailable; **exit 1 intentionally**. No CUDA matmul/training was possible |
@@ -82,15 +82,25 @@ Screenshots/reports/failure traces are ignored `test-results/`, not committed. T
 
 Early browser runs exposed 5–15-second Rust collection stalls. Faulthandler and release/HEAD source inspection identified signal-before-response-drain ordering plus five-second child keepalives. Temporary tracing was removed after the deterministic publication fence was implemented. The full suite then passed (including an earlier 5/5 run in 44.6 s). A measured corrected run acknowledged pause in ~53 ms, resume ~16 ms and stop ~111 ms. These are isolated local CPU control observations, not skill/target-throughput claims or a latency guarantee under load.
 
-## 5. Native Qt / Python 3.12 CI status
+## 5. Observed native Qt / Python 3.12 CI result
 
-**Initial CI run [39036179565](https://github.com/jonas050210/rocket-league-ai/actions/runs/39036179565): Python 3.12 setup/package/non-desktop tests passed, native Qt step failed; browser step was skipped.** A follow-up adds bounded JUnit summaries/failure annotations and portable JSON handling for Qt JavaScript callbacks; re-verification is pending. Raw Actions log downloads redirect to a host unavailable in this sandbox, so the failure must not be silently reclassified as a pass. See `.github/workflows/verify.yml` and the feature-branch pull request for the actual run. Do not count a configured workflow as executed verification.
+**PASSED**, not just configured. [Run 39037128792](https://github.com/jonas050210/rocket-league-ai/actions/runs/39037128792), commit **`51cd0f6`**, Ubuntu **24.04**, Python **3.12.15**, Node **22.22.3**. Entire job passed in **2 min 47 s**, including native dependency installation, locked setup, lint/compile/package and artifact upload.
 
-The job uses Ubuntu 24.04/Python 3.12 and normal apt native dependencies, the exact uv/npm locks, lint/compile/package, all non-desktop tests, actual native Qt under Xvfb, then actual-browser tests. Official action revisions are SHA-pinned, permission is contents-read only, and no CUDA pass is asserted on a CPU runner.
+| Executed CI command (environment in workflow) | Observed JUnit result |
+|---|---|
+| `uv run --no-sync pytest -q -m 'not desktop' --junitxml=.rlai/python-junit.xml` | **98 tests, 0 failures/errors/skips, 53.994 s** |
+| `RLAI_NATIVE_TEST=1 xvfb-run -a -s '-screen 0 1440x1000x24' uv run --no-sync pytest -q -m desktop --basetemp=native-test-results --junitxml=.rlai/native-junit.xml` | **2 tests, 0 failures/errors/skips, 13.577 s** |
+| `RLAI_TEST_CUDA_UNAVAILABLE=1 npm test` | **5 actual-browser tests, 0 failures/errors/skips, 41.432 s** suite time |
 
-The two opt-in native tests actually launch the Qt window, traverse six routes through its real WebEngine client, save PNGs and close it. They test idle/no-autostart, a real paused learner surviving close/reopen with unchanged counters and subsequent resume/stop, and launcher bootstrap of a detached backend surviving the window. `RLAI_NATIVE_TEST=1` makes missing deps/display/readiness a **failure**, not a skip. Without the flag, ordinary headless runs deselect/skip the tests with a reason.
+These counts/timings were read from actual GitHub Check annotations generated from JUnit XML, not guessed from job names. `scripts/report_junit.py` emits bounded diagnostic annotations without extra token permissions; the workflow retains the original test exit status. Raw log downloads redirect to a host unavailable in this sandbox. The **`ui-verification`** CI artifact contains disposable browser screenshots/report/JUnit plus actual native PNGs, not private workspace data.
 
-Xvfb/native CI, even if green, is not WSLg interactive certification, native file-dialog usability certification or RTX execution. Those remain host gates.
+The two native tests launch the **actual Qt window/WebEngine**, traverse all six routes and save PNGs. They verify idle/no-autostart, a real paused CPU learner surviving native close **and reopen** with unchanged counters and subsequent independent resume/stop, and launcher bootstrap of a detached backend surviving the window. `RLAI_NATIVE_TEST=1` makes missing deps/display/readiness a **failure**, not a skip. Normal headless test commands deselect them explicitly.
+
+An earlier [run 39036179565](https://github.com/jonas050210/rocket-league-ai/actions/runs/39036179565) passed Python 3.12 non-desktop tests but failed the native step. Qt smoke callback values were then serialized explicitly as JSON rather than relying on binding-specific object conversion, and bounded JUnit diagnostics were added. [Run 39036654355](https://github.com/jonas050210/rocket-league-ai/actions/runs/39036654355) subsequently passed all steps (98 non-desktop / 2 native), followed by the complete measured run above. The artifact action is now a verified Node-24 revision; the old Node-20 action warning no longer appears. No missing-dependency or readiness failure was reclassified as a native pass.
+
+Local Debian still lacks the native runtime: the failed local tests in §2 remain environment-blocked. The **actual native success is Ubuntu/Xvfb CI**, not a claimed local Qt window. CI uses standard apt libraries and software rendering/container-only sandbox flags, with exact uv/npm locks and SHA-pinned first-party actions. It is not a WSLg/GPU environment.
+
+Xvfb success does **not** certify interactive WSLg, the native file-save/cancel dialog, RTX execution or long-duration stability. Those remain host gates. Later documentation-only commits do not alter this verified application profile; the [PR's current check](https://github.com/jonas050210/rocket-league-ai/pull/2) is authoritative for its latest head.
 
 ## 6. Unpassed target / future gates
 

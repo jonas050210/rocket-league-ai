@@ -50,7 +50,9 @@ uv run --no-sync rocket-ai doctor
 uv run --no-sync rocket-ai doctor --probe
 ```
 
-This installs service, training, desktop and developer checks. Narrower installations:
+This installs service, training, desktop and developer checks. For reproducible valuable runs, commit the training code and keep the lock unchanged before starting. A dirty-source hash identifies edits but is not a backup of an uncommitted tree; do not edit source/packages during an active run. Ensure an existing dedicated data directory is private/owned by you; capability files are mode 0600, but existing directory permissions are not silently rewritten.
+
+Narrower installations:
 
 ```bash
 # Headless service + real training, no desktop:
@@ -192,7 +194,7 @@ RLAI_NATIVE_TEST=1 xvfb-run -a -s '-screen 0 1440x1000x24' \
   uv run --no-sync pytest -q -m desktop
 ```
 
-Disabling the WebEngine sandbox is a **trusted ephemeral CI/container workaround only**; do not add it to everyday WSL desktop launch. The application does not set it. These tests actually launch Qt, capture a PNG, reconnect/close during a real paused worker, resume/stop independently, and test native detached-backend bootstrap without autotraining. Without opt-in they skip with a reason. A configured job is not a passed native test; consult [VERIFICATION.md](VERIFICATION.md).
+Disabling the WebEngine sandbox is a **trusted ephemeral CI/container workaround only**; do not add it to everyday WSL desktop launch. The application does not set it. These tests actually launch Qt, capture a PNG, reconnect/close during a real paused worker, resume/stop independently, and test native detached-backend bootstrap without autotraining. Without opt-in they skip with a reason. This command has actually passed in Ubuntu 24.04/Python 3.12.15 CI (2 native tests, zero skips). It does not certify interactive WSLg or the save dialog; consult [VERIFICATION.md](VERIFICATION.md).
 
 ## 7. Troubleshooting
 
