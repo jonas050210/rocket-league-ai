@@ -271,6 +271,7 @@ def coordinator_config(config: TrainingConfig, run_dir: Path, checkpoint: Path |
             learner_config=PPOLearnerConfigModel(
                 device=config.device, n_epochs=config.n_epochs, batch_size=config.batch_size,
                 n_minibatches=config.n_minibatches, ent_coef=config.entropy_coefficient,
+                clip_range=config.clip_range, max_grad_norm=config.max_grad_norm,
                 optimizer_named_parameter_group_kwargs={
                     "actor": {"lr": config.learning_rate}, "critic": {"lr": config.learning_rate},
                 },

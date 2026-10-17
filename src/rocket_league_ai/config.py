@@ -22,6 +22,8 @@ class TrainingConfig(BaseModel):
     n_epochs: int = Field(default=1, ge=1, le=4)
     learning_rate: float = Field(default=0.0002, gt=0, le=0.01)
     entropy_coefficient: float = Field(default=0.01, ge=0, le=0.1)
+    clip_range: float = Field(default=0.2, ge=0.05, le=0.5)
+    max_grad_norm: float = Field(default=0.5, ge=0.1, le=5.0)
     gamma: float = Field(default=0.99, gt=0, le=1)
     gae_lambda: float = Field(default=0.95, gt=0, le=1)
     hidden_sizes: tuple[int, ...] = (256, 256, 256)
@@ -32,8 +34,11 @@ class TrainingConfig(BaseModel):
     # Deliberately fixed compatibility contracts, not speculative curriculum knobs.
     team_size: Literal[1] = 1
     tick_skip: Literal[8] = 8
-    environment_version: Literal["kickoff-v1"] = "kickoff-v1"
-    reward_version: Literal["goal10-touch0.1-transition-v1"] = "goal10-touch0.1-transition-v1"
+    environment_version: Literal["kickoff-v1", "mixed-scenarios-v1"] = "kickoff-v1"
+    reward_version: Literal["goal10-touch0.1-transition-v1", "goal10-touch0.1-shaped-v2"] = "goal10-touch0.1-transition-v1"
+    # Opt-in dense shaping (v2 only). Defaults are exactly the foundation reward.
+    reward_velocity_to_ball_weight: float = Field(default=0.0, ge=0, le=2.0)
+    reward_ball_to_goal_weight: float = Field(default=0.0, ge=0, le=2.0)
 
     @model_validator(mode="after")
     def validate_relationships(self) -> Self:
@@ -55,6 +60,11 @@ class TrainingConfig(BaseModel):
             raise ValueError("no_touch_timeout_seconds must not exceed episode_timeout_seconds")
         if self.device == "cpu" and self.pin_memory:
             raise ValueError("pin_memory requires an explicitly selected CUDA device")
+        shaping = self.reward_velocity_to_ball_weight + self.reward_ball_to_goal_weight
+        if shaping > 0 and self.reward_version != "goal10-touch0.1-shaped-v2":
+            raise ValueError("dense shaping weights require reward_version goal10-touch0.1-shaped-v2")
+        if self.reward_version == "goal10-touch0.1-shaped-v2" and shaping == 0:
+            raise ValueError("shaped-v2 requires at least one positive shaping weight")
         return self
 
     def digest(self) -> str:
