@@ -157,6 +157,7 @@ def elo_ratings(evaluations: list[dict], *, k: float = 32.0, initial: float = 15
 
     matches = [item for item in evaluations
                if item["status"] == "completed" and item.get("result")
+               and item["result"].get("candidate_checkpoint_id")
                and str(item["result"].get("opponent_id", "")).startswith("checkpoint:")]
     for item in sorted(matches, key=lambda value: value["created"]):
         result = item["result"]
@@ -184,7 +185,7 @@ def experiment_journal(runs: list[dict], evaluations: list[dict]) -> list[dict]:
     """
     by_checkpoint = {}
     for item in evaluations:
-        if item["status"] == "completed" and item.get("result"):
+        if item["status"] == "completed" and item.get("result") and item["result"].get("candidate_checkpoint_id"):
             by_checkpoint.setdefault(item["result"]["candidate_checkpoint_id"], []).append(item)
     journal, previous_run, previous_eval = [], None, None
     for run in sorted(runs, key=lambda value: value["created"]):
@@ -193,7 +194,7 @@ def experiment_journal(runs: list[dict], evaluations: list[dict]) -> list[dict]:
             changed = sorted(key for key in run["config"]
                              if run["config"].get(key) != previous_run["config"].get(key))
         run_evals = [item for items in by_checkpoint.values() for item in items
-                     if item["result"]["candidate_run_id"] == run["id"]]
+                     if item["result"].get("candidate_run_id") == run["id"]]
         latest = run_evals[-1]["result"] if run_evals else None
         verdict = "unevaluated"
         if latest and previous_eval and latest["opponent_id"] == previous_eval["opponent_id"]:
