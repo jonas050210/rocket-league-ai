@@ -65,6 +65,10 @@ class Store:
                 run_id TEXT, created REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS benchmark_results_session ON benchmark_results(benchmark_id);
+            CREATE TABLE IF NOT EXISTS leagues (
+                id TEXT PRIMARY KEY, spec TEXT NOT NULL, status TEXT NOT NULL,
+                evaluation_ids TEXT, error TEXT, created REAL NOT NULL, updated REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS evaluations (
                 id TEXT PRIMARY KEY, spec TEXT NOT NULL, status TEXT NOT NULL,
                 result TEXT, trajectory TEXT, error TEXT, created REAL NOT NULL, updated REAL NOT NULL
@@ -117,7 +121,7 @@ class Store:
             return None
         value = dict(row)
         for field in ("config", "metadata", "metrics", "payload", "result", "data",
-                      "spec", "candidate", "aggregate", "resources", "recommendation"):
+                      "spec", "candidate", "aggregate", "resources", "recommendation", "evaluation_ids"):
             if field in value and value[field] is not None:
                 value[field] = json.loads(value[field])
         return value
@@ -301,6 +305,43 @@ class Store:
                 "SELECT * FROM benchmark_results WHERE benchmark_id=? ORDER BY created", (checked_id(benchmark_id),),
             ).fetchall()
             return [self.decode(row) for row in rows]
+
+    # -- Checkpoint leagues ---------------------------------------------------
+    def create_league(self, spec: dict) -> dict:
+        league_id, now = new_id(), time.time()
+        with self.lock, self.db:
+            self.db.execute("INSERT INTO leagues(id,spec,status,created,updated) VALUES (?,?,?,?,?)",
+                            (league_id, canonical(spec), "running", now, now))
+        return self.league(league_id)
+
+    def league(self, league_id: str) -> dict:
+        with self.lock:
+            row = self.db.execute("SELECT * FROM leagues WHERE id=?", (checked_id(league_id),)).fetchone()
+            result = self.decode(row)
+            if result is None:
+                raise AppError("League not found. Refresh the league history.", 404)
+            return result
+
+    def leagues(self, limit: int = 10) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM leagues ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
+            result = [self.decode(row) for row in rows]
+            for item in result:  # keep snapshot payloads light
+                item.pop("spec", None)
+            return result
+
+    def update_league(self, league_id: str, **fields) -> dict:
+        if not fields.keys() <= {"status", "evaluation_ids", "error"}:
+            raise ValueError("Only league lifecycle fields may be updated")
+        fields["updated"] = time.time()
+        if fields.get("evaluation_ids") is not None:
+            fields["evaluation_ids"] = canonical(fields["evaluation_ids"])
+        with self.lock, self.db:
+            self.db.execute(
+                f"UPDATE leagues SET {', '.join(key + '=?' for key in fields)} WHERE id=?",
+                (*fields.values(), checked_id(league_id)),
+            )
+        return self.league(league_id)
 
     # -- Checkpoint evaluations ----------------------------------------------
     def create_evaluation(self, spec: dict) -> dict:

@@ -95,3 +95,22 @@ def test_real_parallel_checkpoint_vs_checkpoint_evaluation(manager):
     assert record["result"]["opponent_id"] == f"checkpoint:{checkpoint['id']}"
     assert record["result"]["games"] == 4
     assert record["progress"] == 1.0
+
+
+def test_real_league_round_robin_feeds_elo(manager):
+    from rocket_league_ai.evaluation import LeagueSpec, elo_ratings
+
+    config = small_plan(manager)
+    run_id = manager._launch(config)["run_id"]
+    assert wait_for(lambda: manager.store.run(run_id)["status"] == "completed" and manager.active is None)
+    checkpoints = [item for item in manager.checkpoints(run_id).inventory() if item["integrity"] == "valid"]
+    assert len(checkpoints) >= 2
+    refs = [{"run_id": run_id, "checkpoint_id": item["id"]} for item in checkpoints[:2]]
+    league = manager.start_league(LeagueSpec(checkpoints=refs, games_per_pair=2, parallel_workers=2,
+                                             max_game_seconds=5))
+    assert wait_for(lambda: manager.store.league(league["id"])["status"] != "running")
+    record = manager.store.league(league["id"])
+    assert record["status"] == "completed", record
+    assert len(record["evaluation_ids"]) == 1
+    ratings = elo_ratings(manager.store.evaluations())
+    assert len(ratings) == 2 and all(item["games"] == 2 for item in ratings)

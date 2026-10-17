@@ -19,6 +19,7 @@ from .domain import ACTIVE, TERMINAL, AppError, EvaluationResult, RunStatus, con
 from .evaluation import (
     EvaluationSpec,
     GameRecord,
+    LeagueSpec,
     compare_evaluations,
     elo_ratings,
     experiment_journal,
@@ -62,6 +63,7 @@ class Orchestrator:
             self.auxiliary: str | None = None
             self.benchmark_stop = threading.Event()
             self.evaluation_stop = threading.Event()
+            self.league_stop = threading.Event()
             self.evaluation_process: subprocess.Popen | None = None
             self.token = self._load_token()
             self.system = SystemMonitor()
@@ -130,6 +132,7 @@ class Orchestrator:
                 "benchmark": self._benchmark_snapshot(),
                 "evaluations": self.store.evaluations(light=True),
                 "evaluation_comparison": compare_evaluations(self.store.evaluations(light=True)),
+                "leagues": self.store.leagues(),
                 "checkpoint_ratings": elo_ratings(self.store.evaluations(light=True)),
                 "experiment_journal": experiment_journal(runs, self.store.evaluations(light=True)),
                 "next_experiment": next_experiment(runs, self.store.evaluations(light=True),
@@ -496,64 +499,70 @@ class Orchestrator:
             thread.start()
             return evaluation
 
-    def _run_evaluation(self, evaluation_id: str, spec: EvaluationSpec):
+    def _execute_evaluation(self, evaluation_id: str, spec: EvaluationSpec):
+        """Run one evaluation to a terminal record. Raises on failure; marks
+                the record stopped (and returns "stopped") when stop was requested."""
         directory = self.root / "evaluations" / evaluation_id
+        directory.mkdir(parents=True, mode=0o700)
+        request = {"spec": spec.model_dump(mode="json"), "root": str(self.root)}
+        atomic_json(directory / "request.json", request)
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-m", "rocket_league_ai.training.evaluate",
+             "--request", str(directory / "request.json"), "--output", str(directory)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+            env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+        )
+        self.evaluation_process = process
+        deadline = time.monotonic() + spec.total_games * spec.max_game_seconds / max(spec.parallel_workers, 1) + 900
+        while process.poll() is None and time.monotonic() < deadline and not self.evaluation_stop.is_set():
+            progress_file = directory / "progress.json"
+            if progress_file.is_file():
+                try:
+                    progress = json.loads(progress_file.read_text())
+                    self.store.update_evaluation(evaluation_id, progress=progress["completed"] / max(progress["games"], 1))
+                except (ValueError, KeyError, OSError):
+                    pass
+            time.sleep(0.5)
+        if self.evaluation_stop.is_set():
+            self._kill_evaluation_group(process)
+            self.store.update_evaluation(evaluation_id, status="stopped",
+                                         error="Evaluation stopped by user. No partial result is reported.")
+            self.store.event("warning", "evaluation_stopped", "Evaluation stopped by user; no partial result reported.", spec.run_id)
+            return
+        if process.poll() is None:
+            self._kill_evaluation_group(process)
+            raise AppError("Evaluation exceeded its time budget and was stopped. No partial result is reported.")
+        output = process.stdout.read() if process.stdout else ""
+        if process.returncode != 0:
+            raise AppError(f"Evaluation process failed: {output.strip().splitlines()[-1] if output.strip() else 'no output'}")
+        payload = json.loads((directory / "result.json").read_text())
+        games = [GameRecord.model_validate(game) for game in payload["games"]]
+        run = self.store.run(spec.run_id)
+        result = summarize_evaluation(
+            spec, games, candidate_id=payload["candidate_id"],
+            candidate_config_hash=run["config_hash"],
+            environment_version=spec.scenario_environment or run["config"]["environment_version"],
+        )
+        # Cross-check counting with the shared frozen contract model.
+        EvaluationResult(
+            candidate_id=result["candidate_id"], opponent_id=result["opponent_id"],
+            wins=result["wins"], losses=result["losses"], draws=result["draws"],
+            games=result["games"], seed=result["seed"], side_balanced=True,
+            environment_version=result["environment_version"],
+            goals_for=result["goals_for"], goals_against=result["goals_against"],
+        )
+        trajectory = f"evaluations/{evaluation_id}/trajectory.json" if (directory / "trajectory.json").is_file() else None
+        self.store.update_evaluation(evaluation_id, status="completed", result=result, trajectory=trajectory, progress=1.0)
+        self.store.event("info", "evaluation_finished",
+                         f"Evaluation completed: {result['wins']}W/{result['losses']}L/{result['draws']}D, "
+                         f"goals {result['goals_for']}–{result['goals_against']}, win rate "
+                         f"{result['win_rate']:.0%} (95% CI {result['win_rate_ci95'][0]:.0%}–{result['win_rate_ci95'][1]:.0%}).",
+                         spec.run_id)
+        return "completed"
+
+    def _run_evaluation(self, evaluation_id: str, spec: EvaluationSpec):
         try:
-            directory.mkdir(parents=True, mode=0o700)
-            request = {"spec": spec.model_dump(mode="json"), "root": str(self.root)}
-            atomic_json(directory / "request.json", request)
-            process = subprocess.Popen(
-                [sys.executable, "-u", "-m", "rocket_league_ai.training.evaluate",
-                 "--request", str(directory / "request.json"), "--output", str(directory)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
-                env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
-            )
-            self.evaluation_process = process
-            deadline = time.monotonic() + spec.total_games * spec.max_game_seconds / max(spec.parallel_workers, 1) + 900
-            while process.poll() is None and time.monotonic() < deadline and not self.evaluation_stop.is_set():
-                progress_file = directory / "progress.json"
-                if progress_file.is_file():
-                    try:
-                        progress = json.loads(progress_file.read_text())
-                        self.store.update_evaluation(evaluation_id, progress=progress["completed"] / max(progress["games"], 1))
-                    except (ValueError, KeyError, OSError):
-                        pass
-                time.sleep(0.5)
-            if self.evaluation_stop.is_set():
-                self._kill_evaluation_group(process)
-                self.store.update_evaluation(evaluation_id, status="stopped",
-                                             error="Evaluation stopped by user. No partial result is reported.")
-                self.store.event("warning", "evaluation_stopped", "Evaluation stopped by user; no partial result reported.", spec.run_id)
-                return
-            if process.poll() is None:
-                self._kill_evaluation_group(process)
-                raise AppError("Evaluation exceeded its time budget and was stopped. No partial result is reported.")
-            output = process.stdout.read() if process.stdout else ""
-            if process.returncode != 0:
-                raise AppError(f"Evaluation process failed: {output.strip().splitlines()[-1] if output.strip() else 'no output'}")
-            payload = json.loads((directory / "result.json").read_text())
-            games = [GameRecord.model_validate(game) for game in payload["games"]]
-            run = self.store.run(spec.run_id)
-            result = summarize_evaluation(
-                spec, games, candidate_id=payload["candidate_id"],
-                candidate_config_hash=run["config_hash"],
-                environment_version=spec.scenario_environment or run["config"]["environment_version"],
-            )
-            # Cross-check counting with the shared frozen contract model.
-            EvaluationResult(
-                candidate_id=result["candidate_id"], opponent_id=result["opponent_id"],
-                wins=result["wins"], losses=result["losses"], draws=result["draws"],
-                games=result["games"], seed=result["seed"], side_balanced=True,
-                environment_version=result["environment_version"],
-                goals_for=result["goals_for"], goals_against=result["goals_against"],
-            )
-            trajectory = f"evaluations/{evaluation_id}/trajectory.json" if (directory / "trajectory.json").is_file() else None
-            self.store.update_evaluation(evaluation_id, status="completed", result=result, trajectory=trajectory, progress=1.0)
-            self.store.event("info", "evaluation_finished",
-                             f"Evaluation completed: {result['wins']}W/{result['losses']}L/{result['draws']}D, "
-                             f"goals {result['goals_for']}–{result['goals_against']}, win rate "
-                             f"{result['win_rate']:.0%} (95% CI {result['win_rate_ci95'][0]:.0%}–{result['win_rate_ci95'][1]:.0%}).",
-                             spec.run_id)
+            self._execute_evaluation(evaluation_id, spec)
         except Exception as error:
             self.store.update_evaluation(evaluation_id, status="failed", error=str(error))
             self.store.event("error", "evaluation_failed", str(error), spec.run_id)
@@ -563,7 +572,83 @@ class Orchestrator:
                 if self.auxiliary == "evaluation":
                     self.auxiliary = None
 
-    @staticmethod
+    # -- Checkpoint league (sequential round-robin of frozen matches) ---------
+    def start_league(self, spec: LeagueSpec) -> dict:
+        with self.lock:
+            self._require_idle()
+            missing = [name for name, version in package_versions().items() if version is None]
+            if missing:
+                raise AppError("Training extra is missing: " + ", ".join(missing) +
+                               ". Run uv sync --frozen --extra training before running a league.")
+            for ref in spec.checkpoints:
+                self._target({"run_id": ref["run_id"], "checkpoint_id": ref["checkpoint_id"]})
+            league = self.store.create_league(spec.model_dump(mode="json"))
+            self.auxiliary = "league"
+            self.league_stop.clear()
+            self.evaluation_stop.clear()
+            self.store.event("info", "league_started",
+                             f"League started: {len(spec.checkpoints)} checkpoints, "
+                             f"{len(spec.pairs())} matches of {spec.games_per_pair} games. All weights frozen; "
+                             "results feed Elo ratings. Starting the league was an explicit user action.")
+            thread = threading.Thread(target=self._run_league, args=(league["id"], spec),
+                                      daemon=True, name="league")
+            thread.start()
+            return league
+
+    def _run_league(self, league_id: str, spec):
+        evaluation_ids, failures = [], 0
+        try:
+            for pair_index, (opponent, candidate) in enumerate(spec.pairs()):
+                if self.league_stop.is_set():
+                    break
+                ev_spec = EvaluationSpec(
+                    run_id=candidate["run_id"], checkpoint_id=candidate["checkpoint_id"],
+                    opponent_run_id=opponent["run_id"], opponent_checkpoint_id=opponent["checkpoint_id"],
+                    games=spec.games_per_pair, seed=spec.seed + pair_index * 1000,
+                    max_game_seconds=spec.max_game_seconds, parallel_workers=spec.parallel_workers,
+                    record_games=1 if pair_index == 0 else 0,
+                )
+                evaluation = self.store.create_evaluation(ev_spec.model_dump(mode="json"))
+                evaluation_ids.append(evaluation["id"])
+                self.store.update_league(league_id, evaluation_ids=evaluation_ids)
+                try:
+                    outcome = self._execute_evaluation(evaluation["id"], ev_spec)
+                except Exception as error:
+                    self.store.update_evaluation(evaluation["id"], status="failed", error=str(error))
+                    self.store.event("error", "evaluation_failed", str(error), ev_spec.run_id)
+                    failures += 1
+                    continue
+                if outcome == "stopped":
+                    break
+            if self.league_stop.is_set():
+                status = "stopped"
+            elif failures and failures == len(spec.pairs()):
+                status = "failed"
+            elif failures:
+                status = "completed_with_failures"
+            else:
+                status = "completed"
+            self.store.update_league(league_id, status=status, evaluation_ids=evaluation_ids)
+            self.store.event("info", "league_finished",
+                             f"League {status}: {len(evaluation_ids)} match(es) recorded. Ratings in Models are Elo over checkpoint matches only.")
+        except Exception as error:
+            self.store.update_league(league_id, status="failed", error=str(error))
+            self.store.event("error", "league_failed", str(error))
+        finally:
+            self.evaluation_process = None
+            with self.lock:
+                if self.auxiliary == "league":
+                    self.auxiliary = None
+
+    def stop_league(self, league_id: str) -> dict:
+        with self.lock:
+            league = self.store.league(league_id)
+            if self.auxiliary != "league" or league["status"] != "running":
+                raise AppError("This league is not running.")
+            self.league_stop.set()
+            self.evaluation_stop.set()
+            return {"status": "stopping"}
+
     def _kill_evaluation_group(process):
         try:
             os.killpg(process.pid, signal.SIGKILL)

@@ -214,3 +214,31 @@ def experiment_journal(runs: list[dict], evaluations: list[dict]) -> list[dict]:
         if latest:
             previous_eval = latest
     return journal
+
+
+class LeagueSpec(BaseModel):
+    """Round-robin over frozen checkpoints. One directed, side-balanced
+    match per unordered pair; Elo consumes the results chronologically."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    checkpoints: list[dict] = Field(min_length=2, max_length=6)
+    games_per_pair: int = Field(default=20, ge=2, le=100)
+    seed: int = Field(default=2000, ge=0, le=2**31 - 1)
+    max_game_seconds: float = Field(default=60.0, ge=5, le=300)
+    parallel_workers: int = Field(default=2, ge=1, le=8)
+
+    @model_validator(mode="after")
+    def check_league(self) -> Self:
+        if self.games_per_pair % 2:
+            raise ValueError("games_per_pair must be even for side balance")
+        refs = [(item.get("run_id"), item.get("checkpoint_id")) for item in self.checkpoints]
+        if any(not run_id or not checkpoint_id for run_id, checkpoint_id in refs):
+            raise ValueError("each league entry needs run_id and checkpoint_id")
+        if len(set(refs)) != len(refs):
+            raise ValueError("league checkpoints must be unique")
+        return self
+
+    def pairs(self) -> list[tuple[dict, dict]]:
+        return [(self.checkpoints[i], self.checkpoints[j])
+                for i in range(len(self.checkpoints)) for j in range(i + 1, len(self.checkpoints))]

@@ -460,7 +460,7 @@ function models() {
             `<a class="button secondary" href="#training">${icon("training")}Open training</a>`,
           )
     }</section><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Recommended candidates</h2><p>Evidence before promotion</p></div><span class="pill muted-pill">EVALUATION-BACKED</span></div><div class="panel-body">${(state.evaluation_comparison || []).length ? `<div class="system-note">${icon("info")}<span>Ranked by lower 95% Wilson bound in the evaluation table below. Designation remains manual and requires your confirmation.</span></div>` : `<div class="system-note">${icon("info")}<span>No candidates are recommended without measured, frozen-opponent evaluation results. A manual designation is not proof of strength.</span></div>`}</div></section><section class="panel"><div class="panel-header"><div><h2>Recovery contract</h2><p>Clear about what is restored</p></div>${icon("shield")}</div><div class="panel-body"><p class="resource-note">Actor, critic, optimizers, experience buffer, GAE statistics, RNG state, and counters are restored at a completed update. New simulator episodes start after recovery. The original run and checkpoints remain untouched.</p></div></section></div>` +
-    evaluationSection(valid) + compareSection(valid) + ratingsJournalSection()
+    evaluationSection(valid) + compareSection(valid) + ratingsJournalSection() + leagueSection(valid)
   );
 }
 let compareSelection = { a: "", b: "" };
@@ -493,6 +493,13 @@ function ratingsJournalSection() {
   const journal = (state.experiment_journal || []).slice().reverse();
   const journalRows = journal.map((entry) => `<tr><td>${esc(entry.name)}<small>${date(entry.created)}</small></td><td>${esc(entry.status)}</td><td>${entry.config_changes_vs_previous.length ? esc(entry.config_changes_vs_previous.join(", ")) : "—"}</td><td>${entry.evaluation ? `${number(entry.evaluation.win_rate * 100, 0)}% vs ${esc(entry.evaluation.opponent_id)} (n=${entry.evaluation.games})` : "not evaluated"}</td><td>${esc(entry.verdict)}</td></tr>`).join("");
   return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Checkpoint ratings & experiment journal</h2><p>Elo from checkpoint-vs-checkpoint matches only · verdicts require interval separation</p></div>${icon("trophy")}</div>${ratings.length ? `<div class="table-wrap"><table><thead><tr><th>RANK</th><th>CHECKPOINT</th><th>ELO</th><th>GAMES</th><th>MATCHES</th></tr></thead><tbody>${ratingRows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">No checkpoint-vs-checkpoint matches yet. Scripted-baseline results are gates, not ratings.</p></div>'}${journalRows ? `<div class="table-wrap"><table><thead><tr><th>EXPERIMENT</th><th>STATUS</th><th>CHANGED VS PREVIOUS</th><th>LATEST EVALUATION</th><th>VERDICT</th></tr></thead><tbody>${journalRows}</tbody></table></div>` : ""}</section>`;
+}
+function leagueSection(valid) {
+  const leagues = state.leagues || [];
+  const running = leagues.some((item) => item.status === "running");
+  const checks = valid.map((item) => `<label class="approval-check"><input type="checkbox" data-league-checkpoint value="${item.run_id}|${item.id}"> ${esc(item.id.slice(0, 24))} · step ${number(item.step)}</label>`).join("");
+  const rows = leagues.map((item) => `<tr><td>${esc(item.id.slice(0, 12))}<small>${date(item.created)}</small></td><td>${esc(item.status)}</td><td>${(item.evaluation_ids || []).length} match(es)</td><td>${item.status === "running" ? button("stop-league", "Stop league", "stop", "ghost", !writable(), `data-league-id="${item.id}"`) : ""}${item.error ? esc(item.error) : ""}</td></tr>`).join("");
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Checkpoint league</h2><p>Round-robin of frozen matches · one side-balanced match per pair · feeds Elo ratings</p></div><span class="pill muted-pill">${running ? "RUNNING" : "EXPLICIT START ONLY"}</span></div><div class="panel-body"><fieldset class="field"><legend>League checkpoints (2–6)</legend>${checks || "No valid checkpoints yet."}</fieldset><div class="form-grid"><label class="field">Games per pair (even)<input id="league-games" type="number" min="2" max="100" step="2" value="20"></label><label class="field">Parallel workers<input id="league-workers" type="number" min="1" max="8" value="2"></label></div><div class="config-actions">${button("start-league", "Start league", "trophy", "primary", !writable() || !idle() || valid.length < 2 || running)}</div><p class="subtle">Every match is a normal frozen evaluation recorded above; nothing is promoted or deleted. Stop ends the current match without a partial result.</p></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>LEAGUE</th><th>STATUS</th><th>MATCHES</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}</section>`;
 }
 function configInput(
   label,
@@ -1057,6 +1064,24 @@ async function action(action, element) {
   if (action === "stop-evaluation") {
     await api(`evaluations/${element.dataset.evaluationId}/stop`, {});
     toast("Evaluation stop requested. No partial result will be reported.");
+    await refresh();
+    return;
+  }
+  if (action === "start-league") {
+    const checkpoints = [...document.querySelectorAll("[data-league-checkpoint]:checked")].map((box) => {
+      const [run_id, checkpoint_id] = box.value.split("|");
+      return { run_id, checkpoint_id };
+    });
+    if (checkpoints.length < 2) throw new Error("Select at least two league checkpoints.");
+    await api("leagues", { checkpoints, games_per_pair: Number($("#league-games").value),
+      parallel_workers: Number($("#league-workers").value) });
+    toast("League started. Matches run sequentially with frozen weights.");
+    await refresh();
+    return;
+  }
+  if (action === "stop-league") {
+    await api(`leagues/${element.dataset.leagueId}/stop`, {});
+    toast("League stop requested.");
     await refresh();
     return;
   }
