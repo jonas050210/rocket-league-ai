@@ -61,7 +61,7 @@ def test_retention_candidates_keep_newest_and_protected():
     models = [item(step) for step in (0, 100, 200, 300, 400, 500, 600, 700)]
     candidates = retention_candidates(models, {"checkpoint_id": models[0]["id"]}, {"r": models[-1]["id"]}, keep_per_run=5)
     kept = {item["step"] for item in models} - {item["step"] for item in candidates}
-    assert kept == {300, 400, 500, 600, 700}
+    assert kept == {0, 300, 400, 500, 600, 700}  # step 0 survives as the designated best
     assert all(item["reclaimable_bytes"] == 10 for item in candidates)
 
 
