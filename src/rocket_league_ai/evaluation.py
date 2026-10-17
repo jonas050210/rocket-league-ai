@@ -111,9 +111,13 @@ def compare_evaluations(evaluations: list[dict]) -> list[dict]:
     lucky small sample. Entries against different opponents are never merged.
     """
     ranked = []
+    required = {"candidate_checkpoint_id", "candidate_run_id", "opponent_id", "games",
+                "win_rate", "win_rate_ci95", "goals_for", "goals_against"}
     for item in evaluations:
         if item["status"] != "completed" or not item.get("result"):
             continue
+        if not required <= item["result"].keys():
+            continue  # partial/legacy records are listed, never ranked on missing evidence
         result = item["result"]
         ranked.append({
             "evaluation_id": item["id"], "candidate_checkpoint_id": result["candidate_checkpoint_id"],
