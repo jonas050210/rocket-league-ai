@@ -320,10 +320,15 @@ class Store:
                 raise AppError("Evaluation not found. Refresh the evaluation history.", 404)
             return result
 
-    def evaluations(self, limit: int = 50) -> list[dict]:
+    def evaluations(self, limit: int = 50, *, light: bool = False) -> list[dict]:
         with self.lock:
             rows = self.db.execute("SELECT * FROM evaluations ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
-            return [self.decode(row) for row in rows]
+            result = [self.decode(row) for row in rows]
+            if light:  # snapshot polling must not ship every per-game record each second
+                for item in result:
+                    if item.get("result"):
+                        item["result"] = {k: v for k, v in item["result"].items() if k != "games_detail"}
+            return result
 
     def update_evaluation(self, evaluation_id: str, **fields) -> dict:
         if not fields.keys() <= {"status", "result", "trajectory", "error", "progress"}:

@@ -111,9 +111,10 @@ def _extra_insights(runs, evaluations, metric_history, benchmark) -> list[dict]:
                        "impact": "Evaluate the newest checkpoint against the random or idle baseline in Models to establish a baseline before claiming improvement."})
     if completed:
         newest = completed[0]["result"]
-        if newest["win_rate_ci95"][1] < 0.5 and newest["opponent_id"] == "random-v1":
+        ci = newest.get("win_rate_ci95") or [0, 1]
+        if ci[1] < 0.5 and newest.get("opponent_id") == "random-v1":
             result.append({"severity": "warning", "title": "Checkpoint does not yet beat random play",
-                           "rationale": f"Win rate {newest['win_rate']:.0%} with 95% CI up to {newest['win_rate_ci95'][1]:.0%} over {newest['games']} games.",
+                           "rationale": f"Win rate {newest.get('win_rate', 0):.0%} with 95% CI up to {ci[1]:.0%} over {newest.get('games', 0)} games.",
                            "impact": "Keep training or revisit reward/curriculum in a new, separately approved experiment; compare checkpoints under identical evaluation conditions."})
     session = (benchmark or {}).get("session") or {}
     recommendation = session.get("recommendation") or {}
@@ -122,3 +123,38 @@ def _extra_insights(runs, evaluations, metric_history, benchmark) -> list[dict]:
                        "rationale": recommendation["explanation"],
                        "impact": "Review it on the Benchmark page; adoption requires a confirmed configuration proposal and is never automatic."})
     return result
+
+
+def next_experiment(runs: list[dict], evaluations: list[dict] | None, benchmark: dict | None,
+                    plan: dict | None) -> dict | None:
+    """One concrete, evidence-linked next experiment — or None. Never executed automatically."""
+    plan = plan or {}
+    completed = [item for item in (evaluations or []) if item.get("status") == "completed" and item.get("result")]
+    if not completed:
+        return {"kind": "evaluation", "title": "Establish a gameplay baseline first",
+                "rationale": "No completed checkpoint evaluation exists, so no training change can be judged.",
+                "action": "In Models, evaluate the newest valid checkpoint against random-v1 over at least 100 side-balanced games.",
+                "evidence": "evaluation history is empty"}
+    newest = completed[0]["result"]
+    ci = newest.get("win_rate_ci95") or [0, 1]
+    if newest.get("opponent_id") == "random-v1" and ci[1] < 0.5:
+        if plan.get("reward_version") == "goal10-touch0.1-transition-v1":
+            return {"kind": "reward_shaping", "title": "Try one shaped-reward experiment",
+                    "rationale": f"The newest checkpoint does not beat random play (win rate {newest.get('win_rate', 0):.0%}, 95% CI up to {ci[1]:.0%}). The foundation reward is almost purely sparse goal/touch.",
+                    "action": "Create a separately approved plan with reward_version goal10-touch0.1-shaped-v2 and only reward_velocity_to_ball_weight 0.3 enabled; train with the same step budget and evaluate identically.",
+                    "evidence": f"evaluation {newest.get('candidate_checkpoint_id')} vs random-v1, {newest.get('games', 0)} games"}
+        return {"kind": "training_budget", "title": "Extend training before changing strategy",
+                "rationale": f"Even with shaping, the checkpoint does not beat random play (win rate {newest.get('win_rate', 0):.0%}).",
+                "action": "Approve a longer run from the latest checkpoint (recovery) and re-evaluate under identical conditions.",
+                "evidence": f"evaluation {newest.get('candidate_checkpoint_id')} vs random-v1, {newest.get('games', 0)} games"}
+    session = (benchmark or {}).get("session") or {}
+    candidate = (session.get("recommendation") or {}).get("candidate")
+    if candidate and (candidate["device"] != plan.get("device") or candidate["n_proc"] != plan.get("n_proc")):
+        return {"kind": "benchmark_adoption", "title": "Review the benchmark recommendation",
+                "rationale": session["recommendation"]["explanation"],
+                "action": "On the Benchmark page, review the recommendation as a configuration proposal. Throughput only — judge learning quality by evaluation afterwards.",
+                "evidence": f"benchmark session {session['id']}"}
+    return {"kind": "checkpoint_opponent", "title": "Measure against a frozen checkpoint",
+            "rationale": "The checkpoint beats the scripted baseline; the next honest question is whether newer checkpoints beat older ones.",
+            "action": "Evaluate the newest checkpoint against an older checkpoint (checkpoint opponent in Models) with the same seed and game count.",
+            "evidence": f"evaluation {newest.get('candidate_checkpoint_id')} vs {newest.get('opponent_id')}"}

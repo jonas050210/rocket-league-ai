@@ -19,7 +19,7 @@ from .domain import ACTIVE, TERMINAL, AppError, EvaluationResult, RunStatus, con
 from .evaluation import EvaluationSpec, GameRecord, compare_evaluations
 from .evaluation import summarize as summarize_evaluation
 from .metadata import experiment_metadata, package_versions, require_recovery_compatible
-from .monitoring import SystemMonitor, recommendations
+from .monitoring import SystemMonitor, next_experiment, recommendations
 from .persistence import Lease, atomic_json, lease_available
 from .store import Store, checked_id, new_id
 
@@ -114,7 +114,7 @@ class Orchestrator:
                 "plan": self.store.setting("plan"), "plan_revision": self.store.setting("plan_revision"),
                 "system": system, "recommendations": recommendations(
                     runs, system,
-                    evaluations=self.store.evaluations(limit=10),
+                    evaluations=self.store.evaluations(limit=10, light=True),
                     metric_history=[event["data"] for event in self.store.events_for_run(runs[0]["id"], "training_metrics")] if runs else [],
                     benchmark=self._benchmark_snapshot(),
                 ),
@@ -122,8 +122,10 @@ class Orchestrator:
                 "evaluation_available": all(version is not None for version in package_versions().values()),
                 "visualization_available": True,
                 "benchmark": self._benchmark_snapshot(),
-                "evaluations": self.store.evaluations(),
-                "evaluation_comparison": compare_evaluations(self.store.evaluations()),
+                "evaluations": self.store.evaluations(light=True),
+                "evaluation_comparison": compare_evaluations(self.store.evaluations(light=True)),
+                "next_experiment": next_experiment(runs, self.store.evaluations(light=True),
+                                                   self._benchmark_snapshot(), self.store.setting("plan")),
                 "worker_health": {
                     "connected": self.active is not None,
                     "heartbeat_age_seconds": time.monotonic() - self.active.heartbeat if self.active else None,

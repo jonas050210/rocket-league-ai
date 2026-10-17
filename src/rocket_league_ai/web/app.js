@@ -318,7 +318,7 @@ function recentActivity() {
   return `<section class="panel"><div class="panel-header"><div><h2>Workspace activity</h2><p>Every decision leaves a trace</p></div><a class="text-button" href="#monitoring">All logs ${icon("arrow")}</a></div><div class="activity-list">${activity.length ? activity.map((event) => `<div class="activity-row"><span class="activity-dot ${event.level}"></span><div class="activity-copy"><strong>${esc(event.message)}</strong><small>${esc(event.kind.replaceAll("_", " "))}</small></div><time class="activity-time">${time(event.ts)}</time></div>`).join("") : '<p class="subtle">No events received yet.</p>'}</div></section>`;
 }
 function advisoryPanel() {
-  return `<section class="panel"><div class="panel-header"><div><h2>Workspace insights</h2><p>Recommendations, not automatic changes</p></div><span class="pill muted-pill">ADVISORY ONLY</span></div><div class="panel-body">${state.recommendations.length ? state.recommendations.map((item) => `<div class="recommendation"><strong>${esc(item.title)}</strong><p>${esc(item.rationale)}</p><small>Expected impact: ${esc(item.impact)}</small></div>`).join("") : '<p class="subtle">No health warnings in the latest sample. Competitive recommendations require a real evaluation harness.</p>'}</div></section>`;
+  return `<section class="panel"><div class="panel-header"><div><h2>Workspace insights</h2><p>Recommendations, not automatic changes</p></div><span class="pill muted-pill">ADVISORY ONLY</span></div><div class="panel-body">${state.next_experiment ? `<div class="recommendation"><strong>Next experiment: ${esc(state.next_experiment.title)}</strong><p>${esc(state.next_experiment.rationale)}</p><p>${esc(state.next_experiment.action)}</p><small>Evidence: ${esc(state.next_experiment.evidence)} · Requires your explicit approval; nothing runs automatically.</small></div>` : ""}${state.recommendations.length ? state.recommendations.map((item) => `<div class="recommendation"><strong>${esc(item.title)}</strong><p>${esc(item.rationale)}</p><small>Expected impact: ${esc(item.impact)}</small></div>`).join("") : '<p class="subtle">No health warnings in the latest sample.</p>'}</div></section>`;
 }
 function dashboard() {
   const run = state.active_run || state.runs[0],
@@ -460,8 +460,32 @@ function models() {
             `<a class="button secondary" href="#training">${icon("training")}Open training</a>`,
           )
     }</section><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Recommended candidates</h2><p>Evidence before promotion</p></div><span class="pill muted-pill">EVALUATION-BACKED</span></div><div class="panel-body">${(state.evaluation_comparison || []).length ? `<div class="system-note">${icon("info")}<span>Ranked by lower 95% Wilson bound in the evaluation table below. Designation remains manual and requires your confirmation.</span></div>` : `<div class="system-note">${icon("info")}<span>No candidates are recommended without measured, frozen-opponent evaluation results. A manual designation is not proof of strength.</span></div>`}</div></section><section class="panel"><div class="panel-header"><div><h2>Recovery contract</h2><p>Clear about what is restored</p></div>${icon("shield")}</div><div class="panel-body"><p class="resource-note">Actor, critic, optimizers, experience buffer, GAE statistics, RNG state, and counters are restored at a completed update. New simulator episodes start after recovery. The original run and checkpoints remain untouched.</p></div></section></div>` +
-    evaluationSection(valid)
+    evaluationSection(valid) + compareSection(valid)
   );
+}
+let compareSelection = { a: "", b: "" };
+function compareSection(valid) {
+  const options = valid.map((item) => `<option value="${item.run_id}|${item.id}">${esc(item.id.slice(0, 24))} · step ${number(item.step)}</option>`).join("");
+  let panel = "";
+  const a = state.checkpoints.find((item) => `${item.run_id}|${item.id}` === compareSelection.a);
+  const b = state.checkpoints.find((item) => `${item.run_id}|${item.id}` === compareSelection.b);
+  if (a && b) {
+    const runOf = (item) => state.runs.find((run) => run.id === item.run_id);
+    const fields = ["device", "n_proc", "batch_size", "learning_rate", "n_epochs", "clip_range", "reward_version", "environment_version", "hidden_sizes", "seed"];
+    const rows = fields.map((field) => {
+      const va = JSON.stringify(runOf(a)?.config[field]);
+      const vb = JSON.stringify(runOf(b)?.config[field]);
+      return `<tr><td>${esc(field)}</td><td>${esc(va)}</td><td>${esc(vb)}</td><td>${va === vb ? "same" : "DIFFERS"}</td></tr>`;
+    }).join("");
+    const ea = latestEvaluation(a.id), eb = latestEvaluation(b.id);
+    const verdict = ea && eb
+      ? (ea.result.win_rate_ci95[0] > eb.result.win_rate_ci95[1] ? "A's interval is entirely above B's — measured advantage for A under its evaluation conditions."
+        : eb.result.win_rate_ci95[0] > ea.result.win_rate_ci95[1] ? "B's interval is entirely above A's — measured advantage for B under its evaluation conditions."
+        : "Confidence intervals overlap — no measured advantage. Evaluate both against the same opponent with more games.")
+      : "At least one checkpoint is unevaluated; no strength comparison is possible.";
+    panel = `<div class="table-wrap"><table><thead><tr><th>FIELD</th><th>A · ${esc(a.id.slice(0, 20))} (step ${number(a.step)})</th><th>B · ${esc(b.id.slice(0, 20))} (step ${number(b.step)})</th><th></th></tr></thead><tbody>${rows}<tr><td>evaluation</td><td>${ea ? `${number(ea.result.win_rate * 100, 0)}% vs ${esc(ea.result.opponent_id)} (n=${ea.result.games})` : "not evaluated"}</td><td>${eb ? `${number(eb.result.win_rate * 100, 0)}% vs ${esc(eb.result.opponent_id)} (n=${eb.result.games})` : "not evaluated"}</td><td></td></tr></tbody></table></div><div class="panel-body"><p class="subtle">${esc(verdict)}</p></div>`;
+  }
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Compare checkpoints</h2><p>Configuration differences and measured evaluation — never age or reward alone</p></div>${icon("chart")}</div><div class="panel-body"><div class="form-grid"><label class="field">Checkpoint A<select id="compare-a">${options}</select></label><label class="field">Checkpoint B<select id="compare-b">${options}</select></label></div><div class="config-actions">${button("compare-models", "Compare", "chart", "secondary", !valid.length)}</div></div>${panel}</section>`;
 }
 function configInput(
   label,
@@ -522,7 +546,7 @@ function visualization() {
       "Recorded evaluation replays, rendered locally. Training stays headless.",
       `<span class="pill muted-pill">RECORDED REPLAY · TOP-DOWN</span>`,
     ) +
-    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer</h2><p>Real RocketSim trajectories recorded during evaluation — a schematic top-down view, not a 3D renderer</p></div>${statusPill(replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && writable() ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay"><div class="replay-readout" id="replay-readout">${replay.data ? esc(replayReadout()) : "Run an evaluation from Models to record a replay. Opening this viewer never affects a training run."}</div></div><div class="viz-specs"><span>SOURCE<strong>Evaluation trajectory artifact</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>BOUNDARY<strong>No live 3D renderer (NumPy/renderer conflict documented)</strong></span></div></section>`
+    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer</h2><p>Real RocketSim trajectories recorded during evaluation — a schematic top-down view, not a 3D renderer</p></div>${statusPill(replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && writable() ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay">${replay.data ? `<div class="replay-markers">${replayGoalMarkers()}</div>` : ""}<div class="replay-readout" id="replay-readout">${replay.data ? esc(replayReadout()) : "Run an evaluation from Models to record a replay. Opening this viewer never affects a training run."}</div></div><div class="viz-specs"><span>SOURCE<strong>Evaluation trajectory artifact</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>BOUNDARY<strong>No live 3D renderer (NumPy/renderer conflict documented)</strong></span></div></section>`
   );
 }
 function replayReadout() {
@@ -582,6 +606,18 @@ function drawReplayFrame() {
   if (readout) readout.textContent = replayReadout();
   const scrub = document.getElementById("replay-scrub");
   if (scrub && document.activeElement !== scrub) scrub.value = replay.frame;
+}
+function replayGoalMarkers() {
+  if (!replay.data) return "";
+  const markers = [];
+  let previous = [0, 0];
+  replay.data.frames.forEach((frame, index) => {
+    if (frame.score[0] !== previous[0] || frame.score[1] !== previous[1]) {
+      markers.push(`<button class="marker" data-action="replay-jump" data-frame="${index}" title="Goal at frame ${index + 1}">Goal ${frame.score[0]}-${frame.score[1]}</button>`);
+      previous = frame.score;
+    }
+  });
+  return markers.length ? markers.join("") : '<span class="subtle">No goals in the recorded games.</span>';
 }
 function stopReplayTimer() {
   if (replay.timer) { clearInterval(replay.timer); replay.timer = null; }
@@ -966,6 +1002,17 @@ async function action(action, element) {
     stopReplayTimer();
     replay = { id, data, frame: 0, playing: false, speed: Number($("#replay-speed")?.value || 1), follow: true, timer: null };
     location.hash = "visualization";
+    render(true);
+    return;
+  }
+  if (action === "compare-models") {
+    compareSelection = { a: $("#compare-a").value, b: $("#compare-b").value };
+    render(true);
+    return;
+  }
+  if (action === "replay-jump") {
+    replay.frame = Number(element.dataset.frame);
+    drawReplayFrame();
     render(true);
     return;
   }

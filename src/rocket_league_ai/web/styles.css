@@ -1945,3 +1945,7 @@ dialog .field {
 .replay-readout { margin-top:8px; font-size:13px; color:var(--muted, #9ca3af); }
 fieldset.field { border:1px solid var(--border, #26314a); border-radius:10px; padding:10px 12px; display:grid; gap:6px; }
 fieldset.field legend { font-size:12px; padding:0 6px; color:var(--muted, #9ca3af); }
+.replay-markers { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.replay-markers .marker { cursor:pointer; }
+.replay-markers { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.replay-markers .marker { cursor:pointer; }
