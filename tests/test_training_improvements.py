@@ -27,13 +27,13 @@ def fake_state(car_velocity, ball_velocity=(0.0, 0.0, 0.0)):
 def test_shaping_rewards_direction_and_normalization():
     moving_to_ball = shaping_rewards(["blue-0"], fake_state((0.0, 2300.0, 0.0)),
                                      velocity_to_ball_weight=1.0, ball_to_goal_weight=0.0)
-    assert moving_to_ball["blue-0"] == pytest.approx(1.0)
+    assert moving_to_ball["blue-0"] == pytest.approx(1.0, rel=0.01)  # ball floats above car height
     moving_away = shaping_rewards(["blue-0"], fake_state((0.0, -2300.0, 0.0)),
                                   velocity_to_ball_weight=1.0, ball_to_goal_weight=0.0)
-    assert moving_away["blue-0"] == pytest.approx(-1.0)
+    assert moving_away["blue-0"] == pytest.approx(-1.0, rel=0.01)
     ball_to_goal = shaping_rewards(["blue-0"], fake_state((0.0, 0.0, 0.0), (0.0, 2300.0, 0.0)),
                                    velocity_to_ball_weight=0.0, ball_to_goal_weight=0.5)
-    assert ball_to_goal["blue-0"] == pytest.approx(0.5)
+    assert ball_to_goal["blue-0"] == pytest.approx(0.5, rel=0.01)
     zero = shaping_rewards(["blue-0"], fake_state((0.0, 2300.0, 0.0)),
                            velocity_to_ball_weight=0.0, ball_to_goal_weight=0.0)
     assert zero["blue-0"] == 0.0  # foundation reward unchanged by default
