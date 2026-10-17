@@ -27,7 +27,7 @@ uv run --no-sync rocket-ai browser-url  # private capability URL; do not share
 
 Training data/checkpoints live in `.rlai/` by default; change it with `--data-dir` or `RLAI_DATA_DIR`. Keep it on the Linux filesystem. Default service binding is loopback. Never share the access key, unredacted traces or a private workspace publicly.
 
-## Six views
+## Seven views
 
 - **Dashboard:** real run/episode/reward/speed signals, host resources and readiness.
 - **Training:** confirmed start, acknowledged pause/resume/stop, progress and experiment history.

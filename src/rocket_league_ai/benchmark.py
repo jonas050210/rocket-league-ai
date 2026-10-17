@@ -106,6 +106,36 @@ def aggregate_iterations(iterations: list[dict], warmup: int, batch_size: int) -
     }
 
 
+def combine_repeats(per_repeat: list[dict]) -> dict:
+    """Combine per-repeat aggregates honestly.
+
+    Each repeat was already warm-up-excluded and counted within its own run.
+    The combined median is the median of repeat medians, and the reported CV
+    describes variability *between repeats* — the number a user actually
+    experiences when rerunning a configuration.
+    """
+    if not per_repeat:
+        raise ValueError("no repeat aggregates to combine")
+
+    def combined(key: str) -> dict:
+        medians = [repeat[key]["median"] for repeat in per_repeat]
+        median = statistics.median(medians)
+        deviation = statistics.pstdev(medians) if len(medians) > 1 else 0.0
+        return {"median": median, "min": min(medians), "max": max(medians),
+                "cv": (deviation / median) if median else 0.0,
+                "repeat_medians": medians}
+
+    return {
+        "repeats": len(per_repeat),
+        "iterations_measured": sum(repeat["iterations_measured"] for repeat in per_repeat),
+        "agent_steps_per_second": combined("agent_steps_per_second"),
+        "simulation_steps_per_second": combined("simulation_steps_per_second"),
+        "ppo_steps_per_second": combined("ppo_steps_per_second"),
+        "episodes_per_minute": statistics.median([repeat["episodes_per_minute"] for repeat in per_repeat]),
+        "episodes_measured": sum(repeat["episodes_measured"] for repeat in per_repeat),
+    }
+
+
 def recommend(results: list[dict], spec: BenchmarkSpec) -> dict:
     """Fastest *stable* candidate, or an explicit refusal to recommend.
 

@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .benchmark import BenchmarkSpec, aggregate_iterations, recommend
+from .benchmark import BenchmarkSpec, aggregate_iterations, combine_repeats, recommend
 from .checkpoints import CheckpointStore, file_hash
 from .config import TrainingConfig, changes, digest
 from .domain import ACTIVE, TERMINAL, AppError, EvaluationResult, RunStatus, control_target
@@ -380,10 +380,11 @@ class Orchestrator:
                         "run_id": run_ids[-1] if run_ids else None,
                     })
                     continue
-                # Aggregate across repeats: pool measured iterations so the CV
-                # reflects both within-run and between-run variability.
-                pooled = [iteration for iterations in repeats_iterations for iteration in iterations]
-                aggregate = aggregate_iterations(pooled, spec.warmup_iterations, spec.batch_size)
+                # Aggregate per repeat first (warm-up excluded and episode
+                # counters counted within each run), then combine repeats.
+                per_repeat = [aggregate_iterations(iterations, spec.warmup_iterations, spec.batch_size)
+                              for iterations in repeats_iterations]
+                aggregate = combine_repeats(per_repeat)
                 merged = {
                     "cpu_percent_peak": max((item["cpu_percent_peak"] for item in resources), default=None),
                     "memory_percent_peak": max((item["memory_percent_peak"] for item in resources), default=None),

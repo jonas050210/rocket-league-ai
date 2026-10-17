@@ -75,5 +75,5 @@ def experiment_metadata() -> dict:
         "platform": platform.system(),
         "architecture": platform.machine(),
         "resume_semantics": "update-boundary learner/optimizer/buffer/RNG restore; environments reset",
-        "evaluation": "not implemented; self-play training reward is not win rate",
+        "evaluation": "frozen-checkpoint vs scripted baselines (evaluation.py); self-play training reward is not win rate",
     }

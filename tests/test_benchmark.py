@@ -114,3 +114,22 @@ def test_benchmark_api_runs_injected_measurements(client, manager, monkeypatch):
 def test_benchmark_api_validation(client):
     assert client.post("/api/benchmarks", json={"devices": ["tpu"]}).status_code == 422
     assert client.post("/api/benchmarks", json={"batch_size": 4096, "measure_iterations": 20}).status_code == 422
+
+
+def test_combine_repeats_excludes_each_repeats_warmup_and_counts_episodes_per_run():
+    from rocket_league_ai.benchmark import combine_repeats
+
+    def repeat(warmup_collection, measured_collection, episodes):
+        iterations = [{"steps": 128, "collection_seconds": warmup_collection, "learning_seconds": 0.1,
+                       "iteration_seconds": warmup_collection + 0.1, "episodes": 0}]
+        iterations += [{"steps": (i + 2) * 128, "collection_seconds": measured_collection,
+                        "learning_seconds": 0.1, "iteration_seconds": measured_collection + 0.1,
+                        "episodes": episodes} for i in range(2)]
+        return aggregate_iterations(iterations, warmup=1, batch_size=128)
+
+    combined = combine_repeats([repeat(99.0, 0.4, 4), repeat(88.0, 0.2, 6)])
+    # Neither repeat's slow warm-up leaks into the combined simulation rate.
+    assert combined["simulation_steps_per_second"]["repeat_medians"] == pytest.approx([128 / 0.4, 128 / 0.2])
+    # Episode spans are counted inside each run, never across run boundaries.
+    assert combined["episodes_measured"] == 10
+    assert combined["repeats"] == 2 and combined["iterations_measured"] == 4
