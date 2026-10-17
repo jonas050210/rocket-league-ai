@@ -16,7 +16,13 @@ from .benchmark import BenchmarkSpec, aggregate_iterations, combine_repeats, rec
 from .checkpoints import CheckpointStore, file_hash
 from .config import TrainingConfig, changes, digest
 from .domain import ACTIVE, TERMINAL, AppError, EvaluationResult, RunStatus, control_target
-from .evaluation import EvaluationSpec, GameRecord, compare_evaluations
+from .evaluation import (
+    EvaluationSpec,
+    GameRecord,
+    compare_evaluations,
+    elo_ratings,
+    experiment_journal,
+)
 from .evaluation import summarize as summarize_evaluation
 from .metadata import experiment_metadata, package_versions, require_recovery_compatible
 from .monitoring import SystemMonitor, next_experiment, recommendations
@@ -124,6 +130,8 @@ class Orchestrator:
                 "benchmark": self._benchmark_snapshot(),
                 "evaluations": self.store.evaluations(light=True),
                 "evaluation_comparison": compare_evaluations(self.store.evaluations(light=True)),
+                "checkpoint_ratings": elo_ratings(self.store.evaluations(light=True)),
+                "experiment_journal": experiment_journal(runs, self.store.evaluations(light=True)),
                 "next_experiment": next_experiment(runs, self.store.evaluations(light=True),
                                                    self._benchmark_snapshot(), self.store.setting("plan")),
                 "worker_health": {

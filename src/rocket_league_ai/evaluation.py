@@ -141,3 +141,75 @@ def compare_evaluations(evaluations: list[dict]) -> list[dict]:
             "created": item["created"],
         })
     return sorted(ranked, key=lambda entry: entry["score_lower_bound"], reverse=True)
+
+
+def elo_ratings(evaluations: list[dict], *, k: float = 32.0, initial: float = 1500.0) -> list[dict]:
+    """Chronological Elo over genuine checkpoint-vs-checkpoint evaluations only.
+
+    Scripted-baseline results never enter ratings (beating random is a gate,
+    not a rating). Each evaluation is one match: score = (W + 0.5·D) / games.
+    """
+    ratings: dict[str, dict] = {}
+
+    def entry(checkpoint_id, run_id):
+        return ratings.setdefault(checkpoint_id, {"checkpoint_id": checkpoint_id, "run_id": run_id,
+                                                  "rating": initial, "games": 0, "evaluations": 0})
+
+    matches = [item for item in evaluations
+               if item["status"] == "completed" and item.get("result")
+               and str(item["result"].get("opponent_id", "")).startswith("checkpoint:")]
+    for item in sorted(matches, key=lambda value: value["created"]):
+        result = item["result"]
+        candidate = entry(result["candidate_checkpoint_id"], result["candidate_run_id"])
+        opponent_id = result["opponent_id"].split(":", 1)[1]
+        opponent = ratings.get(opponent_id) or entry(opponent_id, None)
+        expected = 1 / (1 + 10 ** ((opponent["rating"] - candidate["rating"]) / 400))
+        score = (result["wins"] + 0.5 * result["draws"]) / result["games"]
+        delta = k * (score - expected)
+        candidate["rating"] += delta
+        opponent["rating"] -= delta
+        candidate["games"] += result["games"]
+        opponent["games"] += result["games"]
+        candidate["evaluations"] += 1
+        opponent["evaluations"] += 1
+    return sorted(ratings.values(), key=lambda value: value["rating"], reverse=True)
+
+
+def experiment_journal(runs: list[dict], evaluations: list[dict]) -> list[dict]:
+    """Chronological experiment record: what changed, how it measured.
+
+    A verdict compares a run's latest evaluation with the previous evaluated
+    run *against the same opponent*: improved/regressed only when Wilson
+    intervals separate; otherwise unchanged (overlap) — never a reward guess.
+    """
+    by_checkpoint = {}
+    for item in evaluations:
+        if item["status"] == "completed" and item.get("result"):
+            by_checkpoint.setdefault(item["result"]["candidate_checkpoint_id"], []).append(item)
+    journal, previous_run, previous_eval = [], None, None
+    for run in sorted(runs, key=lambda value: value["created"]):
+        changed = []
+        if previous_run:
+            changed = sorted(key for key in run["config"]
+                             if run["config"].get(key) != previous_run["config"].get(key))
+        run_evals = [item for items in by_checkpoint.values() for item in items
+                     if item["result"]["candidate_run_id"] == run["id"]]
+        latest = run_evals[-1]["result"] if run_evals else None
+        verdict = "unevaluated"
+        if latest and previous_eval and latest["opponent_id"] == previous_eval["opponent_id"]:
+            if latest["win_rate_ci95"][0] > previous_eval["win_rate_ci95"][1]:
+                verdict = "improved"
+            elif latest["win_rate_ci95"][1] < previous_eval["win_rate_ci95"][0]:
+                verdict = "regressed"
+            else:
+                verdict = "unchanged (intervals overlap)"
+        elif latest:
+            verdict = "baseline"
+        journal.append({
+            "run_id": run["id"], "name": run["name"], "status": run["status"], "created": run["created"],
+            "config_changes_vs_previous": changed, "evaluation": latest, "verdict": verdict,
+        })
+        previous_run = run
+        if latest:
+            previous_eval = latest
+    return journal

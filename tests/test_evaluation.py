@@ -205,3 +205,43 @@ def test_play_game_records_chosen_actions_in_frames():
     assert frames and frames[0]["candidate_action"] == 8
     assert frames[0]["candidate_action_prob"] == 0.42
     assert frames[0]["candidate_action_vector"] == [0.0] * 8
+
+
+def test_elo_only_counts_checkpoint_matches_and_rewards_wins():
+    from rocket_league_ai.evaluation import elo_ratings
+
+    def match(candidate, opponent, wins, draws, games, created):
+        return {"status": "completed", "created": created, "result": {
+            "candidate_checkpoint_id": candidate, "candidate_run_id": "r",
+            "opponent_id": opponent, "wins": wins, "losses": games - wins - draws,
+            "draws": draws, "games": games}}
+
+    ratings = elo_ratings([
+        match("a", "checkpoint:b", 8, 0, 10, 1.0),
+        match("a", "random-v1", 10, 0, 10, 2.0),  # scripted: must not rate
+        match("b", "checkpoint:a", 5, 0, 10, 3.0),
+    ])
+    by_id = {item["checkpoint_id"]: item for item in ratings}
+    assert by_id["a"]["rating"] > 1500 > by_id["b"]["rating"]
+    assert by_id["a"]["games"] == 20
+
+
+def test_experiment_journal_verdicts_use_interval_separation():
+    from rocket_league_ai.evaluation import experiment_journal
+
+    def run(run_id, created, lr):
+        return {"id": run_id, "name": run_id, "status": "completed", "created": created,
+                "config": {"learning_rate": lr, "seed": 1}}
+
+    def ev(run_id, checkpoint, low, high, created):
+        return {"status": "completed", "created": created, "result": {
+            "candidate_run_id": run_id, "candidate_checkpoint_id": checkpoint,
+            "opponent_id": "random-v1", "games": 100, "win_rate": (low + high) / 2,
+            "win_rate_ci95": [low, high], "goals_for": 1, "goals_against": 1,
+            "wins": 50, "losses": 40, "draws": 10}}
+
+    journal = experiment_journal(
+        [run("r2", 2.0, 0.001), run("r1", 1.0, 0.0002), run("r3", 3.0, 0.001)],
+        [ev("r1", "c1", 0.2, 0.4, 1.5), ev("r2", "c2", 0.6, 0.8, 2.5), ev("r3", "c3", 0.55, 0.75, 3.5)])
+    assert [entry["verdict"] for entry in journal] == ["baseline", "improved", "unchanged (intervals overlap)"]
+    assert journal[1]["config_changes_vs_previous"] == ["learning_rate"]

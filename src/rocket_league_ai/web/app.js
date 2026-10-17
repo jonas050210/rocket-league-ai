@@ -460,7 +460,7 @@ function models() {
             `<a class="button secondary" href="#training">${icon("training")}Open training</a>`,
           )
     }</section><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Recommended candidates</h2><p>Evidence before promotion</p></div><span class="pill muted-pill">EVALUATION-BACKED</span></div><div class="panel-body">${(state.evaluation_comparison || []).length ? `<div class="system-note">${icon("info")}<span>Ranked by lower 95% Wilson bound in the evaluation table below. Designation remains manual and requires your confirmation.</span></div>` : `<div class="system-note">${icon("info")}<span>No candidates are recommended without measured, frozen-opponent evaluation results. A manual designation is not proof of strength.</span></div>`}</div></section><section class="panel"><div class="panel-header"><div><h2>Recovery contract</h2><p>Clear about what is restored</p></div>${icon("shield")}</div><div class="panel-body"><p class="resource-note">Actor, critic, optimizers, experience buffer, GAE statistics, RNG state, and counters are restored at a completed update. New simulator episodes start after recovery. The original run and checkpoints remain untouched.</p></div></section></div>` +
-    evaluationSection(valid) + compareSection(valid)
+    evaluationSection(valid) + compareSection(valid) + ratingsJournalSection()
   );
 }
 let compareSelection = { a: "", b: "" };
@@ -486,6 +486,13 @@ function compareSection(valid) {
     panel = `<div class="table-wrap"><table><thead><tr><th>FIELD</th><th>A · ${esc(a.id.slice(0, 20))} (step ${number(a.step)})</th><th>B · ${esc(b.id.slice(0, 20))} (step ${number(b.step)})</th><th></th></tr></thead><tbody>${rows}<tr><td>evaluation</td><td>${ea ? `${number(ea.result.win_rate * 100, 0)}% vs ${esc(ea.result.opponent_id)} (n=${ea.result.games})` : "not evaluated"}</td><td>${eb ? `${number(eb.result.win_rate * 100, 0)}% vs ${esc(eb.result.opponent_id)} (n=${eb.result.games})` : "not evaluated"}</td><td></td></tr></tbody></table></div><div class="panel-body"><p class="subtle">${esc(verdict)}</p></div>`;
   }
   return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Compare checkpoints</h2><p>Configuration differences and measured evaluation — never age or reward alone</p></div>${icon("chart")}</div><div class="panel-body"><div class="form-grid"><label class="field">Checkpoint A<select id="compare-a">${options}</select></label><label class="field">Checkpoint B<select id="compare-b">${options}</select></label></div><div class="config-actions">${button("compare-models", "Compare", "chart", "secondary", !valid.length)}</div></div>${panel}</section>`;
+}
+function ratingsJournalSection() {
+  const ratings = state.checkpoint_ratings || [];
+  const ratingRows = ratings.map((item, index) => `<tr><td>#${index + 1}</td><td>${esc(item.checkpoint_id.slice(0, 24))}</td><td>${number(item.rating, 0)}</td><td>${item.games}</td><td>${item.evaluations}</td></tr>`).join("");
+  const journal = (state.experiment_journal || []).slice().reverse();
+  const journalRows = journal.map((entry) => `<tr><td>${esc(entry.name)}<small>${date(entry.created)}</small></td><td>${esc(entry.status)}</td><td>${entry.config_changes_vs_previous.length ? esc(entry.config_changes_vs_previous.join(", ")) : "—"}</td><td>${entry.evaluation ? `${number(entry.evaluation.win_rate * 100, 0)}% vs ${esc(entry.evaluation.opponent_id)} (n=${entry.evaluation.games})` : "not evaluated"}</td><td>${esc(entry.verdict)}</td></tr>`).join("");
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Checkpoint ratings & experiment journal</h2><p>Elo from checkpoint-vs-checkpoint matches only · verdicts require interval separation</p></div>${icon("trophy")}</div>${ratings.length ? `<div class="table-wrap"><table><thead><tr><th>RANK</th><th>CHECKPOINT</th><th>ELO</th><th>GAMES</th><th>MATCHES</th></tr></thead><tbody>${ratingRows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">No checkpoint-vs-checkpoint matches yet. Scripted-baseline results are gates, not ratings.</p></div>'}${journalRows ? `<div class="table-wrap"><table><thead><tr><th>EXPERIMENT</th><th>STATUS</th><th>CHANGED VS PREVIOUS</th><th>LATEST EVALUATION</th><th>VERDICT</th></tr></thead><tbody>${journalRows}</tbody></table></div>` : ""}</section>`;
 }
 function configInput(
   label,
