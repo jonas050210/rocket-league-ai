@@ -501,7 +501,7 @@ class Orchestrator:
                 env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
             )
             self.evaluation_process = process
-            deadline = time.monotonic() + spec.games * spec.max_game_seconds / max(spec.parallel_workers, 1) + 900
+            deadline = time.monotonic() + spec.total_games * spec.max_game_seconds / max(spec.parallel_workers, 1) + 900
             while process.poll() is None and time.monotonic() < deadline and not self.evaluation_stop.is_set():
                 progress_file = directory / "progress.json"
                 if progress_file.is_file():
@@ -529,7 +529,7 @@ class Orchestrator:
             result = summarize_evaluation(
                 spec, games, candidate_id=payload["candidate_id"],
                 candidate_config_hash=run["config_hash"],
-                environment_version=run["config"]["environment_version"],
+                environment_version=spec.scenario_environment or run["config"]["environment_version"],
             )
             # Cross-check counting with the shared frozen contract model.
             EvaluationResult(

@@ -32,6 +32,17 @@ class EvaluationSpec(BaseModel):
     max_game_seconds: float = Field(default=60.0, ge=5, le=300)
     record_games: int = Field(default=3, ge=0, le=10)
     parallel_workers: int = Field(default=1, ge=1, le=8)
+    scenario_environment: Literal["kickoff-v1", "mixed-scenarios-v1"] | None = None
+    extra_seeds: list[int] = Field(default_factory=list, max_length=4)
+
+    @property
+    def total_games(self) -> int:
+        return self.games * (1 + len(self.extra_seeds))
+
+    def seed_for_game(self, index: int) -> int:
+        repeat, within = divmod(index, self.games)
+        base = self.seed if repeat == 0 else self.extra_seeds[repeat - 1]
+        return base + within
 
     @model_validator(mode="after")
     def check_spec(self) -> Self:
@@ -52,6 +63,7 @@ class GameRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     index: int = Field(ge=0)
+    seed: int = 0
     candidate_side: Literal["blue", "orange"]
     result: Literal["win", "loss", "draw"]
     goals_for: int = Field(ge=0)
@@ -74,12 +86,12 @@ def wilson_interval(wins: int, games: int, z: float = 1.96) -> tuple[float, floa
 def summarize(spec: EvaluationSpec, games: list[GameRecord], *, candidate_id: str,
               candidate_config_hash: str, environment_version: str) -> dict:
     """Build the persisted evaluation manifest from genuine per-game records."""
-    if len(games) != spec.games:
-        raise ValueError(f"expected {spec.games} game records, received {len(games)}")
-    if [game.index for game in games] != list(range(spec.games)):
+    if len(games) != spec.total_games:
+        raise ValueError(f"expected {spec.total_games} game records, received {len(games)}")
+    if [game.index for game in games] != list(range(spec.total_games)):
         raise ValueError("game records must be complete and in order")
     blue = sum(1 for game in games if game.candidate_side == "blue")
-    orange = spec.games - blue
+    orange = spec.total_games - blue
     if blue != orange:
         raise ValueError("evaluation is not side-balanced")
     wins = sum(1 for game in games if game.result == "win")
@@ -93,7 +105,7 @@ def summarize(spec: EvaluationSpec, games: list[GameRecord], *, candidate_id: st
         "opponent_id": opponent,
         "opponent_description": OPPONENTS.get(spec.opponent_id) if not spec.opponent_checkpoint_id
         else "Frozen checkpoint actor (greedy inference, weights never updated during evaluation).",
-        "games": spec.games, "seed": spec.seed, "inference": "greedy",
+        "games": spec.total_games, "seed": spec.seed, "extra_seeds": spec.extra_seeds, "inference": "greedy",
         "environment_version": environment_version,
         "wins": wins, "losses": losses, "draws": draws,
         "goals_for": sum(game.goals_for for game in games),

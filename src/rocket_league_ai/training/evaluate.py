@@ -50,9 +50,9 @@ def _load_actor(config: TrainingConfig, checkpoint_path: Path):
         import torch as _torch
 
         with _torch.no_grad():
-            actions, _ = actor.get_actions([agent_id], [np.asarray(observation, dtype=np.float32)],
-                                           deterministic=True)
-        return int(np.asarray(actions).reshape(-1)[0])
+            probs = actor.get_output([np.asarray(observation, dtype=np.float32)])
+            action = int(probs.argmax(dim=-1).item())
+            return action, float(probs[0, action].item())
 
     return act
 
@@ -69,6 +69,7 @@ def _init_worker(payload: dict):
     eval_config = config.model_copy(update={
         "episode_timeout_seconds": spec.max_game_seconds,
         "no_touch_timeout_seconds": min(config.no_touch_timeout_seconds, spec.max_game_seconds),
+        "environment_version": spec.scenario_environment or config.environment_version,
     })
     _WORKER["env"] = build_environment(eval_config)
     _WORKER["candidate"] = _load_actor(config, Path(payload["checkpoint"]))
@@ -78,6 +79,9 @@ def _init_worker(payload: dict):
         _WORKER["opponent"] = _load_actor(opponent_config, Path(payload["opponent_checkpoint"]))
     _WORKER["spec"] = spec
     _WORKER["np"] = np
+    from rlgym.rocket_league.action_parsers import LookupTableAction
+
+    _WORKER["action_table"] = LookupTableAction()._lookup_table
 
 
 def _play_one(index: int):
@@ -87,11 +91,12 @@ def _play_one(index: int):
     opponent_fn = None
     if _WORKER["opponent"] is not None:
         opponent_actor = _WORKER["opponent"]
-        opponent_fn = lambda agent_id, observation, rng: opponent_actor(agent_id, observation)  # noqa: E731
+        opponent_fn = lambda agent_id, observation, rng: opponent_actor(agent_id, observation)[0]  # noqa: E731
     game = play_game(
         _WORKER["env"], _WORKER["candidate"], spec.opponent_id, index=index, candidate_side=side,
-        seed=spec.seed + index, max_decisions=math.ceil(spec.max_game_seconds * 15),
+        seed=spec.seed_for_game(index), max_decisions=math.ceil(spec.max_game_seconds * 15),
         record=index < spec.record_games, frames=frames, opponent_action_fn=opponent_fn,
+        action_table=_WORKER["action_table"],
     )
     return {"game": game.model_dump(), "frames": frames, "side": side}
 
@@ -124,26 +129,26 @@ def main() -> int:
     games, frames, sides = [], [], []
     if spec.parallel_workers <= 1:
         _init_worker(payload)
-        for index in range(spec.games):
+        for index in range(spec.total_games):
             outcome = _play_one(index)
             games.append(outcome["game"])
             frames.extend(outcome["frames"])
             sides.append(outcome["side"])
-            atomic_json(args.output / "progress.json", {"completed": index + 1, "games": spec.games})
+            atomic_json(args.output / "progress.json", {"completed": index + 1, "games": spec.total_games})
     else:
         import multiprocessing as mp
 
         completed = 0
         with ProcessPoolExecutor(max_workers=spec.parallel_workers, mp_context=mp.get_context("spawn"),
                                  initializer=_init_worker, initargs=(payload,)) as pool:
-            futures = [pool.submit(_play_one, index) for index in range(spec.games)]
+            futures = [pool.submit(_play_one, index) for index in range(spec.total_games)]
             outcomes = {}
             for future in as_completed(futures):
                 outcome = future.result()
                 outcomes[outcome["game"]["index"]] = outcome
                 completed += 1
-                atomic_json(args.output / "progress.json", {"completed": completed, "games": spec.games})
-        for index in range(spec.games):
+                atomic_json(args.output / "progress.json", {"completed": completed, "games": spec.total_games})
+        for index in range(spec.total_games):
             games.append(outcomes[index]["game"])
             frames.extend(outcomes[index]["frames"])
             sides.append(outcomes[index]["side"])

@@ -48,7 +48,7 @@ def extract_frame(state, game: int, decisions: int, score: tuple[int, int]) -> d
 
 def play_game(env, candidate_action, opponent_id: str, *, index: int, candidate_side: str,
               seed: int, max_decisions: int, record: bool, frames: list | None = None,
-              opponent_action_fn=None) -> GameRecord:
+              opponent_action_fn=None, action_table=None) -> GameRecord:
     """Play one genuine game. ``candidate_action(agent_id, obs) -> int`` is frozen inference.
 
     ``opponent_action_fn(agent_id, obs, rng) -> int`` overrides the scripted
@@ -64,14 +64,21 @@ def play_game(env, candidate_action, opponent_id: str, *, index: int, candidate_
     score = (0, 0)
     result, goals_for, goals_against = "draw", 0, 0
     while decisions < max_decisions:
+        chosen = candidate_action(candidate_agent, observations[candidate_agent])
+        candidate_choice, candidate_prob = chosen if isinstance(chosen, tuple) else (chosen, None)
+        opponent = (opponent_action_fn(opponent_agent, observations[opponent_agent], rng)
+                    if opponent_action_fn else opponent_action(opponent_id, rng))
         if record and frames is not None:
             frame = extract_frame(env.state, index, decisions, score)
             if frame is not None:
+                frame["candidate_action"] = int(candidate_choice)
+                frame["candidate_action_prob"] = candidate_prob
+                frame["opponent_action"] = int(opponent)
+                if action_table is not None:
+                    frame["candidate_action_vector"] = [float(v) for v in action_table[int(candidate_choice)]]
                 frames.append(frame)
-        opponent = (opponent_action_fn(opponent_agent, observations[opponent_agent], rng)
-                    if opponent_action_fn else opponent_action(opponent_id, rng))
         actions = {
-            candidate_agent: np.array([candidate_action(candidate_agent, observations[candidate_agent])], dtype=np.int64),
+            candidate_agent: np.array([candidate_choice], dtype=np.int64),
             opponent_agent: np.array([opponent], dtype=np.int64),
         }
         observations, rewards, terminated, truncated = env.step(actions)
@@ -93,7 +100,7 @@ def play_game(env, candidate_action, opponent_id: str, *, index: int, candidate_
         if frame is not None:
             frames.append(frame)
     return GameRecord(
-        index=index, candidate_side=candidate_side, result=result,
+        index=index, seed=seed, candidate_side=candidate_side, result=result,
         goals_for=goals_for, goals_against=goals_against,
         decisions=decisions, duration_seconds=decisions / DECISIONS_PER_SECOND,
     )

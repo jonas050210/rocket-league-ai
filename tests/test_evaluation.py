@@ -67,13 +67,24 @@ def test_compare_ranks_by_lower_confidence_bound():
     assert [item["candidate_checkpoint_id"] for item in ranked] == ["proven", "lucky-small"]
 
 
+def _fake_physics():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(position=np.zeros(3), linear_velocity=np.zeros(3), yaw=0.0)
+
+
 class FakeEnv:
     """Counting fixture only: candidate scores on step 3, else truncates."""
 
     def __init__(self, candidate_scores):
+        from types import SimpleNamespace
+
         self.candidate_scores = candidate_scores
         self.steps = 0
-        self.state = None
+        car = lambda blue: SimpleNamespace(physics=_fake_physics(), is_blue=blue, boost_amount=33.0)  # noqa: E731
+        self.state = SimpleNamespace(
+            ball=SimpleNamespace(position=np.array([0.0, 0.0, 93.0]), linear_velocity=np.zeros(3)),
+            cars={"blue-0": car(True), "orange-0": car(False)})
 
     def reset(self):
         self.steps = 0
@@ -169,3 +180,28 @@ def test_store_migration_adds_progress_to_existing_evaluations_table(tmp_path):
     columns = {row[1] for row in store.db.execute("PRAGMA table_info(evaluations)")}
     assert "progress" in columns
     store.close()
+
+
+def test_multi_seed_total_games_and_seed_schedule():
+    multi = EvaluationSpec(run_id="a" * 32, checkpoint_id="step-000000000512-abcdef012345",
+                           games=4, seed=100, extra_seeds=[500, 900])
+    assert multi.total_games == 12
+    assert [multi.seed_for_game(i) for i in (0, 3, 4, 7, 8, 11)] == [100, 103, 500, 503, 900, 903]
+    games = []
+    for i in range(12):
+        record = game(i, "blue" if i % 2 == 0 else "orange", "draw")
+        games.append(record.model_copy(update={"seed": multi.seed_for_game(i)}))
+    result = summarize(multi, games, candidate_id="c", candidate_config_hash="h" * 64, environment_version="kickoff-v1")
+    assert result["games"] == 12 and result["extra_seeds"] == [500, 900]
+
+
+def test_play_game_records_chosen_actions_in_frames():
+    frames = []
+    table = [[0.0] * 8 for _ in range(90)]
+    table[8] = [0, 0, 0, 0, 0, 0, 0, 0]
+    play_game(FakeEnv(True), lambda agent, obs: (8, 0.42), "idle-v1", index=0,
+              candidate_side="blue", seed=1, max_decisions=100, record=True, frames=frames,
+              action_table=table)
+    assert frames and frames[0]["candidate_action"] == 8
+    assert frames[0]["candidate_action_prob"] == 0.42
+    assert frames[0]["candidate_action_vector"] == [0.0] * 8

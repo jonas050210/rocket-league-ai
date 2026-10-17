@@ -88,7 +88,7 @@ let benchmarkForm = {
   max_memory_percent: 95,
   timeout_seconds: 600,
 };
-let evaluationForm = { opponent_id: "random-v1", games: 20, seed: 1000, parallel_workers: 1 };
+let evaluationForm = { opponent_id: "random-v1", games: 20, seed: 1000, parallel_workers: 1, scenario_environment: "", extra_seeds: "" };
 let replay = { id: null, data: null, frame: 0, playing: false, speed: 1, follow: true, timer: null };
 let busy = false,
   toastTimer,
@@ -423,7 +423,7 @@ function evaluationSection(valid) {
   const comparison = (state.evaluation_comparison || [])
     .map((entry, index) => `<div class="recommendation"><strong>#${index + 1} · ${esc(entry.candidate_checkpoint_id.slice(0, 24))}</strong><p>vs ${esc(entry.opponent_id)}: win rate ${number(entry.win_rate * 100, 0)}% over ${entry.games} games; ranked by lower 95% bound (${number(entry.score_lower_bound * 100, 0)}%). Goals ${entry.goals_for}–${entry.goals_against}.</p></div>`)
     .join("");
-  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Checkpoint evaluation</h2><p>Frozen weights vs scripted baselines · side-balanced · seeded</p></div><span class="pill muted-pill">${running ? "EVALUATING" : "REPRODUCIBLE"}</span></div><div class="panel-body"><div class="form-grid"><label class="field">Checkpoint<select id="eval-checkpoint" ${valid.length ? "" : "disabled"}>${options || '<option value="">No valid checkpoint</option>'}</select></label><label class="field">Opponent<select id="eval-opponent"><option value="random-v1" ${evaluationForm.opponent_id === "random-v1" ? "selected" : ""}>Random actions (seeded)</option><option value="idle-v1" ${evaluationForm.opponent_id === "idle-v1" ? "selected" : ""}>Idle (no input)</option><option value="checkpoint">Frozen checkpoint (select below)</option></select></label><label class="field">Opponent checkpoint (only for checkpoint opponent)<select id="eval-opponent-checkpoint">${options || '<option value="">No valid checkpoint</option>'}</select></label><label class="field">Games (even, both sides)<input id="eval-games" type="number" min="2" max="400" step="2" value="${evaluationForm.games}"></label><label class="field">Seed<input id="eval-seed" type="number" min="0" value="${evaluationForm.seed}"></label><label class="field">Parallel game workers<input id="eval-workers" type="number" min="1" max="8" value="${evaluationForm.parallel_workers}"><small>Same seeds/sides; only scheduling changes.</small></label></div><div class="config-actions">${button("start-evaluation", "Start evaluation", "trophy", "primary", !writable() || !idle() || !valid.length || running)}</div><p class="subtle">Evaluation runs in a separate process with inference-only frozen weights; it never trains and never changes the designated best. Win rates include 95% Wilson intervals — small samples stay visibly uncertain.</p></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CHECKPOINT</th><th>OPPONENT</th><th>STATUS</th><th>RECORD</th><th>GOALS</th><th>WIN RATE · 95% CI</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}${comparison ? `<div class="panel-body"><h3>Comparison (by lower confidence bound)</h3>${comparison}</div>` : ""}</section>`;
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Checkpoint evaluation</h2><p>Frozen weights vs scripted baselines · side-balanced · seeded</p></div><span class="pill muted-pill">${running ? "EVALUATING" : "REPRODUCIBLE"}</span></div><div class="panel-body"><div class="form-grid"><label class="field">Checkpoint<select id="eval-checkpoint" ${valid.length ? "" : "disabled"}>${options || '<option value="">No valid checkpoint</option>'}</select></label><label class="field">Opponent<select id="eval-opponent"><option value="random-v1" ${evaluationForm.opponent_id === "random-v1" ? "selected" : ""}>Random actions (seeded)</option><option value="idle-v1" ${evaluationForm.opponent_id === "idle-v1" ? "selected" : ""}>Idle (no input)</option><option value="checkpoint">Frozen checkpoint (select below)</option></select></label><label class="field">Opponent checkpoint (only for checkpoint opponent)<select id="eval-opponent-checkpoint">${options || '<option value="">No valid checkpoint</option>'}</select></label><label class="field">Games (even, both sides)<input id="eval-games" type="number" min="2" max="400" step="2" value="${evaluationForm.games}"></label><label class="field">Seed<input id="eval-seed" type="number" min="0" value="${evaluationForm.seed}"></label><label class="field">Parallel game workers<input id="eval-workers" type="number" min="1" max="8" value="${evaluationForm.parallel_workers}"><small>Same seeds/sides; only scheduling changes.</small></label><label class="field">Scenario<select id="eval-scenario"><option value="">Candidate's training environment</option><option value="kickoff-v1">Kickoff only</option><option value="mixed-scenarios-v1">Mixed scenarios (attack/defense/open)</option></select><small>Measures scenario skills, not just kickoff play.</small></label><label class="field">Extra seeds (comma-separated, up to 4)<input id="eval-extra-seeds" type="text" placeholder="e.g. 2000, 3000"><small>Repeats the full game set per seed to expose seed noise.</small></label></div><div class="config-actions">${button("start-evaluation", "Start evaluation", "trophy", "primary", !writable() || !idle() || !valid.length || running)}</div><p class="subtle">Evaluation runs in a separate process with inference-only frozen weights; it never trains and never changes the designated best. Win rates include 95% Wilson intervals — small samples stay visibly uncertain.</p></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CHECKPOINT</th><th>OPPONENT</th><th>STATUS</th><th>RECORD</th><th>GOALS</th><th>WIN RATE · 95% CI</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}${comparison ? `<div class="panel-body"><h3>Comparison (by lower confidence bound)</h3>${comparison}</div>` : ""}</section>`;
 }
 function models() {
   const best = state.designated_best;
@@ -556,7 +556,11 @@ function replayReadout() {
   const ballSpeed = frame.ball_velocity
     ? Math.hypot(...frame.ball_velocity).toFixed(1)
     : "—";
-  return `Game ${frame.game + 1} · t=${frame.t.toFixed(2)}s · Score blue ${frame.score[0]} – orange ${frame.score[1]} · Ball speed ${ballSpeed} uu/s · Frame ${replay.frame + 1}/${replay.data.frames.length} · Candidate: ${esc(replay.data.candidate_side_by_game[frame.game] || "?")}`;
+  const vector = frame.candidate_action_vector;
+  const action = vector
+    ? `Action ${frame.candidate_action}: throttle ${vector[0]}, steer ${vector[1]}, jump ${vector[5] ? "yes" : "no"}, boost ${vector[6] ? "yes" : "no"}${frame.candidate_action_prob != null ? ` (p=${Number(frame.candidate_action_prob).toFixed(2)})` : ""} · `
+    : "";
+  return `Game ${frame.game + 1} · t=${frame.t.toFixed(2)}s · Score blue ${frame.score[0]} – orange ${frame.score[1]} · Ball speed ${ballSpeed} uu/s · ${action}Frame ${replay.frame + 1}/${replay.data.frames.length} · Candidate: ${esc(replay.data.candidate_side_by_game[frame.game] || "?")}`;
 }
 function drawReplayFrame() {
   const canvas = document.getElementById("replay-canvas");
@@ -985,7 +989,12 @@ async function action(action, element) {
     evaluationForm.games = Number($("#eval-games").value);
     evaluationForm.seed = Number($("#eval-seed").value);
     evaluationForm.parallel_workers = Number($("#eval-workers").value);
-    const payload = { run_id, checkpoint_id, ...evaluationForm };
+    evaluationForm.scenario_environment = $("#eval-scenario").value;
+    evaluationForm.extra_seeds = $("#eval-extra-seeds").value;
+    const payload = { run_id, checkpoint_id, opponent_id: evaluationForm.opponent_id,
+      games: evaluationForm.games, seed: evaluationForm.seed, parallel_workers: evaluationForm.parallel_workers,
+      scenario_environment: evaluationForm.scenario_environment || null,
+      extra_seeds: evaluationForm.extra_seeds.split(",").map((value) => Number(value.trim())).filter((value) => Number.isFinite(value)) };
     if (opponentChoice === "checkpoint") {
       const [opponent_run_id, opponent_checkpoint_id] = ($("#eval-opponent-checkpoint").value || "").split("|");
       if (!opponent_run_id || !opponent_checkpoint_id) throw new Error("Select an opponent checkpoint first.");
