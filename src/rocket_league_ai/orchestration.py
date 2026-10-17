@@ -540,7 +540,7 @@ class Orchestrator:
                 goals_for=result["goals_for"], goals_against=result["goals_against"],
             )
             trajectory = f"evaluations/{evaluation_id}/trajectory.json" if (directory / "trajectory.json").is_file() else None
-            self.store.update_evaluation(evaluation_id, status="completed", result=result, trajectory=trajectory)
+            self.store.update_evaluation(evaluation_id, status="completed", result=result, trajectory=trajectory, progress=1.0)
             self.store.event("info", "evaluation_finished",
                              f"Evaluation completed: {result['wins']}W/{result['losses']}L/{result['draws']}D, "
                              f"goals {result['goals_for']}–{result['goals_against']}, win rate "

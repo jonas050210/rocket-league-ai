@@ -94,4 +94,4 @@ def test_real_parallel_checkpoint_vs_checkpoint_evaluation(manager):
     assert record["status"] == "completed", record
     assert record["result"]["opponent_id"] == f"checkpoint:{checkpoint['id']}"
     assert record["result"]["games"] == 4
-    assert record["progress"] in (None, 1.0)
+    assert record["progress"] == 1.0
