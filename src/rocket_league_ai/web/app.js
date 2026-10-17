@@ -571,7 +571,7 @@ function visualization() {
       "Recorded evaluation replays, rendered locally. Training stays headless.",
       `<span class="pill muted-pill">RECORDED REPLAY · TOP-DOWN</span>`,
     ) +
-    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer</h2><p>Real RocketSim trajectories recorded during evaluation — a schematic top-down view, not a 3D renderer</p></div>${statusPill(replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && writable() ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay">${replay.data ? `<div class="replay-markers">${replayGoalMarkers()}</div>` : ""}<div class="replay-readout" id="replay-readout">${replay.data ? esc(replayReadout()) : "Run an evaluation from Models to record a replay. Opening this viewer never affects a training run."}</div></div><div class="viz-specs"><span>SOURCE<strong>Evaluation trajectory artifact</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>BOUNDARY<strong>No live 3D renderer (NumPy/renderer conflict documented)</strong></span></div></section>`
+    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer</h2><p>Real RocketSim trajectories recorded during evaluation — a schematic top-down view, not a 3D renderer</p></div>${statusPill(replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && writable() ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><button class="button ghost" data-action="export-replay" ${replay.data ? "" : "disabled"}>${icon("download")}Export JSON</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay">${replay.data ? `<div class="replay-markers">${replayGoalMarkers()}</div>` : ""}<div class="replay-readout" id="replay-readout">${replay.data ? esc(replayReadout()) : "Run an evaluation from Models to record a replay. Opening this viewer never affects a training run."}</div></div><div class="viz-specs"><span>SOURCE<strong>Evaluation trajectory artifact</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>BOUNDARY<strong>No live 3D renderer (NumPy/renderer conflict documented)</strong></span></div></section>`
   );
 }
 function replayReadout() {
@@ -1057,6 +1057,17 @@ async function action(action, element) {
     replay.frame = Number(element.dataset.frame);
     drawReplayFrame();
     render(true);
+    return;
+  }
+  if (action === "export-replay") {
+    if (!replay.data) return;
+    const blob = new Blob([JSON.stringify(replay.data)], { type: "application/json" });
+    const url = URL.createObjectURL(blob), link = document.createElement("a");
+    link.href = url;
+    link.download = `rlai-replay-${replay.id}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Replay trajectory exported as recorded. It contains genuine frames and chosen actions.");
     return;
   }
   if (action === "replay-toggle") {

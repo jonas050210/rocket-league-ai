@@ -44,12 +44,22 @@ migration); opt-in reward shaping (``shaped-v2``), ``mixed-scenarios-v1``
 starting states, exposed PPO ``clip_range``/``max_grad_norm``; next-experiment
 advice, checkpoint comparison UI, replay goal markers, light snapshots.
 
+Extension delivery (same day, packages A–E): evaluation scenarios and
+multi-seed wraps, per-frame replay action debug + JSON export, Elo ratings
+(checkpoint matches only), experiment journal with Wilson-separated
+verdicts, checkpoint league round-robin (confirmed start, sequential
+frozen matches), retention suggestions (never automatic), workspace-usage
+warning, recovery candidates, completion toasts, benchmark initialization
+overhead. Browser tests now cover the benchmark/evaluation surfaces.
+
 Still open and **not** executed (target-host / operator decisions):
 N0 CUDA/WSLg certification, N1 soak, GPU benchmark sweeps, the 400-game
-baseline, the first shaping experiment, any budget increase and league
-scheduling. Prepared step-by-step in [docs/TARGET_HOST.md](docs/TARGET_HOST.md).
+baseline, the first shaping experiment, any budget increase. Prepared
+step-by-step in [docs/TARGET_HOST.md](docs/TARGET_HOST.md).
 No gameplay improvement is claimed anywhere: the only measured evaluation
-remains 0W/0L/4D of a 384-step checkpoint vs random.
+remains 0W/0L/4D of a 384-step checkpoint vs random. PFSP-style opponent
+sampling, automatic hyperparameter tuning, 2v2/3v3 and 3D rendering were
+considered and deliberately deferred (see gap review in PR #5).
 
 ## N0 — Next: target-host certification (before tuning or skill claims)
 

@@ -101,6 +101,14 @@ test("read-only preview: all seven views, honest unavailable features, offline a
   await expect(
     page.getByText("Run an evaluation from Models to record a replay."),
   ).toBeVisible();
+  await nav(page, "models");
+  await expect(page.getByText("Checkpoint evaluation")).toBeVisible();
+  await expect(page.getByText("Checkpoint league")).toBeVisible();
+  await nav(page, "benchmark");
+  await expect(
+    page.getByRole("button", { name: "Start benchmark" }),
+  ).toBeDisabled();
+  await expect(page.getByText("No benchmark has been run yet.")).toBeVisible();
   await nav(page, "configuration");
   await expect(
     page.getByRole("button", { name: "Validate draft" }),
@@ -206,6 +214,14 @@ test("real GUI vertical slice: validate, review, reject, approve, pause, reconne
   await expect(
     page.getByRole("button", { name: "Stop run", exact: true }),
   ).toBeDisabled();
+  await nav(page, "models");
+  await expect(page.getByText("Checkpoint evaluation")).toBeVisible();
+  await expect(page.getByText("Checkpoint league")).toBeVisible();
+  await nav(page, "benchmark");
+  await expect(
+    page.getByRole("button", { name: "Start benchmark" }),
+  ).toBeDisabled();
+  await expect(page.getByText("No benchmark has been run yet.")).toBeVisible();
   await nav(page, "configuration");
   await expect(
     page.getByRole("button", { name: "Validate draft" }),

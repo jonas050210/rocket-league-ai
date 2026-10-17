@@ -153,3 +153,28 @@ Executed in the CPU sandbox (no GPU/display; CUDA gates remain open):
 Not executed: browser/native CI suites for these commits (running on the
 PR), all RTX/WSLg items, the 400-game baseline, any shaping/budget
 experiment. See docs/TARGET_HOST.md for the prepared procedures.
+
+
+## Addendum — extension packages A–E (2026-10-17, this session)
+
+- **A**: scenario-override evaluation (kickoff/mixed), multi-seed wrap
+  scheduling with per-game persisted seeds, replay frames carry the
+  chosen candidate action, its policy probability and the decoded
+  control vector (lookup table incl. idle action 8); action readout and
+  JSON export in the viewer. Unit tests incl. FakeEnv action recording.
+- **B**: chronological Elo (K=32, start 1500) over checkpoint-vs-
+  checkpoint evaluations only; scripted baselines never contribute.
+  Experiment journal diffs run configs and only claims an effect when
+  Wilson intervals separate. Partial/legacy records are tolerated.
+- **C**: league round-robin service over 2–6 frozen checkpoints, one
+  side-balanced match per pair through the normal evaluation pipeline;
+  genuine integration test trains a real run, runs a 2-checkpoint
+  league to completion and asserts both enter the Elo table.
+- **D**: retention candidates (beyond five newest per run; designated
+  best and last-valid per run protected; suggestions only, deletion
+  stays a confirmed individual proposal), measured workspace size with
+  a >5 GB warning, recovery candidates panel, terminal-transition
+  toasts, per-candidate benchmark initialization overhead.
+- **E**: Playwright coverage extended to Models (evaluation + league)
+  and Benchmark surfaces in the read-only preview; `npm run test:ui`
+  passes locally (4 passed, 1 platform-conditional skip).
