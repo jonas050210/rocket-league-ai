@@ -13,7 +13,8 @@ def test_metadata_and_immutable_config_persist_without_absolute_repo_path(tmp_pa
     run = store.create_run(config, metadata)
     assert run["config_hash"] == config.digest()
     assert str(tmp_path) not in json.dumps(metadata)
-    assert metadata["packages"]["rlgym-learn"] == "2.0.0"
+    recorded = metadata["packages"]["rlgym-learn"]
+    assert recorded is None or recorded == "2.0.0"  # None when the extra is not installed
     store.update_run(run["id"], status="paused", metrics={"steps": 512})
     store.close()
     reopened = Store(tmp_path)

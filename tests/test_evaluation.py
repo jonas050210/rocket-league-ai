@@ -6,6 +6,7 @@ only); genuine RocketSim evaluation is covered by the bounded integration test.
 
 import numpy as np
 import pytest
+from conftest import requires_training
 from pydantic import ValidationError
 
 from rocket_league_ai.evaluation import (
@@ -122,6 +123,7 @@ def test_opponents_are_seeded_and_idle_is_no_input():
     assert opponent_action("idle-v1", rng) == 8
 
 
+@requires_training
 def test_evaluation_api_persists_and_exposes_trajectory(client, manager, tmp_path):
     from conftest import unit_checkpoint_writer
 

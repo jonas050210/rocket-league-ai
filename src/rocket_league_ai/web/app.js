@@ -44,9 +44,14 @@ const names = {
   training: "Training",
   monitoring: "Monitoring",
   models: "Models",
-  configuration: "Configuration",
   visualization: "Visualization",
   benchmark: "Benchmark",
+};
+// The approved plan now lives on Training. Keep old links working.
+const legacyRoutes = { configuration: "training" };
+const resolveRoute = (hash) => {
+  const key = legacyRoutes[hash] || hash;
+  return names[key] ? key : "dashboard";
 };
 const activeStatuses = new Set([
   "starting",
@@ -74,22 +79,27 @@ let route = "dashboard",
   pendingProposal = null;
 let configDraft = null,
   configRaw = null,
+  planEditing = false,
   logLevel = "all",
   logSearch = "",
   refreshPromise = null;
 let benchmarkForm = {
-  devices: ["cpu"],
-  n_proc_values: [1],
+  devices: ["cpu", "cuda:0"],
+  n_proc_values: [1, 2, 4, 8],
   batch_size: 512,
   warmup_iterations: 1,
-  measure_iterations: 3,
-  repeats: 2,
+  measure_iterations: 1900,
+  measurement_seconds: 20,
+  min_iterations: 2,
+  repeats: 3,
   max_cpu_percent: 100,
   max_memory_percent: 95,
-  timeout_seconds: 600,
+  max_gpu_memory_percent: 95,
+  timeout_seconds: 180,
+  auto_default: true,
 };
 let evaluationForm = { opponent_id: "random-v1", games: 20, seed: 1000, parallel_workers: 1, scenario_environment: "", extra_seeds: "" };
-let replay = { id: null, data: null, frame: 0, playing: false, speed: 1, follow: true, timer: null };
+let replay = { id: null, data: null, frame: 0, playing: false, speed: 1, follow: false, zoom: 1, raf: null, accumulator: 0 };
 let busy = false,
   toastTimer,
   lastConnectedAt = null;
@@ -276,7 +286,7 @@ function chart(run) {
 function resources() {
   const s = state.system,
     gpu = s.gpu_percent;
-  return `<section class="panel"><div class="panel-header"><div><h2>System resources</h2><p>Measured on the backend host</p></div>${icon("cpu")}</div><div class="panel-body"><div class="resource-item"><div class="resource-label"><span>CPU utilization</span><strong>${number(s.cpu_percent, 1)}%</strong></div><div class="meter-track"><div class="meter-fill" style="width:${Math.min(s.cpu_percent || 0, 100)}%"></div></div></div><div class="resource-item"><div class="resource-label"><span>Host memory</span><strong>${bytes(s.memory_used_bytes)} <span>/ ${bytes(s.memory_total_bytes)}</span></strong></div><div class="meter-track"><div class="meter-fill" style="width:${Math.min(s.memory_percent || 0, 100)}%"></div></div></div><div class="resource-item"><div class="resource-label"><span>GPU utilization</span><strong>${gpu == null ? "Not available" : `${number(gpu, 1)}%`}</strong></div><div class="meter-track"><div class="meter-fill green" style="width:${Math.min(gpu || 0, 100)}%"></div></div></div><p class="resource-note">${esc(s.gpu_name || s.gpu_reason || "GPU telemetry has not been sampled.")}<br>${s.sampled_at ? `Last sampled ${time(s.sampled_at)}` : "Sampling host telemetry…"}</p></div></section>`;
+  return `<section class="panel"><div class="panel-header"><div><h2>System resources</h2><p>Measured on the backend host</p></div>${icon("cpu")}</div><div class="panel-body"><div class="resource-item"><div class="resource-label"><span>CPU utilization · ${number(s.cpu_threads_busy, 1)} of ${number(s.cpu_count)} threads busy</span><strong>${number(s.cpu_percent, 1)}%</strong></div><div class="meter-track"><div class="meter-fill" style="width:${Math.min(s.cpu_percent || 0, 100)}%"></div></div></div><div class="resource-item"><div class="resource-label"><span>Host memory</span><strong>${bytes(s.memory_used_bytes)} <span>/ ${bytes(s.memory_total_bytes)}</span></strong></div><div class="meter-track"><div class="meter-fill" style="width:${Math.min(s.memory_percent || 0, 100)}%"></div></div></div><div class="resource-item"><div class="resource-label"><span>GPU utilization</span><strong>${gpu == null ? "Not available" : `${number(gpu, 1)}%`}</strong></div><div class="meter-track"><div class="meter-fill" style="width:${Math.min(gpu || 0, 100)}%"></div></div></div><div class="resource-item"><div class="resource-label"><span>GPU memory</span><strong>${s.gpu_memory_percent == null ? "Not available" : `${number(s.gpu_memory_percent, 1)}%`}</strong></div><div class="meter-track"><div class="meter-fill" style="width:${Math.min(s.gpu_memory_percent || 0, 100)}%"></div></div></div><p class="resource-note">${esc(s.gpu_name || s.gpu_reason || "GPU telemetry has not been sampled.")}<br>${s.sampled_at ? `Last sampled ${time(s.sampled_at)}` : "Sampling host telemetry…"}</p></div></section>`;
 }
 function readiness() {
   const installed = Object.values(state.training_packages).every(Boolean),
@@ -380,8 +390,11 @@ function training() {
       ),
     ) +
     runError(run) +
-    `<div class="two-col"><section class="panel">${body}</section><section class="panel"><div class="panel-header"><div><h2>${run ? "Experiment metadata" : "Approved plan"}</h2><p>Immutable for every started run</p></div>${icon("file")}</div><div class="metadata-list">${metadataRow("Device", (run?.config || state.plan).device)}${metadataRow("Environment", "1v1 · kickoff-v1")}${metadataRow("Observation / actions", "92 float32 / 90 discrete")}${metadataRow("Seed", (run?.config || state.plan).seed)}${metadataRow("Workers", (run?.config || state.plan).n_proc)}${metadataRow("Source commit", run?.metadata.git.commit ? short(run.metadata.git.commit, 10) + (run.metadata.git.dirty ? " (dirty)" : "") : "Recorded when run starts")}${metadataRow("Config hash", run ? short(run.config_hash, 16) : "Locked at run creation")}${metadataRow("Recovery", "Learner restored · episodes reset")}</div><div class="panel-body"><a class="text-button" href="#configuration">Review approved configuration ${icon("arrow")}</a></div></section></div><section class="panel"><div class="panel-header"><div><h2>Experiment history</h2><p>Original records stay intact when you recover a run</p></div><span class="pill muted-pill">${state.runs.length} RUNS</span></div>${state.runs.length ? `<div class="table-wrap"><table><thead><tr><th>EXPERIMENT</th><th>CREATED</th><th>STEPS</th><th>STATUS</th><th></th></tr></thead><tbody>${state.runs.map((item) => `<tr><td><strong>${esc(item.name)}</strong><small>${short(item.id, 12)}${item.parent ? " · recovered lineage" : ""}</small></td><td>${date(item.created)}</td><td>${number(item.metrics.steps || 0)}</td><td>${statusPill(item.status)}</td><td>${button("select-run", "View run", "arrow", "ghost", false, `data-run-id="${item.id}"`)}</td></tr>`).join("")}</tbody></table></div>` : empty("file", "A clean experiment history", "No training has been started. Opening this application never launches a run.")}</section>`
+    `<div class="two-col"><section class="panel">${body}</section><section class="panel"><div class="panel-header"><div><h2>${run ? "Experiment metadata" : "Approved plan"}</h2><p>Immutable for every started run</p></div>${icon("file")}</div><div class="metadata-list">${metadataRow("Device", (run?.config || state.plan).device)}${metadataRow("Environment", "1v1 · kickoff-v1")}${metadataRow("Observation / actions", "92 float32 / 90 discrete")}${metadataRow("Seed", (run?.config || state.plan).seed)}${metadataRow("Workers", (run?.config || state.plan).n_proc)}${metadataRow("Source commit", run?.metadata.git.commit ? short(run.metadata.git.commit, 10) + (run.metadata.git.dirty ? " (dirty)" : "") : "Recorded when run starts")}${metadataRow("Config hash", run ? short(run.config_hash, 16) : "Locked at run creation")}${metadataRow("Recovery", "Learner restored · episodes reset")}</div><div class="panel-body"><a class="text-button" href="#training" data-action="open-plan">Review approved plan below ${icon("arrow")}</a></div></section></div>${planPanel()}<section class="panel"><div class="panel-header"><div><h2>Experiment history</h2><p>Original records stay intact when you recover a run</p></div><span class="pill muted-pill">${state.runs.length} RUNS</span></div>${state.runs.length ? `<div class="table-wrap"><table><thead><tr><th>EXPERIMENT</th><th>CREATED</th><th>STEPS</th><th>STATUS</th><th></th></tr></thead><tbody>${state.runs.map((item) => `<tr><td><strong>${esc(item.name)}</strong><small>${short(item.id, 12)}${item.parent ? " · recovered lineage" : ""}</small></td><td>${date(item.created)}</td><td>${number(item.metrics.steps || 0)}</td><td>${statusPill(item.status)}</td><td>${button("select-run", "View run", "arrow", "ghost", false, `data-run-id="${item.id}"`)}</td></tr>`).join("")}</tbody></table></div>` : empty("file", "A clean experiment history", "No training has been started. Opening this application never launches a run.")}</section>`
   );
+}
+function stackPanel() {
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Installed training stack</h2><p>Resolved packages, not assumptions</p></div>${icon("cpu")}</div><div class="panel-body">${Object.entries(state.training_packages || {}).map(([name, version]) => `<div class="stack-row"><span>${esc(name)}</span><code>${esc(version || "not installed")}</code></div>`).join("")}</div></section>`;
 }
 function monitoring() {
   const health = state.worker_health;
@@ -401,7 +414,7 @@ function monitoring() {
       "The live signal behind every run. Logs, resources, and backend health.",
       button("report", "Export report", "download", "secondary", !connected),
     ) +
-    `<div class="stat-grid">${stat("Backend health", connected ? "Connected" : "Disconnected", "", "Independent control-plane process", "shield")}${stat("Worker heartbeat", health.heartbeat_age_seconds == null ? "—" : number(health.heartbeat_age_seconds, 1), health.heartbeat_age_seconds == null ? "" : "s", health.connected ? "Time since last worker message" : "No active training worker", "monitoring")}${stat("Visible CPU threads", number(state.system.cpu_count), "", "Actual backend host allocation", "cpu")}${stat("GPU peak allocation", bytes(runMetrics(state.active_run).gpu_peak_bytes), "", "PyTorch measurement, when available", "bolt")}</div><section class="panel"><div class="panel-header"><div><h2>Live event stream</h2><p>Structured, durable, and resumed by sequence cursor</p></div><span class="live-indicator"><i></i>${connected ? "LIVE" : "RECONNECTING"}</span></div><div class="log-toolbar"><div class="log-filters">${["all", "warning", "error"].map((level) => `<button data-log-level="${level}" class="${logLevel === level ? "selected" : ""}">${level === "all" ? "All events" : level === "warning" ? "Warnings" : "Errors"}</button>`).join("")}</div><input class="log-search" id="log-search" aria-label="Filter logs" placeholder="Filter event messages…" value="${esc(logSearch)}"></div><div class="log-stream" id="log-stream" aria-label="Live logs">${filtered.length ? filtered.map((event) => `<div class="log-line"><time class="log-time">${time(event.ts)}</time><span class="log-level ${esc(event.level)}">${esc(event.level)}</span><span class="log-message">${esc(event.message)}</span></div>`).join("") : '<span class="muted">No matching events.</span>'}</div><div class="log-footer"><span>Cursor ${cursor} · Showing ${filtered.length} events</span><span>No messages are synthesized</span></div></section><div class="two-col" style="margin-top:20px">${resources()}${advisoryPanel()}</div>`
+    `<div class="stat-grid">${stat("Backend health", connected ? "Connected" : "Disconnected", "", "Independent control-plane process", "shield")}${stat("Worker heartbeat", health.heartbeat_age_seconds == null ? "—" : number(health.heartbeat_age_seconds, 1), health.heartbeat_age_seconds == null ? "" : "s", health.connected ? "Time since last worker message" : "No active training worker", "monitoring")}${stat("Visible CPU threads", number(state.system.cpu_count), "", "Actual backend host allocation", "cpu")}${stat("GPU peak allocation", bytes(runMetrics(state.active_run).gpu_peak_bytes), "", "PyTorch measurement, when available", "bolt")}</div><section class="panel"><div class="panel-header"><div><h2>Live event stream</h2><p>Structured, durable, and resumed by sequence cursor</p></div><span class="live-indicator"><i></i>${connected ? "LIVE" : "RECONNECTING"}</span></div><div class="log-toolbar"><div class="log-filters">${["all", "warning", "error"].map((level) => `<button data-log-level="${level}" class="${logLevel === level ? "selected" : ""}">${level === "all" ? "All events" : level === "warning" ? "Warnings" : "Errors"}</button>`).join("")}</div><input class="log-search" id="log-search" aria-label="Filter logs" placeholder="Filter event messages…" value="${esc(logSearch)}"></div><div class="log-stream" id="log-stream" aria-label="Live logs">${filtered.length ? filtered.map((event) => `<div class="log-line"><time class="log-time">${time(event.ts)}</time><span class="log-level ${esc(event.level)}">${esc(event.level)}</span><span class="log-message">${esc(event.message)}</span></div>`).join("") : '<span class="muted">No matching events.</span>'}</div><div class="log-footer"><span>Cursor ${cursor} · Showing ${filtered.length} events</span><span>No messages are synthesized</span></div></section><div class="two-col" style="margin-top:20px">${resources()}${advisoryPanel()}</div>${stackPanel()}`
   );
 }
 function latestEvaluation(checkpointId) {
@@ -525,18 +538,12 @@ function configInput(
     : `<input id="cfg-${key}" data-config="${key}" type="${type}" value="${esc(value)}" ${type === "number" ? 'step="any"' : ""}>`;
   return `<label class="field">${label}${input}${description ? `<small>${description}</small>` : ""}</label>`;
 }
-function configuration() {
+function planPanel() {
   if (!configDraft) {
     configDraft = structuredClone(state.plan);
     configRaw = JSON.stringify(configDraft, null, 2);
   }
-  return (
-    heading(
-      "Configuration",
-      "An explicit plan, validated before it reaches the learner. No hot strategy changes.",
-      `<span class="plan-badge"><i></i>Approved plan · revision <span id="plan-revision">${state.plan_revision}</span></span>`,
-    ) +
-    `<div class="config-layout"><section class="panel"><div class="panel-header"><div><h2>Experiment & training parameters</h2><p>Draft changes do not affect existing runs</p></div>${icon("configuration")}</div><div class="form-grid">${configInput("Experiment name", "name", "text")}${configInput(
+  return `<section class="panel plan-panel" id="plan-editor" style="margin-top:20px"><div class="panel-header"><div><h2>Approved plan</h2><p>Draft changes never affect a running experiment</p></div><span class="plan-badge"><i></i>Revision <span id="plan-revision">${state.plan_revision}</span></span></div><div class="panel-body"><div class="form-grid">${configInput("Experiment name", "name", "text")}${configInput(
       "Learner device",
       "device",
       "text",
@@ -545,15 +552,7 @@ function configuration() {
         ["cuda:0", "CUDA · device 0"],
         ["cpu", "CPU · bounded correctness test"],
       ],
-    )}${configInput("Total agent steps", "total_timesteps", "number", "Must be a multiple of iteration steps.")}${configInput("Steps per PPO iteration", "batch_size", "number", "Also sets collection size and 3× buffer capacity.")}${configInput("Environment processes", "n_proc", "number", "Fixed 1v1, kickoff-only, headless.")}${configInput("Minibatches", "n_minibatches", "number", "Must divide the batch; at least 16 samples each.")}${configInput("Learning rate", "learning_rate", "number")}${configInput("Entropy coefficient", "entropy_coefficient", "number")}${configInput("Random seed", "seed", "number")}${configInput("Checkpoint every N iterations", "checkpoint_every_iterations", "number", "Pause and stop also save at a safe boundary.")}</div><details class="advanced-config"><summary>Advanced · complete validated configuration</summary><textarea id="config-json" class="json-editor" aria-label="Complete training configuration" spellcheck="false">${esc(configRaw)}</textarea></details><div class="validation-message" id="validation-message" hidden role="status"></div><div class="config-actions">${button("reset-draft", "Reset draft", "refresh", "ghost", false)}${button("validate-config", "Validate draft", "check", "secondary", !writable())}${button("apply-config", "Review & apply", "arrow", "primary", !writable() || !idle(), 'id="apply-config"')}</div></section><div><section class="panel"><div class="panel-header"><div><h2>Guardrails, not guesswork.</h2><p>Changes require your approval</p></div>${icon("shield")}</div><div class="panel-body"><div class="system-note">${icon("lock")}<span>Every consequential action explains its rationale and expected impact before you confirm it. Configuration is immutable once a run starts.</span></div><div class="recommendation"><strong>Start with a small vertical slice</strong><p>One shared policy, 1v1 Soccar, 92 float32 observations, 90 actions, and one PPO epoch. No game client or match rendering.</p></div><div class="recommendation"><strong>Verify the actual target host</strong><p>Use <code>rocket-ai doctor --probe</code> in WSL 2. A CPU test verifies correctness, not RTX 4060 Ti throughput.</p></div></div></section><section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Installed training stack</h2><p>Resolved packages, not assumptions</p></div>${icon("cpu")}</div><div class="panel-body">${Object.entries(
-      state.training_packages,
-    )
-      .map(
-        ([name, version]) =>
-          `<div class="stack-row"><span>${esc(name)}</span><code>${esc(version || "not installed")}</code></div>`,
-      )
-      .join("")}</div></section></div></div>`
-  );
+    )}${configInput("Total agent steps", "total_timesteps", "number", "Agent steps; 1v1 produces two per decision.")}${configInput("Steps per PPO iteration", "batch_size", "number", "Also sets collection size and 3× buffer capacity.")}${configInput("Environment processes", "n_proc", "number", "More processes use more CPU cores; benchmark to choose.")}${configInput("Minibatches", "n_minibatches", "number", "Must divide the batch; at least 16 samples each.")}${configInput("Learning rate", "learning_rate", "number")}${configInput("Entropy coefficient", "entropy_coefficient", "number")}${configInput("Random seed", "seed", "number")}${configInput("Checkpoint every N iterations", "checkpoint_every_iterations", "number", "Pause and stop also save at a safe boundary.")}</div><details class="advanced-config"><summary>Advanced · complete validated configuration</summary><textarea id="config-json" class="json-editor" aria-label="Complete training configuration" spellcheck="false">${esc(configRaw)}</textarea></details><div class="validation-message" id="validation-message" hidden role="status"></div><div class="config-actions">${button("reset-draft", "Reset draft", "refresh", "ghost", false)}${button("validate-config", "Validate draft", "check", "secondary", !writable())}${button("apply-config", "Review plan changes", "arrow", "primary", !writable() || !idle(), 'id="apply-config"')}</div><p class="subtle">Applying a plan creates a reviewed proposal. It changes future runs only; it never modifies an existing run or checkpoint.</p></div></section>`;
 }
 function visualization() {
   const recorded = (state.evaluations || []).filter(
@@ -571,7 +570,7 @@ function visualization() {
       "Recorded evaluation replays, rendered locally. Training stays headless.",
       `<span class="pill muted-pill">RECORDED REPLAY · TOP-DOWN</span>`,
     ) +
-    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer</h2><p>Real RocketSim trajectories recorded during evaluation — a schematic top-down view, not a 3D renderer</p></div>${statusPill(replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && writable() ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><button class="button ghost" data-action="export-replay" ${replay.data ? "" : "disabled"}>${icon("download")}Export JSON</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay">${replay.data ? `<div class="replay-markers">${replayGoalMarkers()}</div>` : ""}<div class="replay-readout" id="replay-readout">${replay.data ? esc(replayReadout()) : "Run an evaluation from Models to record a replay. Opening this viewer never affects a training run."}</div></div><div class="viz-specs"><span>SOURCE<strong>Evaluation trajectory artifact</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>BOUNDARY<strong>No live 3D renderer (NumPy/renderer conflict documented)</strong></span></div></section>`
+    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer</h2><p>Real RocketSim trajectories recorded during evaluation — a schematic top-down view, not a 3D renderer</p></div>${statusPill(replay.playing ? "running" : replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && (writable() || readOnly) ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><button class="button ghost" data-action="export-replay" ${replay.data ? "" : "disabled"}>${icon("download")}Export JSON</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="field">Zoom<select id="replay-zoom"><option value="1" ${replay.zoom === 1 ? "selected" : ""}>1×</option><option value="2" ${replay.zoom === 2 ? "selected" : ""}>2×</option><option value="4" ${replay.zoom === 4 ? "selected" : ""}>4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay">${replay.data ? `<div class="replay-markers">${replayGoalMarkers()}</div>` : ""}<div class="replay-legend"><span><i class="legend-car filled"></i>Blue car</span><span><i class="legend-car outline"></i>Orange car</span><span><i class="legend-ball"></i>Ball</span><span>Field: x ±4096, y ±5120 · blue goal left</span></div><div class="replay-readout" id="replay-readout">${replay.data ? esc(replayReadout()) : "Run an evaluation from Models to record a replay. Opening this viewer never affects a training run."}</div></div><div class="viz-specs"><span>SOURCE<strong>Evaluation trajectory artifact</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>BOUNDARY<strong>No live 3D renderer (NumPy/renderer conflict documented)</strong></span></div></section>`
   );
 }
 function replayReadout() {
@@ -585,57 +584,163 @@ function replayReadout() {
   const action = vector
     ? `Action ${frame.candidate_action}: throttle ${vector[0]}, steer ${vector[1]}, jump ${vector[5] ? "yes" : "no"}, boost ${vector[6] ? "yes" : "no"}${frame.candidate_action_prob != null ? ` (p=${Number(frame.candidate_action_prob).toFixed(2)})` : ""} · `
     : "";
-  return `Game ${frame.game + 1} · t=${frame.t.toFixed(2)}s · Score blue ${frame.score[0]} – orange ${frame.score[1]} · Ball speed ${ballSpeed} uu/s · ${action}Frame ${replay.frame + 1}/${replay.data.frames.length} · Candidate: ${esc(replay.data.candidate_side_by_game[frame.game] || "?")}`;
+  return `Game ${frame.game + 1} · t=${frame.t.toFixed(2)}s · Score blue ${frame.score[0]} – orange ${frame.score[1]} · Ball z ${(frame.ball[2] || 0).toFixed(0)} / speed ${ballSpeed} uu/s · ${action}Frame ${replay.frame + 1}/${replay.data.frames.length} · Candidate: ${esc(replay.data.candidate_side_by_game[frame.game] || "?")}`;
 }
+
+// RocketSim / RLGym Soccar coordinates: x is across the pitch (±4096),
+// y is goal-to-goal (±5120, blue at -y, orange at +y), z is up.
+const FIELD = {
+  x: 4096, y: 5120, goalHalf: 892.755, goalHeight: 642.775,
+  ballRadius: 91.25, centreCircle: 500,
+};
+
+function replayMapping(width, height, { follow = false, centre = [0, 0], zoom = 1 } = {}) {
+  const margin = 24;
+  const fit = Math.min((width - 2 * margin) / (2 * FIELD.y), (height - 2 * margin) / (2 * FIELD.x));
+  const factor = (follow ? 2 : 1) * Math.max(0.5, Math.min(Number(zoom) || 1, 4));
+  const scale = Math.max(fit * factor, 0.002);
+  const cx = follow ? centre[0] : 0;
+  const cy = follow ? centre[1] : 0;
+  // World +y (towards the orange goal) is canvas +x; world +x is canvas up.
+  const px = (wx, wy) => [width / 2 + (wy - cy) * scale, height / 2 - (wx - cx) * scale];
+  return { width, height, scale, margin, px };
+}
+
+function drawReplayField(ctx, mapping) {
+  const { width: W, height: H, scale, px } = mapping;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  const corners = [px(-FIELD.x, -FIELD.y), px(-FIELD.x, FIELD.y), px(FIELD.x, FIELD.y), px(FIELD.x, -FIELD.y)];
+  ctx.beginPath();
+  corners.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+  ctx.closePath();
+  ctx.stroke();
+  // Halfway line and centre circle.
+  const [hx0, hy0] = px(-FIELD.x, 0), [hx1, hy1] = px(FIELD.x, 0);
+  ctx.beginPath(); ctx.moveTo(hx0, hy0); ctx.lineTo(hx1, hy1); ctx.stroke();
+  const [cx, cy] = px(0, 0);
+  ctx.beginPath(); ctx.arc(cx, cy, FIELD.centreCircle * scale, 0, Math.PI * 2); ctx.stroke();
+  // Goal mouths sit outside the back walls; a bracket is always visible.
+  ctx.font = "10px Inter, sans-serif";
+  ctx.textAlign = "center";
+  for (const [side, label] of [[-1, "BLUE GOAL"], [1, "ORANGE GOAL"]]) {
+    const wall = side * FIELD.y;
+    const [gx0, gy0] = px(-FIELD.goalHalf, wall), [gx1, gy1] = px(FIELD.goalHalf, wall);
+    const outward = side > 0 ? 14 : -14;
+    ctx.beginPath();
+    ctx.moveTo(gx0, gy0); ctx.lineTo(gx1, gy1);
+    ctx.moveTo(gx0, gy0); ctx.lineTo(gx0 + outward, gy0);
+    ctx.moveTo(gx1, gy1); ctx.lineTo(gx1 + outward, gy1);
+    ctx.stroke();
+    ctx.fillStyle = "#b8b8b8";
+    ctx.fillText(label, (gx0 + gx1) / 2 + outward, gy0 - 8);
+    ctx.fillStyle = "#fff";
+  }
+  ctx.textAlign = "left";
+}
+
+function drawReplayEmpty(ctx, mapping, message) {
+  const { width: W, height: H } = mapping;
+  // Knock a hole in the field marking so the empty-state copy stays readable
+  // instead of colliding with the halfway line and centre circle.
+  ctx.fillStyle = "#000";
+  ctx.fillRect(W / 2 - 250, H / 2 - 34, 500, 68);
+  ctx.strokeStyle = "#2a2a2a";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(W / 2 - 250, H / 2 - 34, 500, 68);
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.font = "600 16px Inter, sans-serif";
+  ctx.fillText("No replay loaded", W / 2, H / 2 - 10);
+  ctx.fillStyle = "#b8b8b8";
+  ctx.font = "12px Inter, sans-serif";
+  ctx.fillText(message, W / 2, H / 2 + 14);
+  ctx.textAlign = "left";
+}
+
 function drawReplayFrame() {
   const canvas = document.getElementById("replay-canvas");
-  if (!canvas || !replay.data) return;
-  const frame = replay.data.frames[replay.frame];
-  if (!frame) return;
+  if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height;
-  // Soccar field: x in [-4096, 4096], y in [-5120, 5120]; map y to canvas x.
-  let centreX = 0, centreY = 0;
-  if (replay.follow) { centreX = frame.ball[1]; centreY = frame.ball[0]; }
-  const scale = replay.follow ? 0.11 : Math.min(W / 10600, H / 8800);
-  const px = (wx, wy) => [W / 2 + (wy - centreX) * scale, H / 2 - (wx - centreY) * scale];
-  ctx.fillStyle = "#0b3d2e";
-  ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = "rgba(255,255,255,0.65)";
-  ctx.lineWidth = 2;
-  const [fx0, fy0] = px(-5120, -4096), [fx1, fy1] = px(5120, 4096);
-  ctx.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
-  ctx.beginPath();
-  const [cx, cy] = px(0, 0);
-  ctx.moveTo(cx, fy0); ctx.lineTo(cx, fy1); ctx.stroke();
-  ctx.beginPath(); ctx.arc(cx, cy, 500 * scale, 0, Math.PI * 2); ctx.stroke();
-  for (const goalY of [-5120, 5120]) {
-    const [gx0, gy0] = px(goalY - 0, -893), [gx1, gy1] = px(goalY, 893);
-    ctx.strokeRect(Math.min(gx0, gx1), Math.min(gy0, gy1), Math.abs(gx1 - gx0) || 4, Math.abs(gy1 - gy0));
+  const frame = replay.data?.frames?.[replay.frame];
+  const mapping = replayMapping(W, H, {
+    follow: replay.follow && !!frame,
+    centre: frame ? [frame.ball[0], frame.ball[1]] : [0, 0],
+    zoom: replay.zoom,
+  });
+  drawReplayField(ctx, mapping);
+  if (!frame) {
+    drawReplayEmpty(ctx, mapping, "Run an evaluation in Models, then load its trajectory here.");
+    return;
   }
+  const { px, scale } = mapping;
   for (const car of frame.cars) {
     const [x, y] = px(car.position[1], car.position[0]);
     ctx.save();
     ctx.translate(x, y);
-    ctx.rotate(-(car.yaw || 0));
-    ctx.fillStyle = car.team === "blue" ? "#3b82f6" : "#f97316";
-    ctx.fillRect(-14, -8, 28, 16);
+    // RLGym yaw 0 points along world +x; canvas +y is down, so this rotation
+    // maps +x to up and +y to right.
+    ctx.rotate(Number(car.yaw) || 0);
+    ctx.lineWidth = 2;
+    if (car.team === "blue") {
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(-3, -11, 6, 22);
+    } else {
+      ctx.strokeStyle = "#fff";
+      ctx.strokeRect(-3, -11, 6, 22);
+    }
     ctx.fillStyle = "#fff";
-    ctx.fillRect(8, -5, 6, 10);
+    ctx.fillRect(-1.5, -13, 3, 3);  // nose marker
     ctx.restore();
   }
   const [bx, by] = px(frame.ball[1], frame.ball[0]);
+  const radius = Math.max(5, FIELD.ballRadius * scale);
+  if ((frame.ball[2] || 0) > 150) {
+    ctx.strokeStyle = "#b8b8b8";
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.arc(bx, by, radius + 5, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   ctx.beginPath();
-  ctx.arc(bx, by, 7, 0, Math.PI * 2);
-  ctx.fillStyle = "#f8fafc";
+  ctx.arc(bx, by, radius, 0, Math.PI * 2);
+  ctx.fillStyle = "#fff";
   ctx.fill();
-  ctx.strokeStyle = "#111827";
+  ctx.strokeStyle = "#000";
+  ctx.lineWidth = 2;
   ctx.stroke();
+  // Score/time overlay, independent of the HTML readout.
+  ctx.fillStyle = "#fff";
+  ctx.font = "600 12px Inter, sans-serif";
+  ctx.fillText(`BLUE ${frame.score[0]}  –  ${frame.score[1]} ORANGE`, 16, 22);
+  ctx.fillStyle = "#b8b8b8";
+  ctx.font = "11px Inter, sans-serif";
+  ctx.fillText(`t=${frame.t.toFixed(2)}s · frame ${replay.frame + 1}/${replay.data.frames.length}`, 16, 38);
   const readout = document.getElementById("replay-readout");
   if (readout) readout.textContent = replayReadout();
   const scrub = document.getElementById("replay-scrub");
   if (scrub && document.activeElement !== scrub) scrub.value = replay.frame;
 }
+
+window.__RLAI_GEOMETRY__ = {
+  field: FIELD,
+  mapping: replayMapping,
+  selfTest() {
+    const m = replayMapping(920, 620);
+    return {
+      fieldWidth: m.px(0, FIELD.y)[0] - m.px(0, -FIELD.y)[0],
+      fieldHeight: Math.abs(m.px(FIELD.x, 0)[1] - m.px(-FIELD.x, 0)[1]),
+      orangeRight: m.px(0, FIELD.y)[0] > m.px(0, -FIELD.y)[0],
+      blueLeft: m.px(0, -FIELD.y)[0] < m.px(0, FIELD.y)[0],
+      positiveXUp: m.px(FIELD.x, 0)[1] < m.px(-FIELD.x, 0)[1],
+      goalWidth: Math.abs(m.px(FIELD.goalHalf, FIELD.y)[1] - m.px(-FIELD.goalHalf, FIELD.y)[1]),
+    };
+  },
+};
+
 function replayGoalMarkers() {
   if (!replay.data) return "";
   const markers = [];
@@ -649,8 +754,35 @@ function replayGoalMarkers() {
   return markers.length ? markers.join("") : '<span class="subtle">No goals in the recorded games.</span>';
 }
 function stopReplayTimer() {
-  if (replay.timer) { clearInterval(replay.timer); replay.timer = null; }
+  if (replay.raf) { cancelAnimationFrame(replay.raf); replay.raf = null; }
   replay.playing = false;
+}
+function startReplayTimer() {
+  stopReplayTimer();
+  replay.playing = true;
+  replay.accumulator = 0;
+  let last = performance.now();
+  const tick = (now) => {
+    if (!replay.playing) return;
+    const delta = Math.min(now - last, 250) / 1000;
+    last = now;
+    replay.accumulator += delta * 15 * (Number(replay.speed) || 1);
+    if (replay.accumulator >= 1) {
+      const advance = Math.floor(replay.accumulator);
+      replay.accumulator -= advance;
+      replay.frame += advance;
+      if (replay.frame >= replay.data.frames.length - 1) {
+        replay.frame = replay.data.frames.length - 1;
+        stopReplayTimer();
+        drawReplayFrame();
+        render(true);
+        return;
+      }
+      drawReplayFrame();
+    }
+    replay.raf = requestAnimationFrame(tick);
+  };
+  replay.raf = requestAnimationFrame(tick);
 }
 
 
@@ -665,31 +797,56 @@ function benchmark() {
         ? button("stop-benchmark", "Stop benchmark", "stop", "secondary", !writable())
         : button("start-benchmark", "Start benchmark", "play", "primary", !writable() || !idle()),
     ) +
-    `<section class="panel"><div class="panel-header"><div><h2>Benchmark configuration</h2><p>Each candidate is measured with genuine warm-up + measured PPO iterations; nothing is simulated</p></div>${icon("cpu")}</div><div class="panel-body"><div class="form-grid"><fieldset class="field"><legend>Learner devices</legend><label class="approval-check"><input type="checkbox" data-benchmark-list="devices" value="cpu" ${check(benchmarkForm.devices, "cpu")}> CPU simulation + CPU PPO</label><label class="approval-check"><input type="checkbox" data-benchmark-list="devices" value="cuda:0" ${check(benchmarkForm.devices, "cuda:0")}> CPU simulation + CUDA PPO</label></fieldset><fieldset class="field"><legend>Parallel environments</legend>${[1, 2, 4, 8].map((value) => `<label class="approval-check"><input type="checkbox" data-benchmark-list="n_proc_values" value="${value}" ${check(benchmarkForm.n_proc_values, value)}> ${value} env process${value > 1 ? "es" : ""}</label>`).join("")}</fieldset><label class="field">Batch / iteration agent steps<input type="number" data-benchmark="batch_size" value="${benchmarkForm.batch_size}" min="128" step="128"><small>Also the collection size, as in the training adapter.</small></label><label class="field">Warm-up iterations<input type="number" data-benchmark="warmup_iterations" value="${benchmarkForm.warmup_iterations}" min="0" max="10"><small>Excluded from all statistics.</small></label><label class="field">Measured iterations<input type="number" data-benchmark="measure_iterations" value="${benchmarkForm.measure_iterations}" min="1" max="20"></label><label class="field">Repeats per candidate<input type="number" data-benchmark="repeats" value="${benchmarkForm.repeats}" min="1" max="5"><small>Medians across repeats; instability excludes a candidate.</small></label><label class="field">CPU limit %<input type="number" data-benchmark="max_cpu_percent" value="${benchmarkForm.max_cpu_percent}" min="1" max="100"></label><label class="field">Memory limit %<input type="number" data-benchmark="max_memory_percent" value="${benchmarkForm.max_memory_percent}" min="1" max="100"></label></div><p class="subtle">A measurement run is capped at 16,384 agent steps and uses the approved plan's strategy fields. Benchmark runs appear in Training history. Adopting a recommendation always requires a separate reviewed configuration proposal — throughput is not learning quality.</p></div></section><div id="benchmark-live">${benchmarkLive()}</div><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Stability before speed</h2><p>How a recommendation is earned</p></div>${icon("shield")}</div><div class="panel-body"><p class="subtle">A candidate must complete every repeat, keep throughput variation (CV) at or below 0.25, and stay within the resource limits. The fastest stable candidate wins; maximum utilization alone never does. Failed candidates keep their real error.</p></div></section><section class="panel"><div class="panel-header"><div><h2>Throughput ≠ learning</h2><p>Kept deliberately separate</p></div>${icon("info")}</div><div class="panel-body"><p class="subtle">Simulation steps/s, PPO steps/s and episodes/min are measured independently. Whether a configuration actually plays better is decided only by checkpoint evaluation in Models.</p></div></section></div>`
+    `<section class="panel"><div class="panel-header"><div><h2>Benchmark configuration</h2><p>Each candidate runs for a fixed wall-clock window; nothing is simulated</p></div>${icon("cpu")}</div><div class="panel-body"><div class="form-grid"><fieldset class="field"><legend>Learner devices</legend><label class="approval-check"><input type="checkbox" data-benchmark-list="devices" value="cpu" ${check(benchmarkForm.devices, "cpu")}> CPU simulation + CPU PPO</label><label class="approval-check"><input type="checkbox" data-benchmark-list="devices" value="cuda:0" ${check(benchmarkForm.devices, "cuda:0")}> CPU simulation + CUDA PPO</label></fieldset><fieldset class="field"><legend>Parallel environments</legend>${[1, 2, 4, 8].map((value) => `<label class="approval-check"><input type="checkbox" data-benchmark-list="n_proc_values" value="${value}" ${check(benchmarkForm.n_proc_values, value)}> ${value} env process${value > 1 ? "es" : ""}</label>`).join("")}</fieldset><label class="field">Batch / iteration agent steps<input type="number" data-benchmark="batch_size" value="${benchmarkForm.batch_size}" min="128" step="128"><small>Also the collection size, as in the training adapter.</small></label><label class="field">Measurement window (seconds)<input type="number" data-benchmark="measurement_seconds" value="${benchmarkForm.measurement_seconds}" min="5" max="600"><small>Excludes startup and warm-up. 20 s is the default.</small></label><label class="field">Warm-up iterations<input type="number" data-benchmark="warmup_iterations" value="${benchmarkForm.warmup_iterations}" min="0" max="10"><small>Excluded from all statistics.</small></label><label class="field">Max measured iterations<input type="number" data-benchmark="measure_iterations" value="${benchmarkForm.measure_iterations}" min="1" max="1900"><small>Hard ceiling if the time window has not ended.</small></label><label class="field">Minimum measured iterations<input type="number" data-benchmark="min_iterations" value="${benchmarkForm.min_iterations}" min="1" max="20"><small>Slow CPU safety: keep measuring until this many exist.</small></label><label class="field">Repeats per candidate<input type="number" data-benchmark="repeats" value="${benchmarkForm.repeats}" min="1" max="5"><small>3 repeats are required for automatic adoption.</small></label><label class="field">CPU limit %<input type="number" data-benchmark="max_cpu_percent" value="${benchmarkForm.max_cpu_percent}" min="1" max="100"></label><label class="field">Memory limit %<input type="number" data-benchmark="max_memory_percent" value="${benchmarkForm.max_memory_percent}" min="1" max="100"></label><label class="field">VRAM limit %<input type="number" data-benchmark="max_gpu_memory_percent" value="${benchmarkForm.max_gpu_memory_percent}" min="1" max="100"><small>Requires nvidia-smi telemetry.</small></label><label class="field">Hard timeout (seconds)<input type="number" data-benchmark="timeout_seconds" value="${benchmarkForm.timeout_seconds}" min="30" max="3600"><small>Stops a stuck candidate, not the normal window.</small></label></div><label class="approval-check"><input type="checkbox" data-benchmark-flag="auto_default" ${benchmarkForm.auto_default ? "checked" : ""}> Adopt the winner's device and environment-process count automatically</label><p class="subtle">Automatic adoption is limited to execution fields (device and n_proc). Batch size, network, reward, seed and every strategy field stay at the approved plan. A previous plan is stored for one-click revert. Each measurement run is disposable and does not appear in Training history or checkpoint inventory.</p></div></section><div id="benchmark-live">${benchmarkLive()}</div><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Stability before speed</h2><p>How a recommendation is earned</p></div>${icon("shield")}</div><div class="panel-body"><p class="subtle">A candidate must complete every repeat, keep throughput variation (CV) at or below 0.25, and stay within the resource limits. A CUDA candidate without GPU telemetry is excluded. Automatic adoption needs at least 3 repeats and CV at or below 0.10. Maximum utilization alone never wins.</p></div></section><section class="panel"><div class="panel-header"><div><h2>Throughput ≠ learning</h2><p>Kept deliberately separate</p></div>${icon("info")}</div><div class="panel-body"><p class="subtle">Simulation steps/s, PPO steps/s and episodes/min are measured independently. Whether a configuration actually plays better is decided only by checkpoint evaluation in Models.</p></div></section></div>`
   );
+}
+function benchmarkChart(results) {
+  const completed = (results || []).filter((item) => item.aggregate);
+  if (!completed.length) return "";
+  const width = 720, height = 210, left = 44, right = 16, top = 20, bottom = 42;
+  const plotW = width - left - right, plotH = height - top - bottom;
+  const values = completed.map((item) => item.aggregate.agent_steps_per_second);
+  const maximum = Math.max(...values.map((item) => item.max || item.median), 1);
+  const barW = Math.max(18, plotW / completed.length - 18);
+  const scale = (value) => top + plotH - (value / maximum) * plotH;
+  const bars = completed.map((item, index) => {
+    const rate = item.aggregate.agent_steps_per_second;
+    const x = left + index * (plotW / completed.length) + (plotW / completed.length - barW) / 2;
+    const y = scale(rate.median);
+    const label = `${item.candidate.device === "cuda:0" ? "CUDA" : "CPU"} ${item.candidate.n_proc}`;
+    return `<g><line x1="${x + barW / 2}" y1="${scale(rate.min)}" x2="${x + barW / 2}" y2="${scale(rate.max)}" stroke="#b8b8b8" stroke-width="1.5"/><line x1="${x + barW / 2 - 4}" y1="${scale(rate.max)}" x2="${x + barW / 2 + 4}" y2="${scale(rate.max)}" stroke="#b8b8b8"/><line x1="${x + barW / 2 - 4}" y1="${scale(rate.min)}" x2="${x + barW / 2 + 4}" y2="${scale(rate.min)}" stroke="#b8b8b8"/><rect x="${x}" y="${y}" width="${barW}" height="${top + plotH - y}" fill="#fff" opacity=".9"/><text x="${x + barW / 2}" y="${height - bottom + 16}" fill="#b8b8b8" font-size="11" text-anchor="middle">${esc(label)}</text><text x="${x + barW / 2}" y="${y - 6}" fill="#fff" font-size="11" text-anchor="middle">${number(rate.median, 0)}</text></g>`;
+  }).join("");
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Measured throughput</h2><p>Median agent steps/s with min–max whiskers · longer is better</p></div>${icon("chart")}</div><div class="chart"><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Benchmark throughput by candidate"><line x1="${left}" y1="${top + plotH}" x2="${width - right}" y2="${top + plotH}" stroke="#2a2a2a"/><line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotH}" stroke="#2a2a2a"/>${bars}</svg></div></section>`;
+}
+function benchmarkHistory() {
+  const sessions = state.benchmark_sessions || [];
+  if (!sessions.length) return "";
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Session history</h2><p>Persisted measurements for this workspace</p></div><span class="pill muted-pill">${sessions.length} SESSIONS</span></div><div class="table-wrap"><table><thead><tr><th>SESSION</th><th>CREATED</th><th>STATUS</th><th>WINNER</th><th>WINDOW</th></tr></thead><tbody>${sessions.map((item) => `<tr><td><strong>${esc(item.id.slice(0, 12))}</strong><small>${item.spec?.devices?.join(" + ") || ""}</small></td><td>${date(item.created)}</td><td>${esc(item.status)}</td><td>${item.recommendation?.candidate ? `${esc(item.recommendation.candidate.device)} · ${item.recommendation.candidate.n_proc} env` : "—"}</td><td>${number(item.spec?.measurement_seconds || 0, 0)} s × ${number(item.spec?.repeats || 0, 0)} repeats</td></tr>`).join("")}</tbody></table></div></section>`;
 }
 function benchmarkLive() {
   const bench = state.benchmark || { session: null, results: [] };
   if (!bench.session)
-    return `<section class="panel" style="margin-top:20px"><div class="panel-body">${empty("chart", "No benchmark has been run yet.", "Start a benchmark to measure genuine candidate configurations on this host. Results persist here and in the status report.")}</div></section>`;
+    return `<section class="panel" style="margin-top:20px"><div class="panel-body">${empty("chart", "No benchmark has been run yet.", "Start a benchmark to measure genuine candidate configurations on this host. Each candidate runs for about 20 seconds; results persist in session history.")}</div></section>${benchmarkHistory()}`;
   const session = bench.session;
   const totalCandidates = (session.spec.devices?.length || 1) * (session.spec.n_proc_values?.length || 1);
   const progress = Math.min(100, Math.round((bench.results.length / Math.max(totalCandidates, 1)) * 100));
   const rows = bench.results
     .map((item) => {
       const a = item.aggregate;
-      return `<tr><td>${esc(item.candidate.device)} · ${item.candidate.n_proc} env</td><td>${esc(item.status)}${item.status === "running" ? ` · ${number((item.progress || 0) * 100, 0)}% ${button("stop-evaluation", "Stop", "stop", "ghost", !writable(), `data-evaluation-id="${item.id}"`)}` : ""}</td><td>${a ? number(a.agent_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.simulation_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.ppo_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.episodes_per_minute, 1) : "—"}</td><td>${a ? number(a.agent_steps_per_second.cv, 2) : "—"}</td><td>${item.resources ? `${number(item.resources.cpu_percent_peak, 0)}% CPU · ${number(item.resources.memory_percent_peak, 0)}% RAM${item.resources.initialization_seconds != null ? ` · init ${number(item.resources.initialization_seconds, 1)}s` : ""}` : "—"}</td><td>${item.error ? esc(item.error) : ""}</td></tr>`;
+      const r = item.resources || {};
+      return `<tr><td>${esc(item.candidate.device)} · ${item.candidate.n_proc} env</td><td>${esc(item.status)}</td><td>${a ? number(a.agent_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.simulation_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.ppo_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.episodes_per_minute, 1) : "—"}</td><td>${a ? number(a.agent_steps_per_second.cv, 2) : "—"}</td><td>${r.cpu_percent_peak != null ? `${number(r.cpu_percent_peak, 0)}%` : "—"}</td><td>${r.gpu_percent_peak != null ? `${number(r.gpu_percent_peak, 0)}%` : "—"}</td><td>${r.gpu_memory_percent_peak != null ? `${number(r.gpu_memory_percent_peak, 0)}%` : "—"}</td><td>${item.error ? esc(item.error) : ""}</td></tr>`;
     })
     .join("");
   const rec = session.recommendation;
-  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark results</h2><p>Session ${esc(session.id.slice(0, 12))} · ${esc(session.status)} · ${date(session.created)} · ${bench.results.length}/${totalCandidates} candidates (${progress}%)</p></div>${statusPill(session.status === "running" ? "running" : "idle")}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CANDIDATE</th><th>STATUS</th><th>AGENT STEPS/S</th><th>SIM STEPS/S</th><th>PPO STEPS/S</th><th>EPISODES/MIN</th><th>CV</th><th>RESOURCE PEAKS</th><th>ERROR</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">Measurements are running. Each candidate executes real bounded training runs; results appear as candidates complete.</p></div>'}${rec ? `<div class="panel-body"><div class="recommendation"><strong>Recommendation</strong><p>${esc(rec.explanation)}</p>${rec.candidate ? button("apply-benchmark-recommendation", "Review as configuration proposal", "arrow", "primary", !writable() || !idle()) : ""}${(rec.excluded || []).map((item) => `<p class="subtle">Excluded ${esc(item.candidate.device)} · ${item.candidate.n_proc} env: ${esc(item.reasons.join("; "))}</p>`).join("")}</div></div>` : ""}${session.error ? `<div class="panel-body"><p class="bad-text">${esc(session.error)}</p></div>` : ""}</section>`;
+  const host = rec?.host;
+  const adoption = rec?.adoption;
+  return `${benchmarkChart(bench.results)}<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark results</h2><p>Session ${esc(session.id.slice(0, 12))} · ${esc(session.status)} · ${date(session.created)} · ${bench.results.length}/${totalCandidates} candidates (${progress}%) · ${number(session.spec.measurement_seconds || 0, 0)} s window</p></div>${statusPill(session.status === "running" ? "running" : "idle")}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CANDIDATE</th><th>STATUS</th><th>AGENT/S</th><th>SIM/S</th><th>PPO/S</th><th>EP/MIN</th><th>CV</th><th>CPU</th><th>GPU</th><th>VRAM</th><th>ERROR</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">Measurements are running. Each candidate executes a real bounded training run; results appear as candidates complete.</p></div>'}${rec ? `<div class="panel-body"><div class="recommendation"><strong>Recommendation</strong><p>${esc(rec.explanation)}</p>${adoption?.status === "adopted" ? `<p class="subtle">Default updated: ${esc(Object.entries(adoption.changes || {}).map(([key, value]) => `${key} ${value.before} → ${value.after}`).join(" · "))} (plan revision ${adoption.plan_revision}).</p>` : ""}${rec.auto_default_blockers?.length ? `<p class="subtle">Not auto-adopted: ${esc(rec.auto_default_blockers.join("; "))}</p>` : ""}${host ? `<p class="subtle">Host: ${esc(host.cpu_model)} · ${number(host.cpu_count)} threads · ${esc(host.gpu_name || "GPU unverified")}${host.gpu_memory_total_mib ? ` · ${number(host.gpu_memory_total_mib)} MiB` : ""}</p>` : ""}${rec.candidate ? button("apply-benchmark-recommendation", "Review as configuration proposal", "arrow", "primary", !writable() || !idle()) : ""}${state.benchmark_adoption?.previous_plan ? button("revert-benchmark-adoption", "Revert automatic default", "refresh", "ghost", !writable() || !idle()) : ""}${(rec.excluded || []).map((item) => `<p class="subtle">Excluded ${esc(item.candidate.device)} · ${item.candidate.n_proc} env: ${esc(item.reasons.join("; "))}</p>`).join("")}</div></div>` : ""}${session.error ? `<div class="panel-body"><p class="bad-text">${esc(session.error)}</p></div>` : ""}</section>${benchmarkHistory()}`;
 }
 const views = {
   dashboard,
   training,
   monitoring,
   models,
-  configuration,
   visualization,
   benchmark,
 };
@@ -698,13 +855,16 @@ function render(force = false) {
   connectionUI();
   if (!state) return;
   if (
-    route === "configuration" &&
-    $("#content").dataset.page === "configuration" &&
+    route === "training" &&
+    $("#content").dataset.page === "training" &&
+    planEditing &&
     !force
   ) {
-    $("#plan-revision").textContent = state.plan_revision;
-    $("#apply-config").disabled = !writable() || !idle();
-    $('[data-action="validate-config"]').disabled = !writable();
+    // Never rebuild a plan editor that the user is typing into once a second.
+    if ($("#plan-revision")) $("#plan-revision").textContent = state.plan_revision;
+    if ($("#apply-config")) $("#apply-config").disabled = !writable() || !idle();
+    const validate = $('[data-action="validate-config"]');
+    if (validate) validate.disabled = !writable();
     return;
   }
   if (route === "benchmark" && $("#content").dataset.page === "benchmark" && !force) {
@@ -808,6 +968,19 @@ async function review(kind, payload = {}) {
   }
   if (pendingProposal) return;
   const proposal = await api("proposals", { kind, payload });
+  // An unchanged plan was already approved and the user explicitly pressed
+  // "New training run". Do not ask again through a modal with an empty diff.
+  if (kind === "start_run" && !Object.keys(proposal.payload.changes || {}).length) {
+    const result = await api(`proposals/${proposal.id}/confirm`, {
+      confirmed: true,
+      expected_digest: proposal.digest,
+    });
+    selectedRun = result.run_id;
+    location.hash = "training";
+    toast("Run started with the approved plan.");
+    await refresh();
+    return result;
+  }
   pendingProposal = proposal;
   const titles = {
     start_run: "Start this training run?",
@@ -870,6 +1043,10 @@ async function action(action, element) {
     $("#guide-dialog").close();
     return;
   }
+  if (action === "open-plan") {
+    document.getElementById("plan-editor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
   if (action === "connect") {
     token = $("#access-key").value.trim();
     sessionStorage.setItem("rlai-capability", token);
@@ -903,6 +1080,7 @@ async function action(action, element) {
     if (proposal.kind === "apply_config") {
       configDraft = null;
       configRaw = null;
+      planEditing = false;
       $("#content").dataset.page = "";
     }
     toast(
@@ -921,6 +1099,7 @@ async function action(action, element) {
   if (action === "reset-draft") {
     configDraft = null;
     configRaw = null;
+    planEditing = false;
     render(true);
     return;
   }
@@ -1001,15 +1180,20 @@ async function action(action, element) {
     await refresh();
     return;
   }
+  if (action === "revert-benchmark-adoption") {
+    const previous = state.benchmark_adoption?.previous_plan;
+    if (!previous) throw new Error("No benchmark adoption record is available.");
+    return review("apply_config", { config: previous });
+  }
   if (action === "apply-benchmark-recommendation") {
     const candidate = state.benchmark?.session?.recommendation?.candidate;
     if (!candidate) throw new Error("No stable benchmark recommendation is available.");
     const config = structuredClone(state.plan);
     config.device = candidate.device;
     config.n_proc = candidate.n_proc;
-    config.batch_size = state.benchmark.session.spec.batch_size;
-    config.timesteps_per_iteration = config.batch_size;
-    config.buffer_size = config.batch_size * 3;
+    // Only execution fields are evidence from a throughput benchmark. The
+    // session's batch size was not compared against alternatives, so it must
+    // not overwrite the approved learning configuration.
     return review("apply_config", { config });
   }
   if (action === "start-evaluation") {
@@ -1043,7 +1227,7 @@ async function action(action, element) {
     if (!id) throw new Error("Select a recorded evaluation first.");
     const data = await api(`evaluations/${id}/trajectory`);
     stopReplayTimer();
-    replay = { id, data, frame: 0, playing: false, speed: Number($("#replay-speed")?.value || 1), follow: true, timer: null };
+    replay = { id, data, frame: 0, playing: false, speed: Number($("#replay-speed")?.value || 1), follow: false, zoom: 1, raf: null, accumulator: 0 };
     location.hash = "visualization";
     render(true);
     return;
@@ -1054,6 +1238,7 @@ async function action(action, element) {
     return;
   }
   if (action === "replay-jump") {
+    stopReplayTimer();
     replay.frame = Number(element.dataset.frame);
     drawReplayFrame();
     render(true);
@@ -1072,20 +1257,11 @@ async function action(action, element) {
   }
   if (action === "replay-toggle") {
     if (!replay.data) return;
-    replay.playing = !replay.playing;
     if (replay.playing) {
-      replay.timer = setInterval(() => {
-        replay.frame += 1;
-        if (replay.frame >= replay.data.frames.length) {
-          replay.frame = replay.data.frames.length - 1;
-          stopReplayTimer();
-          render(true);
-          return;
-        }
-        drawReplayFrame();
-      }, 1000 / (15 * replay.speed));
-    } else {
       stopReplayTimer();
+    } else {
+      if (replay.frame >= replay.data.frames.length - 1) replay.frame = 0;
+      startReplayTimer();
     }
     render(true);
     return;
@@ -1127,6 +1303,12 @@ async function action(action, element) {
     return review("apply_config", { config: draft() });
 }
 document.addEventListener("click", async (event) => {
+  if (event.target.closest(".advanced-config > summary")) {
+    // Opening the raw JSON editor is an edit session: stop the 1 s refresh
+    // from rebuilding the <details> element and closing it under the user.
+    planEditing = true;
+    return;
+  }
   const chartButton = event.target.closest("[data-chart]");
   if (chartButton) {
     chartKind = chartButton.dataset.chart;
@@ -1173,9 +1355,18 @@ document.addEventListener("input", (event) => {
     replay.speed = Number(event.target.value);
     return;
   }
+  if (event.target.id === "replay-zoom") {
+    replay.zoom = Number(event.target.value);
+    drawReplayFrame();
+    return;
+  }
   if (event.target.id === "replay-follow") {
     replay.follow = event.target.checked;
     drawReplayFrame();
+    return;
+  }
+  if (event.target.dataset.benchmarkFlag) {
+    benchmarkForm[event.target.dataset.benchmarkFlag] = event.target.checked;
     return;
   }
   if (event.target.dataset.benchmarkList) {
@@ -1191,6 +1382,7 @@ document.addEventListener("input", (event) => {
     return;
   }
   if (event.target.id === "config-json") {
+    planEditing = true;
     configRaw = event.target.value;
     $("#validation-message").hidden = true;
     try {
@@ -1208,6 +1400,7 @@ document.addEventListener("input", (event) => {
   }
   const key = event.target.dataset.config;
   if (key) {
+    planEditing = true;
     const value =
       event.target.type === "number"
         ? Number(event.target.value)
@@ -1231,14 +1424,27 @@ $("#connect-dialog").addEventListener("cancel", (event) =>
 );
 window.addEventListener("hashchange", () => {
   const changedKey = consumeCapabilityFragment();
-  route = names[location.hash.slice(1)] ? location.hash.slice(1) : "dashboard";
+  const raw = location.hash.slice(1);
+  route = resolveRoute(raw);
+  if (legacyRoutes[raw]) history.replaceState(null, "", `#${route}`);
   if (changedKey) {
     connected = false;
     refresh();
   }
+  planEditing = false;
   render(true);
 });
-route = names[location.hash.slice(1)] ? location.hash.slice(1) : "dashboard";
+{
+  const raw = location.hash.slice(1);
+  route = resolveRoute(raw);
+  if (legacyRoutes[raw]) history.replaceState(null, "", `#${route}`);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && replay.playing) {
+    stopReplayTimer();
+    render(true);
+  }
+});
 navigation();
 refresh();
 setInterval(refresh, 1000);

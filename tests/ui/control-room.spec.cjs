@@ -36,6 +36,24 @@ const approveDialog = async (page) => {
   await page.locator("#confirm-action").click();
   await expect(page.locator("#confirmation-dialog")).not.toBeVisible();
 };
+const assertReplayGeometry = async (page) => {
+  await nav(page, "visualization");
+  const geometry = await page.evaluate(() => window.__RLAI_GEOMETRY__.selfTest());
+  // selfTest maps a fixed 920x620 canvas, so the pitch spans are deterministic.
+  expect(geometry.fieldWidth).toBeCloseTo(715, 6);
+  expect(geometry.fieldHeight).toBeCloseTo(572, 6);
+  expect(geometry.goalWidth).toBeCloseTo(124.6718, 3);
+  expect(geometry.orangeRight).toBe(true);
+  expect(geometry.blueLeft).toBe(true);
+  expect(geometry.positiveXUp).toBe(true);
+  const linePixel = await page.evaluate(() => {
+    const canvas = document.getElementById("replay-canvas");
+    const m = window.__RLAI_GEOMETRY__.mapping(canvas.width, canvas.height);
+    const [x, y] = m.px(3000, 0); // halfway line, clear of the centred empty state
+    return [...canvas.getContext("2d").getImageData(Math.round(x), Math.round(y), 1, 1).data];
+  });
+  expect(linePixel[0]).toBeGreaterThan(120);
+};
 const prepareDraft = async (page, overrides = {}) => {
   const config = {
     ...(await snapshot(page)).plan,
@@ -53,14 +71,14 @@ const prepareDraft = async (page, overrides = {}) => {
     no_touch_timeout_seconds: 1,
     ...overrides,
   };
-  await nav(page, "configuration");
+  await nav(page, "training");
   await page.locator(".advanced-config > summary").click();
   await page.locator("#config-json").fill(JSON.stringify(config, null, 2));
   return config;
 };
 
 // These tests drive the actual application and real PPO workers, never a mocked API.
-test("read-only preview: all seven views, honest unavailable features, offline assets, responsive layout", async ({
+test("read-only preview: all six views, honest unavailable features, offline assets, responsive layout", async ({
   page,
 }, info) => {
   const errors = [],
@@ -71,7 +89,7 @@ test("read-only preview: all seven views, honest unavailable features, offline a
   });
   await page.goto(preview);
   await expect(page.locator("#connection")).toHaveText("Backend connected");
-  await expect(page.locator("#navigation [data-nav]")).toHaveCount(7);
+  await expect(page.locator("#navigation [data-nav]")).toHaveCount(6);
   await expect(
     page.getByRole("button", { name: "New training run" }),
   ).toBeDisabled();
@@ -80,7 +98,6 @@ test("read-only preview: all seven views, honest unavailable features, offline a
     training: "Training",
     monitoring: "Monitoring",
     models: "Models",
-    configuration: "Configuration",
     visualization: "Visualization",
     benchmark: "Benchmark",
   };
@@ -101,6 +118,7 @@ test("read-only preview: all seven views, honest unavailable features, offline a
   await expect(
     page.getByText("Run an evaluation from Models to record a replay."),
   ).toBeVisible();
+  await assertReplayGeometry(page);
   await nav(page, "models");
   await expect(page.getByText("Checkpoint evaluation")).toBeVisible();
   await expect(page.getByText("Checkpoint league")).toBeVisible();
@@ -109,13 +127,17 @@ test("read-only preview: all seven views, honest unavailable features, offline a
     page.getByRole("button", { name: "Start benchmark" }),
   ).toBeDisabled();
   await expect(page.getByText("No benchmark has been run yet.")).toBeVisible();
-  await nav(page, "configuration");
+  await nav(page, "training");
   await expect(
     page.getByRole("button", { name: "Validate draft" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "Review & apply" }),
+    page.getByRole("button", { name: "Review plan changes" }),
   ).toBeDisabled();
+  // Legacy deep links still land on the plan panel in Training.
+  await page.goto(`${preview}/#configuration`);
+  await expect(page.locator("#content")).toHaveAttribute("data-page", "training");
+  await expect(page.locator("h1")).toHaveText("Training");
   await page.setViewportSize({ width: 1000, height: 700 });
   expect(
     await page.evaluate(
@@ -170,25 +192,18 @@ test("real GUI vertical slice: validate, review, reject, approve, pause, reconne
   await expect(page.locator("#validation-message")).toContainText(
     "Valid draft. Nothing applied",
   );
-  await page.getByRole("button", { name: "Review & apply" }).click();
+  await page.getByRole("button", { name: "Review plan changes" }).click();
   await expect(page.locator("#proposal-diff")).toContainText("device");
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   expect((await snapshot(page)).plan).toEqual(original);
-  await page.getByRole("button", { name: "Review & apply" }).click();
+  await page.getByRole("button", { name: "Review plan changes" }).click();
   await approveDialog(page);
   await expect.poll(async () => (await snapshot(page)).plan).toEqual(config);
   expect((await snapshot(page)).runs).toHaveLength(0);
   await nav(page, "training");
   await page.getByRole("button", { name: "New training run" }).click();
-  await expect(page.locator("#confirmation-title")).toHaveText(
-    "Start this training run?",
-  );
-  expect((await snapshot(page)).active_run).toBeNull();
-  await page.screenshot({
-    path: info.outputPath("explicit-training-confirmation.png"),
-    fullPage: true,
-  });
-  await approveDialog(page);
+  // The approved plan is unchanged, so the explicit click starts it directly.
+  await expect(page.locator("#confirmation-dialog")).not.toBeVisible();
   await expect(
     page.getByRole("button", { name: "Pause", exact: true }),
   ).toBeEnabled({ timeout: 30_000 });
@@ -214,6 +229,7 @@ test("real GUI vertical slice: validate, review, reject, approve, pause, reconne
   await expect(
     page.getByRole("button", { name: "Stop run", exact: true }),
   ).toBeDisabled();
+  await assertReplayGeometry(page);
   await nav(page, "models");
   await expect(page.getByText("Checkpoint evaluation")).toBeVisible();
   await expect(page.getByText("Checkpoint league")).toBeVisible();
@@ -222,12 +238,12 @@ test("real GUI vertical slice: validate, review, reject, approve, pause, reconne
     page.getByRole("button", { name: "Start benchmark" }),
   ).toBeDisabled();
   await expect(page.getByText("No benchmark has been run yet.")).toBeVisible();
-  await nav(page, "configuration");
+  await nav(page, "training");
   await expect(
     page.getByRole("button", { name: "Validate draft" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "Review & apply" }),
+    page.getByRole("button", { name: "Review plan changes" }),
   ).toBeDisabled();
   await page.unroute("**/api/**");
   await expect(page.locator("#connection")).toHaveText("Backend connected");
@@ -359,7 +375,7 @@ test("cached configuration controls disable on disconnect and recover without lo
   page,
 }) => {
   await connect(page);
-  await nav(page, "configuration");
+  await nav(page, "training");
   await page.locator("#cfg-name").fill("A local unapproved draft");
   await page.route("**/api/**", (route) => route.abort("failed"));
   await expect(page.locator("#connection-banner")).toBeVisible();
@@ -367,7 +383,7 @@ test("cached configuration controls disable on disconnect and recover without lo
     page.getByRole("button", { name: "Validate draft" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "Review & apply" }),
+    page.getByRole("button", { name: "Review plan changes" }),
   ).toBeDisabled();
   await expect(page.locator("#cfg-name")).toHaveValue(
     "A local unapproved draft",
@@ -391,11 +407,11 @@ test("actual worker CUDA failure is visible and never silently replaced by CPU",
   );
   await connect(page);
   await prepareDraft(page, { device: "cuda:0" });
-  await page.getByRole("button", { name: "Review & apply" }).click();
+  await page.getByRole("button", { name: "Review plan changes" }).click();
   await approveDialog(page);
   await nav(page, "training");
   await page.getByRole("button", { name: "New training run" }).click();
-  await approveDialog(page);
+  await expect(page.locator("#confirmation-dialog")).not.toBeVisible();
   await expect(page.locator(".callout.error")).toContainText(
     "No CPU fallback occurred",
     { timeout: 30_000 },
@@ -404,4 +420,38 @@ test("actual worker CUDA failure is visible and never silently replaced by CPU",
     "FAILED",
   );
   await expect.poll(async () => (await snapshot(page)).active_run).toBeNull();
+});
+
+// A deliberately slow pass over every view: twenty seconds of continuous
+// rendering, polling and canvas drawing, which catches refresh loops that
+// rebuild the DOM mid-interaction or leak page errors between views.
+test("twenty-second smoke: every view keeps rendering under polling", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(`${preview}/`);
+  await expect(page.locator("#connection")).toHaveText("Backend connected");
+  const routes = [
+    "dashboard",
+    "training",
+    "monitoring",
+    "models",
+    "visualization",
+    "benchmark",
+  ];
+  const started = Date.now();
+  for (const route of routes) {
+    await nav(page, route);
+    await expect(page.locator("#content h1")).not.toBeEmpty();
+    // Stay on the view across several refresh intervals (the client polls
+    // once per second) so re-render bugs surface while it is on screen.
+    await page.waitForTimeout(3300);
+    await expect(page.locator("#content")).toHaveAttribute("data-page", route);
+    await expect(page.locator(".loading-state")).toHaveCount(0);
+  }
+  const elapsed = Date.now() - started;
+  expect(elapsed).toBeGreaterThan(18_000);
+  expect(errors).toEqual([]);
 });

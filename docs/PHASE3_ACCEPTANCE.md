@@ -164,7 +164,7 @@ The WSLg desktop acceptance cannot be performed because:
 #### What must be verified on the target machine:
 
 1. `rocket-ai desktop` opens a native Qt window in WSLg.
-2. All six routes (Dashboard, Training, Monitoring, Models, Configuration, Visualization) are usable.
+2. All six routes (Dashboard, Training, Monitoring, Models, Visualization, Benchmark) are usable; the approved-plan editor lives in Training.
 3. Window close and reopen reconnects to the same backend without starting training.
 4. Native save dialog works for report export.
 5. Native cancel dialog leaves files unchanged.

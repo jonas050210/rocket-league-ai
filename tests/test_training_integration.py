@@ -8,9 +8,10 @@ import zipfile
 from io import BytesIO
 
 import pytest
+from conftest import requires_training
 from fastapi.testclient import TestClient
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, requires_training]
 
 
 def wait_for(predicate, timeout=30, description="worker state"):

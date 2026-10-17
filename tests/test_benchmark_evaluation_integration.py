@@ -7,12 +7,13 @@ Kept deliberately tiny (hidden 32, batch 128) so they stay bounded on CPU.
 import time
 
 import pytest
+from conftest import requires_training
 
 from rocket_league_ai.benchmark import BenchmarkSpec
 from rocket_league_ai.config import TrainingConfig
 from rocket_league_ai.evaluation import EvaluationSpec
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, requires_training]
 
 
 def wait_for(predicate, timeout=1200):

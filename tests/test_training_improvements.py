@@ -6,8 +6,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+pytest.importorskip("rlgym", reason="training extra is not installed")
+
 from rocket_league_ai.config import TrainingConfig
-from rocket_league_ai.training.environment import build_environment, shaping_rewards
+from rocket_league_ai.training.environment import build_environment, shaping_rewards  # noqa: E402
 
 
 def fake_state(car_velocity, ball_velocity=(0.0, 0.0, 0.0)):

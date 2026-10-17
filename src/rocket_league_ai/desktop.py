@@ -117,8 +117,7 @@ def launch(args):
         routes = [
             ("dashboard", "Training, under control."), ("training", "Training"),
             ("monitoring", "Monitoring"), ("models", "Models"),
-            ("configuration", "Configuration"), ("visualization", "Visualization"),
-            ("benchmark", "Benchmark"),
+            ("visualization", "Visualization"), ("benchmark", "Benchmark"),
             ("dashboard", "Training, under control."),
         ]
         route_index = 0
@@ -143,11 +142,11 @@ def launch(args):
                         print("Desktop smoke failed: could not save screenshot", file=sys.stderr)
                         application.exit(1)
                         return
-                print("Desktop smoke: seven views loaded, backend connected; closing GUI only", flush=True)
+                print("Desktop smoke: six views loaded, backend connected; closing GUI only", flush=True)
                 application.exit(0)
             elif time.monotonic() > deadline:
                 timer.stop()
-                print(f"Desktop smoke failed: seven views did not connect/load in time; last snapshot: {snapshot!r}", file=sys.stderr)
+                print(f"Desktop smoke failed: six views did not connect/load in time; last snapshot: {snapshot!r}", file=sys.stderr)
                 application.exit(1)
 
         timer.timeout.connect(lambda: page.runJavaScript(

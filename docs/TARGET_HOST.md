@@ -27,8 +27,8 @@ never a pass.
 
 ## 1. N0 — native desktop + bounded CUDA run
 
-1. `uv run --no-sync rocket-ai desktop` opens in WSLg; all seven views load.
-2. In Configuration, approve (proposal + checkbox + digest) a bounded CUDA
+1. `uv run --no-sync rocket-ai desktop` opens in WSLg; all six views load.
+2. In the Training plan panel, approve (proposal + checkbox + digest) a bounded CUDA
    plan, e.g. total 8,192 agent steps, batch 512, 1 env, hidden [256,256,256].
 3. Start via the Training proposal; verify real steps/episodes/checkpoints,
    then pause → resume → stop; each must acknowledge at an update boundary.
@@ -51,17 +51,50 @@ peaks, checkpoint sizes. No orphaned process groups afterwards.
 In Benchmark, for the first target-host session:
 
 - Devices: CPU and CUDA · n_proc: 1, 2, 4, 8 · batch 512 · warm-up 1 ·
-  measured 3 · repeats 3 · CPU limit 100% · memory limit 90%.
-- This runs 8 candidates × 3 repeats of genuine bounded training runs
-  (16,384-step cap per run is enforced). Expect substantial wall time;
-  approve it as a benchmark session, not as training.
-- Afterwards compare with batch 1024 and 2048 (each a new session).
-- Adopt nothing automatically: the recommendation becomes a reviewed
-  `apply_config` proposal only from the Benchmark page.
+  measurement window 20 s · max 1900 measured iterations · min 2 ·
+  repeats 3 · CPU 100% · RAM 95% · VRAM 95% · auto-adopt checked.
+- This runs 8 candidates × 3 repeats of genuine training runs, each stopped
+  after 20 s of measured updates (plus startup), with a hard timeout. Expect
+  roughly 8–15 minutes on this host; it is a benchmark session, not training.
+- Afterwards compare batch 1024 and 2048 in separate sessions.
+- Automatic adoption is limited to **device and n_proc** and requires three
+  repeats with CV ≤ 0.10 and GPU telemetry for a CUDA winner. The previous
+  plan is stored, and "Revert automatic default" creates a reviewed proposal.
+  Strategy fields are never adopted from a throughput session.
 
 Record per candidate: agent/sim/PPO steps/s (median, CV), episodes/min,
-CPU/RAM peaks, GPU utilization and VRAM, errors. The fastest *stable*
-candidate wins; maximum utilization alone never does.
+CPU/RAM/VRAM peaks, GPU utilization, errors. The fastest *stable* candidate
+wins; maximum utilization alone never does.
+
+If CPU stays near 10% of 20 threads, check Monitoring's "threads busy" value:
+one `n_proc` environment is one RocketSim process, so `n_proc=1` is roughly
+one busy core. The benchmark exists to find the largest stable value, not to
+assume 8 is best.
+
+## 3b. Why training showed ~10% CPU, and what to do
+
+On the i7-12700F, 10% of 20 logical threads is about two busy threads. With
+`n_proc=1` the run has exactly one RocketSim environment process, and each
+worker/training process pins BLAS (`OPENBLAS_NUM_THREADS=1`,
+`OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`) so a small PPO network is not
+oversubscribed by math libraries. That is the intended, correct default for a
+GPU-bound learner; it is not a stuck run. The missing piece was visibility.
+
+Before the sweep, confirm in Monitoring: "threads busy" near 1–2, one
+`rocket-sim`/worker process, and GPU utilization above 0 for CUDA. If CUDA is
+selected but utilization stays at 0%, stop and run `doctor --probe`; do not
+"fix" it by raising `n_proc`.
+
+Then use Benchmark exactly as in §3 with `auto-adopt` checked. Expect CPU
+utilization to grow roughly linearly with `n_proc` until P-core threads are
+saturated; GPUs usually peak around 2–4 concurrent 1v1 simulators on this
+class of card. Pick the fastest **stable** candidate (CV ≤ 0.10 across three
+20-second repeats), not the maximum percentage. Adoption changes only
+`device` and `n_proc`; strategy fields and the step budget stay as approved.
+
+Record: candidate, n_proc, steps/s median and CV, GPU %, VRAM peak, and
+whether the value was auto-adopted. If the recommendation is excluded, keep
+the current default and attach the reason to the runbook.
 
 ## 4. Gameplay baseline (P2-1) — prepared, not run
 
@@ -89,7 +122,7 @@ One variable only, same budget/seed/evaluation as the baseline:
 
 The one-million agent-step cap is a safety limit, not a target. Raising it
 is a configuration decision for the operator after N0+N1 pass: propose the
-new `total_timesteps` in Configuration with rationale (measured steps/s →
+new `total_timesteps` in the Training plan panel with rationale (measured steps/s →
 wall-clock estimate from the benchmark) and confirm explicitly. League
 self-play (snapshot opponents, PFSP) builds on checkpoint-opponent
 evaluation, which is implemented; scheduling a league is an experiment

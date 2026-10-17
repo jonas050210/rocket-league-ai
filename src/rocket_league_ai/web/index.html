@@ -151,14 +151,23 @@
       <h2 id="guide-title">A small, real foundation.</h2>
       <p>
         This workspace controls real RocketSim / RLGym Learn PPO training. It
-        does not include a competitive policy, evaluator, or match renderer.
+        records evaluation replays and measures frozen checkpoints, but it does
+        not include a live 3D match renderer or a competitive policy.
       </p>
       <ol class="guide-list">
         <li>
-          Use <strong>Configuration</strong> to validate and approve your plan.
+          Use the <strong>Approved plan</strong> panel in <strong>Training</strong> to
+          validate and approve your plan.
         </li>
-        <li>Review and confirm a run in <strong>Training</strong>.</li>
+        <li>
+          Start a run in <strong>Training</strong>. An unchanged plan starts
+          immediately; a changed plan opens its differences for review.
+        </li>
         <li>Pause and stop are acknowledged at completed PPO updates.</li>
+        <li>
+          Run a 20-second <strong>Benchmark</strong> to measure this host and,
+          when safe, adopt its device and environment-process count.
+        </li>
         <li>
           Inspect saved checkpoints in <strong>Models</strong>. Recovery is
           always a new, explicitly confirmed run.
