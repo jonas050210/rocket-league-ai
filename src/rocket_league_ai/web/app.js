@@ -46,6 +46,7 @@ const names = {
   models: "Models",
   configuration: "Configuration",
   visualization: "Visualization",
+  benchmark: "Benchmark",
 };
 const activeStatuses = new Set([
   "starting",
@@ -309,6 +310,7 @@ function advisoryPanel() {
 function dashboard() {
   const run = state.active_run || state.runs[0],
     m = runMetrics(run);
+  const system = state.system || {};
   return (
     heading(
       "Training, under control.",
@@ -324,7 +326,7 @@ function dashboard() {
     ) +
     runError(run) +
     metricsGrid(run) +
-    `<div class="two-col"><section class="panel active-run"><div class="panel-header"><h2>Active experiment</h2>${statusPill(state.active_run?.status)}</div><div class="run-stage"><div class="run-copy"><h2>${state.active_run ? esc(run.name) : "Your next run<br>starts here."}</h2><p>${state.active_run ? "Real 1v1 simulation, one shared policy, and an explicit plan. Your run continues independently of this window." : "A focused foundation for a self-trained agent. Start small, observe clearly, and build on verified results."}</p><a class="button secondary" href="#training">${icon(state.active_run ? "monitoring" : "training")}${state.active_run ? "View training run" : "Open training controls"}${icon("arrow")}</a></div>${fieldArt()}</div><div class="run-footer"><span>${icon("cpu")}<b>HEADLESS</b></span><span>1v1 Soccar <b>·</b> Tick skip 8</span><span>${icon("lock")}User-initiated only</span></div></section>${readiness()}</div><div class="two-col">${chart(run)}${resources()}</div><div class="two-col balanced">${recentActivity()}<section class="panel"><div class="panel-header"><div><h2>Policy health</h2><p>Learning is not the same as winning</p></div>${icon("trophy")}</div><div class="metric-pairs"><div class="metric-pair"><span>Policy entropy</span><strong>${number(m.entropy, 3)}</strong></div><div class="metric-pair"><span>Evaluation win rate</span><strong>Not evaluated</strong></div></div><div class="panel-body"><div class="system-note">${icon("info")}<span>No win rate is inferred from self-play reward. A frozen-opponent evaluator is a future milestone.</span></div></div></section></div>`
+    `<div class="two-col"><section class="panel active-run"><div class="panel-header"><h2>Active experiment</h2>${statusPill(state.active_run?.status)}</div><div class="run-stage"><div class="run-copy"><h2>${state.active_run ? esc(run.name) : "Your next run<br>starts here."}</h2><p>${state.active_run ? "Real 1v1 simulation, one shared policy, and an explicit plan. Your run continues independently of this window." : "A focused foundation for a self-trained agent. Start small, observe clearly, and build on verified results."}</p><a class="button secondary" href="#training">${icon(state.active_run ? "monitoring" : "training")}${state.active_run ? "View training run" : "Open training controls"}${icon("arrow")}</a></div>${fieldArt()}</div><div class="run-footer"><span>${icon("cpu")}<b>HEADLESS</b></span><span>1v1 Soccar <b>·</b> Tick skip 8</span><span>${icon("lock")}User-initiated only</span></div></section>${readiness()}</div><div class="two-col">${chart(run)}${resources(system)}</div><div class="two-col balanced">${recentActivity()}<section class="panel"><div class="panel-header"><div><h2>Policy health</h2><p>Learning is not the same as winning</p></div>${icon("trophy")}</div><div class="metric-pairs"><div class="metric-pair"><span>Policy entropy</span><strong>${number(m.entropy, 3)}</strong></div><div class="metric-pair"><span>Evaluation win rate</span><strong>Not evaluated</strong></div></div><div class="panel-body"><div class="system-note">${icon("info")}<span>No win rate is inferred from self-play reward. A frozen-opponent evaluator is a future milestone.</span></div></div></section></div>`
   );
 }
 function training() {
@@ -334,8 +336,11 @@ function training() {
   const progress = run
     ? Math.min(((m.steps || 0) / run.config.total_timesteps) * 100, 100)
     : 0;
+  const estimatedRemaining = run?.metrics?.steps_per_second
+    ? number(Math.max(0, (run.config.total_timesteps - (m.steps || 0)) / run.metrics.steps_per_second), 1)
+    : "—";
   let body = run
-    ? `<div class="panel-header"><div><h2>Training lifecycle</h2><p>Update-boundary controls · atomic checkpoints</p></div>${statusPill(run.status)}</div><div class="panel-body"><div class="run-title"><div><h2>${esc(run.name)}</h2><span class="run-id">RUN / ${short(run.id, 12)}</span></div><span class="pill muted-pill">${esc(run.config.device)}</span></div><div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">${stat("PPO iterations", number(m.iterations), "", "Completed update boundaries", "refresh")}${stat("Optimizer updates", number(m.updates), "", "Upstream learner counter", "chart")}${stat("Episodes", number(m.episodes), "", "Completed, not estimated", "training")}</div></div><div class="progress-wrapper"><div class="progress-label"><span>Step budget</span><strong>${number(m.steps || 0)} / ${number(run.config.total_timesteps)} <span class="muted">(${number(progress, 1)}%)</span></strong></div><div class="progress-track" role="progressbar" aria-label="Training step budget" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${progress}%"></div></div></div><div class="control-buttons">${button("pause", "Pause", "pause", "secondary", !writable() || !live || run.status !== "running", `data-run-id="${run.id}"`)}${button("resume", "Resume", "play", "secondary", !writable() || !live || run.status !== "paused", `data-run-id="${run.id}"`)}${button("stop", "Stop run", "stop", "danger", !writable() || !live || !activeStatuses.has(run.status) || run.status === "stopping", `data-run-id="${run.id}"`)}<span class="control-note">${run.status === "paused" ? "Worker is alive; simulation and updates are paused." : ["pausing", "stopping"].includes(run.status) ? "Finishing the current update before acknowledging." : "Closing the GUI does not stop your run."}</span></div>`
+    ? `<div class="panel-header"><div><h2>Training lifecycle</h2><p>Update-boundary controls · atomic checkpoints</p></div>${statusPill(run.status)}</div><div class="panel-body"><div class="run-title"><div><h2>${esc(run.name)}</h2><span class="run-id">RUN / ${short(run.id, 12)}</span></div><span class="pill muted-pill">${esc(run.config.device)}</span></div><div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:0">${stat("PPO iterations", number(m.iterations), "", "Completed update boundaries", "refresh")}${stat("Optimizer updates", number(m.updates), "", "Upstream learner counter", "chart")}${stat("Episodes", number(m.episodes), "", "Completed, not estimated", "training")}${stat("Step throughput", number(m.steps_per_second), "steps/s", "Collection + PPO update timing", "clock")}</div></div><div class="progress-wrapper"><div class="progress-label"><span>Step budget</span><strong>${number(m.steps || 0)} / ${number(run.config.total_timesteps)} <span class="muted">(${number(progress, 1)}%)</span></strong></div><div class="progress-track" role="progressbar" aria-label="Training step budget" aria-valuenow="${progress}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${progress}%"></div></div></div>${run.status === "running" && estimatedRemaining !== "—" ? `<div class="estimated-remaining"><span>Est. remaining: ${estimatedRemaining}s</span></div>` : ""}<div class="control-buttons">${button("pause", "Pause", "pause", "secondary", !writable() || !live || run.status !== "running", `data-run-id="${run.id}"`)}${button("resume", "Resume", "play", "secondary", !writable() || !live || run.status !== "paused", `data-run-id="${run.id}"`)}${button("stop", "Stop run", "stop", "danger", !writable() || !live || !activeStatuses.has(run.status) || run.status === "stopping", `data-run-id="${run.id}"`)}<span class="control-note">${run.status === "paused" ? "Worker is alive; simulation and updates are paused." : ["pausing", "stopping"].includes(run.status) ? "Finishing the current update before acknowledging." : "Closing the GUI does not stop your run."}</span></div>`
     : empty(
         "training",
         "Ready when you are.",
@@ -475,6 +480,44 @@ function visualization() {
     `<section class="panel"><div class="panel-header"><div><h2>Match & observation workspace</h2><p>Decoupled from the headless training loop</p></div>${statusPill("idle")}</div><div class="visualization-canvas">${fieldArt()}${empty("visualization", "A window into the agent. Not a cost to every step.", "No renderer is connected in this phase. Future snapshots and selected match playback will attach here without rendering every training simulation.", '<span class="pill muted-pill">NOT IMPLEMENTED · NO SIMULATED PLAYBACK</span>')}</div><div class="viz-specs"><span>OBSERVATION CONTRACT<strong>DefaultObs · float32 · 92 values</strong></span><span>ACTION CONTRACT<strong>90 discrete · 8 physics ticks</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>EXTENSION<strong>ObservationVisualizer protocol</strong></span></div></section><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Why rendering is separate</h2><p>Protect training throughput and responsiveness</p></div>${icon("cpu")}</div><div class="panel-body"><p class="subtle">The desktop process never owns a simulator or a CUDA training context. Future visualization will consume selected observations or evaluation artifacts, not drive the collector.</p></div></section><section class="panel"><div class="panel-header"><div><h2>Known integration limit</h2><p>No hidden compatibility override</p></div>${icon("info")}</div><div class="panel-body"><p class="subtle">The published RLGym 2.0.1 package requires NumPy &lt; 2. Current rlviser-py requires NumPy 2. A compatible renderer profile must be verified in a later phase.</p></div></section></div>`
   );
 }
+
+
+function benchmark() {
+  const run = viewedRun();
+  const live = run?.id === state.active_run?.id;
+  return heading(
+    "Benchmark",
+    "Automated performance benchmark to measure stable training configurations.",
+    '<span class="pill muted-pill">AUTO-RECOMMENDATION AVAILABLE</span>'
+  ) +
+  '<section class="panel"><div class="panel-header"><div><h2>Benchmark Configuration</h2><p>Measure stable throughput and resource utilization.</p></div>' + icon("cpu") + '</div>' +
+  '<div class="benchmark-config"><div class="form-grid">' +
+  '<section class="panel"><div class="panel-header"><div><h3>Execution Modes</h3></div></div>' +
+  '<label class="radio-item"><input type="radio" name="mode" value="cpu"' + (' checked' if True else '') + '> CPU-only simulation and PPO training</label>' +
+  '<label class="radio-item"><input type="radio" name="mode" value="cuda"' + (' checked' if False else '') + '> CPU-based simulation with PPO training on CUDA GPU</label>' +
+  '<label class="radio-item"><input type="radio" name="mode" value="mixed"' + (' checked' if False else '') + '> Mixed: varying parallel env counts and batch sizes</section>' +
+  '<section class="panel"><div class="panel-header"><div><h3>Measurement Settings</h3></div></div>' +
+  '<!-- configInput placeholders would go here -->' +
+  '<div class="action-buttons">' +
+  '<button class="button primary" data-action="start-benchmark" disabled>Start Benchmark</button>' +
+  '<button class="button secondary" data-action="auto-recommend" disabled>Auto Recommendation</button>' +
+  '</div></div>' +
+  '<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark Results</h2><p>Comparative analysis of measured configurations.</p></div>' + icon("chart") + '</div>' +
+  '<div class="benchmark-results" hidden>' + renderBenchmarkResults(run) + '</div>' +
+  '</section></section>' +
+  '<div class="two-col balanced" style="margin-top:20px">' +
+  '<section class="panel"><div class="panel-header"><div><h2>Stability & Reliability</h2><p>Detecting unstable configurations and resource limits.</p></div>' + icon("shield") + '</div>' +
+  '<div class="panel-body"><p class="subtle">Benchmarks detect memory exhaustion, resource saturation, and unstable configurations. Failed runs are recorded with error details for later review. No configuration change occurs without explicit user approval.</p></div></section>' +
+  '<section class="panel"><div class="panel-header"><div><h2>Throughput vs Learning Quality</h2><p>Raw throughput measurements are separated from learning quality.</p></div>' + icon("info") + '</div>' +
+  '<div class="panel-body"><p class="subtle">Higher steps per second does not imply better gameplay. A configuration that trains faster may not learn effectively. The auto-recommendation identifies the fastest stable configuration, not the one that learns best.</p></div></section>' +
+  '</div>';
+
+function renderBenchmarkResults(run) {
+  if (!run) {
+    return '<div class="chart-empty"><span>Start a benchmark to see results</span></div>';
+  }
+  return '<div class="benchmark-summary"><strong>No benchmark has been run yet.</strong><br>Start a benchmark configuration to measure performance.</div>';
+}
 const views = {
   dashboard,
   training,
@@ -482,6 +525,7 @@ const views = {
   models,
   configuration,
   visualization,
+  benchmark,
 };
 function render(force = false) {
   navigation();
