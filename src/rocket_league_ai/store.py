@@ -70,9 +70,23 @@ class Store:
                 result TEXT, trajectory TEXT, error TEXT, created REAL NOT NULL, updated REAL NOT NULL
             );
         """)
+        self._migrate()
         if self.setting("plan") is None:
             self.set_settings({"plan": TrainingConfig().model_dump(mode="json"), "plan_revision": 1})
         self.db.commit()
+
+    def _migrate(self) -> None:
+        """Additive, idempotent schema evolution for existing workspaces.
+
+        Only ever adds nullable columns; never rewrites or deletes user data.
+        """
+        additions = {"evaluations": {"progress": "REAL"}}
+        with self.lock, self.db:
+            for table, columns in additions.items():
+                existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+                for name, kind in columns.items():
+                    if name not in existing:
+                        self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     def close(self) -> None:
         with self.lock:
@@ -312,7 +326,7 @@ class Store:
             return [self.decode(row) for row in rows]
 
     def update_evaluation(self, evaluation_id: str, **fields) -> dict:
-        if not fields.keys() <= {"status", "result", "trajectory", "error"}:
+        if not fields.keys() <= {"status", "result", "trajectory", "error", "progress"}:
             raise ValueError("Only evaluation lifecycle fields may be updated")
         fields["updated"] = time.time()
         for key in ("result",):

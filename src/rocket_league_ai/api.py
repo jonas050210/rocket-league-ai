@@ -157,6 +157,10 @@ def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdow
         return {"evaluations": manager.store.evaluations(),
                 "comparison": compare_evaluations(manager.store.evaluations())}
 
+    @app.post("/api/evaluations/{evaluation_id}/stop", dependencies=[Depends(authorize)])
+    def stop_evaluation(evaluation_id: str):
+        return app.state.manager.stop_evaluation(evaluation_id)
+
     @app.get("/api/evaluations/{evaluation_id}/trajectory", dependencies=[Depends(authorize)])
     def trajectory(evaluation_id: str):
         return app.state.manager.trajectory(evaluation_id)

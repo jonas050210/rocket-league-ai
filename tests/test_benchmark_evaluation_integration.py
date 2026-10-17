@@ -78,3 +78,20 @@ def test_real_evaluation_of_trained_checkpoint_with_replay(manager):
     first = trajectory["frames"][0]
     assert abs(first["ball"][0]) < 1 and abs(first["ball"][1]) < 1  # kickoff centre
     assert len(first["cars"]) == 2
+
+
+def test_real_parallel_checkpoint_vs_checkpoint_evaluation(manager):
+    config = small_plan(manager)
+    run_id = manager._launch(config)["run_id"]
+    assert wait_for(lambda: manager.store.run(run_id)["status"] == "completed" and manager.active is None)
+    checkpoint = manager.checkpoints(run_id).latest_valid(config.digest())
+    spec = EvaluationSpec(run_id=run_id, checkpoint_id=checkpoint["id"],
+                          opponent_run_id=run_id, opponent_checkpoint_id=checkpoint["id"],
+                          games=4, seed=3, max_game_seconds=5, record_games=1, parallel_workers=2)
+    evaluation = manager.start_evaluation(spec)
+    assert wait_for(lambda: manager.store.evaluation(evaluation["id"])["status"] != "running")
+    record = manager.store.evaluation(evaluation["id"])
+    assert record["status"] == "completed", record
+    assert record["result"]["opponent_id"] == f"checkpoint:{checkpoint['id']}"
+    assert record["result"]["games"] == 4
+    assert record["progress"] in (None, 1.0)

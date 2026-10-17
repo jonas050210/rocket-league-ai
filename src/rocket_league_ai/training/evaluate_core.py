@@ -47,8 +47,14 @@ def extract_frame(state, game: int, decisions: int, score: tuple[int, int]) -> d
 
 
 def play_game(env, candidate_action, opponent_id: str, *, index: int, candidate_side: str,
-              seed: int, max_decisions: int, record: bool, frames: list | None = None) -> GameRecord:
-    """Play one genuine game. ``candidate_action(agent_id, obs) -> int`` is frozen inference."""
+              seed: int, max_decisions: int, record: bool, frames: list | None = None,
+              opponent_action_fn=None) -> GameRecord:
+    """Play one genuine game. ``candidate_action(agent_id, obs) -> int`` is frozen inference.
+
+    ``opponent_action_fn(agent_id, obs, rng) -> int`` overrides the scripted
+    opponent (used for frozen checkpoint opponents); both policies are
+    inference-only.
+    """
     rng = np.random.default_rng(seed)
     blue_agent, orange_agent = "blue-0", "orange-0"
     candidate_agent = blue_agent if candidate_side == "blue" else orange_agent
@@ -62,9 +68,11 @@ def play_game(env, candidate_action, opponent_id: str, *, index: int, candidate_
             frame = extract_frame(env.state, index, decisions, score)
             if frame is not None:
                 frames.append(frame)
+        opponent = (opponent_action_fn(opponent_agent, observations[opponent_agent], rng)
+                    if opponent_action_fn else opponent_action(opponent_id, rng))
         actions = {
             candidate_agent: np.array([candidate_action(candidate_agent, observations[candidate_agent])], dtype=np.int64),
-            opponent_agent: np.array([opponent_action(opponent_id, rng)], dtype=np.int64),
+            opponent_agent: np.array([opponent], dtype=np.int64),
         }
         observations, rewards, terminated, truncated = env.step(actions)
         decisions += 1

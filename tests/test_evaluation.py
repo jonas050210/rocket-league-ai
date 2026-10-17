@@ -137,3 +137,35 @@ def test_evaluation_api_persists_and_exposes_trajectory(client, manager, tmp_pat
     assert client.get(f"/api/evaluations/{evaluation_id}/trajectory").status_code in (404, 409)
     listing = client.get("/api/evaluations").json()
     assert listing["evaluations"][0]["id"] == evaluation_id and listing["comparison"] == []
+
+
+def test_checkpoint_opponent_requires_both_ids_and_is_labelled():
+    with pytest.raises(ValidationError):
+        EvaluationSpec(run_id="a" * 32, checkpoint_id="step-000000000512-abcdef012345",
+                       opponent_run_id="b" * 32)
+    checkpoint_spec = EvaluationSpec(
+        run_id="a" * 32, checkpoint_id="step-000000000512-abcdef012345",
+        opponent_run_id="b" * 32, opponent_checkpoint_id="step-000000000128-012345abcdef", games=2)
+    games = [game(0, "blue", "draw"), game(1, "orange", "draw")]
+    result = summarize(checkpoint_spec, games, candidate_id="c", candidate_config_hash="h" * 64,
+                       environment_version="kickoff-v1")
+    assert result["opponent_id"] == "checkpoint:step-000000000128-012345abcdef"
+    assert "Frozen checkpoint" in result["opponent_description"]
+
+
+def test_store_migration_adds_progress_to_existing_evaluations_table(tmp_path):
+    import sqlite3
+
+    from rocket_league_ai.store import Store
+
+    db_path = tmp_path / "control.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "CREATE TABLE evaluations (id TEXT PRIMARY KEY, spec TEXT NOT NULL, status TEXT NOT NULL,"
+        " result TEXT, trajectory TEXT, error TEXT, created REAL NOT NULL, updated REAL NOT NULL)")
+    connection.commit()
+    connection.close()
+    store = Store(tmp_path)  # opening an old workspace must migrate, never fail or delete
+    columns = {row[1] for row in store.db.execute("PRAGMA table_info(evaluations)")}
+    assert "progress" in columns
+    store.close()

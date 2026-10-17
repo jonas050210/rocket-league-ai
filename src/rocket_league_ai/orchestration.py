@@ -55,6 +55,7 @@ class Orchestrator:
             # both are forbidden while a training worker is active and vice versa.
             self.auxiliary: str | None = None
             self.benchmark_stop = threading.Event()
+            self.evaluation_stop = threading.Event()
             self.evaluation_process: subprocess.Popen | None = None
             self.token = self._load_token()
             self.system = SystemMonitor()
@@ -471,7 +472,10 @@ class Orchestrator:
                 raise AppError("Training extra is missing: " + ", ".join(missing) +
                                ". Run uv sync --frozen --extra training before evaluating.")
             run, checkpoint, _ = self._target({"run_id": spec.run_id, "checkpoint_id": spec.checkpoint_id})
+            if spec.opponent_checkpoint_id:
+                self._target({"run_id": spec.opponent_run_id, "checkpoint_id": spec.opponent_checkpoint_id})
             evaluation = self.store.create_evaluation(spec.model_dump(mode="json"))
+            self.evaluation_stop.clear()
             self.auxiliary = "evaluation"
             self.store.event("info", "evaluation_started",
                              f"Evaluating {checkpoint['id']} against {spec.opponent_id} over {spec.games} "
@@ -491,11 +495,30 @@ class Orchestrator:
             process = subprocess.Popen(
                 [sys.executable, "-u", "-m", "rocket_league_ai.training.evaluate",
                  "--request", str(directory / "request.json"), "--output", str(directory)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
                 env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
             )
             self.evaluation_process = process
-            output, _ = process.communicate(timeout=spec.games * spec.max_game_seconds + 600)
+            deadline = time.monotonic() + spec.games * spec.max_game_seconds / max(spec.parallel_workers, 1) + 900
+            while process.poll() is None and time.monotonic() < deadline and not self.evaluation_stop.is_set():
+                progress_file = directory / "progress.json"
+                if progress_file.is_file():
+                    try:
+                        progress = json.loads(progress_file.read_text())
+                        self.store.update_evaluation(evaluation_id, progress=progress["completed"] / max(progress["games"], 1))
+                    except (ValueError, KeyError, OSError):
+                        pass
+                time.sleep(0.5)
+            if self.evaluation_stop.is_set():
+                self._kill_evaluation_group(process)
+                self.store.update_evaluation(evaluation_id, status="stopped",
+                                             error="Evaluation stopped by user. No partial result is reported.")
+                self.store.event("warning", "evaluation_stopped", "Evaluation stopped by user; no partial result reported.", spec.run_id)
+                return
+            if process.poll() is None:
+                self._kill_evaluation_group(process)
+                raise AppError("Evaluation exceeded its time budget and was stopped. No partial result is reported.")
+            output = process.stdout.read() if process.stdout else ""
             if process.returncode != 0:
                 raise AppError(f"Evaluation process failed: {output.strip().splitlines()[-1] if output.strip() else 'no output'}")
             payload = json.loads((directory / "result.json").read_text())
@@ -529,6 +552,25 @@ class Orchestrator:
             with self.lock:
                 if self.auxiliary == "evaluation":
                     self.auxiliary = None
+
+    @staticmethod
+    def _kill_evaluation_group(process):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def stop_evaluation(self, evaluation_id: str) -> dict:
+        with self.lock:
+            evaluation = self.store.evaluation(evaluation_id)
+            if self.auxiliary != "evaluation" or evaluation["status"] != "running":
+                raise AppError("This evaluation is not running.")
+            self.evaluation_stop.set()
+            return {"status": "stopping"}
 
     def trajectory(self, evaluation_id: str) -> dict:
         evaluation = self.store.evaluation(evaluation_id)

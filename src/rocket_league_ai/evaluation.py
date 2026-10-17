@@ -25,16 +25,27 @@ class EvaluationSpec(BaseModel):
     run_id: str
     checkpoint_id: str
     opponent_id: Literal["random-v1", "idle-v1"] = "random-v1"
+    opponent_run_id: str | None = None
+    opponent_checkpoint_id: str | None = None
     games: int = Field(default=20, ge=2, le=400)
     seed: int = Field(default=1000, ge=0, le=2**31 - 1)
     max_game_seconds: float = Field(default=60.0, ge=5, le=300)
     record_games: int = Field(default=3, ge=0, le=10)
+    parallel_workers: int = Field(default=1, ge=1, le=8)
 
     @model_validator(mode="after")
     def check_spec(self) -> Self:
         if self.games % 2:
             raise ValueError("games must be even so the candidate plays both sides equally")
+        if (self.opponent_run_id is None) != (self.opponent_checkpoint_id is None):
+            raise ValueError("a checkpoint opponent needs both opponent_run_id and opponent_checkpoint_id")
         return self
+
+
+def effective_opponent_id(spec: EvaluationSpec) -> str:
+    if spec.opponent_checkpoint_id:
+        return f"checkpoint:{spec.opponent_checkpoint_id}"
+    return spec.opponent_id
 
 
 class GameRecord(BaseModel):
@@ -75,10 +86,13 @@ def summarize(spec: EvaluationSpec, games: list[GameRecord], *, candidate_id: st
     losses = sum(1 for game in games if game.result == "loss")
     draws = spec.games - wins - losses
     lower, upper = wilson_interval(wins, spec.games)
+    opponent = effective_opponent_id(spec)
     return {
         "candidate_run_id": spec.run_id, "candidate_checkpoint_id": spec.checkpoint_id,
         "candidate_id": candidate_id, "candidate_config_hash": candidate_config_hash,
-        "opponent_id": spec.opponent_id, "opponent_description": OPPONENTS[spec.opponent_id],
+        "opponent_id": opponent,
+        "opponent_description": OPPONENTS.get(spec.opponent_id) if not spec.opponent_checkpoint_id
+        else "Frozen checkpoint actor (greedy inference, weights never updated during evaluation).",
         "games": spec.games, "seed": spec.seed, "inference": "greedy",
         "environment_version": environment_version,
         "wins": wins, "losses": losses, "draws": draws,
