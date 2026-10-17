@@ -38,8 +38,11 @@ def small_plan(manager, **overrides):
 
 def test_real_benchmark_measures_a_genuine_cpu_run(manager):
     small_plan(manager)
+    # Five seconds is the minimum window, used here to keep CI bounded. The
+    # point of the assertion is that the genuine run is stopped by wall clock.
     spec = BenchmarkSpec(devices=["cpu"], n_proc_values=[1], batch_size=128,
-                         warmup_iterations=1, measure_iterations=2, repeats=1, timeout_seconds=900)
+                         warmup_iterations=1, measure_iterations=500, min_iterations=2,
+                         measurement_seconds=5, repeats=1, timeout_seconds=900)
     session = manager.start_benchmark(spec)
     assert wait_for(lambda: manager.store.benchmark(session["id"])["status"] != "running")
     session = manager.store.benchmark(session["id"])
@@ -50,7 +53,14 @@ def test_real_benchmark_measures_a_genuine_cpu_run(manager):
     assert aggregate["agent_steps_per_second"]["median"] > 0
     assert aggregate["simulation_steps_per_second"]["median"] > 0
     assert aggregate["ppo_steps_per_second"]["median"] > 0
-    assert aggregate["iterations_measured"] == 2
+    resources = results[0]["resources"]
+    assert resources["stop_reason"] == "time", resources
+    assert resources["measurement_seconds"] >= 4.5, resources
+    assert resources["startup_seconds"] >= 0
+    # Iteration count is a consequence of the window, not a fixed number; the
+    # stop request is acknowledged at an update boundary, so a little
+    # overshoot is expected and honest.
+    assert 2 <= aggregate["iterations_measured"] <= spec.effective_measure_iterations + 20
     assert session["recommendation"]["candidate"] == {"device": "cpu", "n_proc": 1}
     # The measurement was a real run in the experiment history.
     assert manager.store.run(results[0]["run_id"])["status"] == "completed"

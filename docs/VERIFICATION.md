@@ -277,7 +277,23 @@ JSON editor, and the next one-second poll rebuilt the panel and closed it
 again. Opening the disclosure now enters the same edit-guard as typing, so the
 documented "edit the complete JSON" workflow is actually usable.
 
-The 20-second benchmark was **not executed** because this sandbox has no
-RocketSim/Torch/GPU; the 409 above is the honest boundary, not a pass. Native
-Qt, WSLg, the target-host sweep and the 400-game baseline remain unexecuted. No
+### CI (Ubuntu 24.04, Python 3.12, all extras)
+
+The pull request runs the full suite (143 tests, 0 skips) plus native Qt under
+Xvfb and 6 Chromium lifecycle tests. The first run failed exactly one test,
+which is recorded here because it was a real design bug and not a flake:
+
+- `test_real_benchmark_measures_a_genuine_cpu_run` asserted
+  `iterations_measured == 2` for a 2-iteration ceiling. The run budget now
+  outlasts the time window, so the worker kept measuring until the stop
+  request was acknowledged: 8 updates. The ceiling is a *best-effort* stop
+  acknowledged at an update boundary, so the old exact count was wrong. The
+  test now sets a 5 s window, asserts `stop_reason == "time"`, a measured
+  window ≥ 4.5 s and a bounded iteration count. The controller poll was also
+  reduced from 0.25 s to 0.1 s to bound that overshoot.
+
+The 20-second benchmark was **not executed** in this sandbox because it has no
+RocketSim/Torch/GPU; the 409 above is the honest boundary, not a pass. CI
+executes the real CPU worker and the 5 s window above. Native Qt, WSLg, the
+target-host sweep and the 400-game baseline remain unexecuted here. No
 throughput, skill or hardware claim is made from this sandbox.

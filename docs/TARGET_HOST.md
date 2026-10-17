@@ -56,6 +56,9 @@ In Benchmark, for the first target-host session:
 - This runs 8 candidates × 3 repeats of genuine training runs, each stopped
   after 20 s of measured updates (plus startup), with a hard timeout. Expect
   roughly 8–15 minutes on this host; it is a benchmark session, not training.
+- The iteration ceiling is a best-effort stop: the worker acknowledges it at
+  the next update boundary, so a hair more than 20 s (typically well under a
+  second) can be measured. Compare published numbers with that in mind.
 - Afterwards compare batch 1024 and 2048 in separate sessions. Leave the
   iteration ceiling at 1,900: it is clamped automatically (975 at batch 1,024,
   487 at 2,048) so the per-run step cap still holds. The 20 s window remains

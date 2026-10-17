@@ -618,7 +618,10 @@ class Orchestrator:
                     except AppError:
                         pass
                     stop_requested = True
-            time.sleep(0.25)
+            # A 0.25 s poll let a fast CPU finish several extra updates before
+            # the stop request; 0.1 s bounds the overshoot to well under one
+            # second without measurably loading the host.
+            time.sleep(0.1)
         else:
             stop_reason = "timeout"
 
