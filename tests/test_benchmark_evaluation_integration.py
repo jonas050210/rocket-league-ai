@@ -62,8 +62,13 @@ def test_real_benchmark_measures_a_genuine_cpu_run(manager):
     # overshoot is expected and honest.
     assert 2 <= aggregate["iterations_measured"] <= spec.effective_measure_iterations + 20
     assert session["recommendation"]["candidate"] == {"device": "cpu", "n_proc": 1}
-    # The measurement was a real run in the experiment history.
-    assert manager.store.run(results[0]["run_id"])["status"] == "completed"
+    # The measurement was a real training run that really ran: it stopped at
+    # the update boundary we asked for, and its durable record is marked as a
+    # disposable benchmark (hidden from history, directory cleaned up).
+    run = manager.store.run(results[0]["run_id"])
+    assert run["status"] in {"completed", "stopped"}, run["status"]
+    assert run["metrics"]["steps"] > 0
+    assert run["metadata"]["purpose"] == "benchmark"
 
 
 def test_real_evaluation_of_trained_checkpoint_with_replay(manager):
