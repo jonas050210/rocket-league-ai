@@ -1,3 +1,15 @@
+> ## Phase 2 correction notice — 2026-10-17
+>
+> **Historical research, not current setup or verification.** Read **[PROJECT.md](PROJECT.md)** first. The original text/evidence below is retained; its tags do not override later released-source and executable evidence in [docs/AUDIT.md](docs/AUDIT.md), [docs/UPSTREAM.md](docs/UPSTREAM.md) and [docs/VERIFICATION.md](docs/VERIFICATION.md).
+>
+> - **Withdrawn:** §4.4.1/§4.4.2 cumulative-touch interpretation, its reward-farming table, delta-based `TouchEventReward`/idle fix, and derived claims elsewhere. Released `ball_touches` resets after every emitted state. Adjacent contact transitions can both equal one. Shipped `TouchReward`/`NoTouchTimeoutCondition` are used and tested; subtracting adjacent counts is wrong.
+> - **Superseded:** §13's version/NumPy matrix. Published `rlgym-rocket-league==2.0.1` requires **NumPy <2**, despite its incomplete PyPI JSON and different HEAD metadata. Current profile uses **NumPy 1.26.4 / Torch 2.9.1 / RocketSim 2.2.1**, not the historical NumPy 2.5.4 / Torch 2.14.1 recommendations. Current rlviser-py is incompatible and **not installed**. RocketSim imports as `RocketSim`, not lowercase `rocketsim`.
+> - **Release API:** 2.0.1's `RocketSimEngine` has no `game_mode` argument. The installed release, not newer HEAD snippets, is the contract.
+> - **Withdrawn exact-resume implication:** current managed recovery restores actual learner/optimizers/buffer/GAE/RNG/counters at a completed update, **resets simulator episodes**, and requires a fresh confirmed linked run. It is not bit-exact match continuation.
+> - **Qualified shaping claim (§6/§9):** discounted policy-invariant potential shaping uses **`gamma * Phi(s_next) - Phi(s)`**, subject to the theorem's conditions. A plain difference is not generally policy-invariant when gamma <1. No new shaping/curriculum is implemented in this foundation.
+> - **Not measurements:** throughput/core-count/50× CPU-penalty/resource allocation estimates and historical B1–B7 gates remain unpassed on the target RTX/WSL machine. A CPU/browser smoke establishes correctness, not strength, rank or target throughput.
+> - The old companion architecture/roadmap are preserved under [docs/history/](docs/history/); their current root counterparts describe this implemented foundation. The research branch/date/boundary below refer to **Phase 1**, not the current implementation.
+
 # Rocket League AI — Phase 1 Technical Research
 
 **Repository:** `rocket-league-ai` · **Branch:** `arena/edfccc11-rocket-league-ai`
@@ -252,6 +264,8 @@ The table is built in two blocks **[V]**: 36 ground combinations (throttle × st
 
 #### ⚠ 4.4.1 `NoTouchTimeoutCondition` does not do what its name says — verified from source
 
+> **WITHDRAWN IN PHASE 2:** the following interpretation treats per-transition counts as cumulative and is incorrect. Kept as historical text only. See the correction notice and [released-engine evidence](docs/UPSTREAM.md#7-the-touch-counter-claim-was-wrong-not-an-upstream-defect).
+
 `rlgym/rocket_league/done_conditions/no_touch_condition.py` **[V]**:
 
 ```python
@@ -271,6 +285,8 @@ def is_done(self, agents, state, shared_info):
 **[V]** `rlgym.rocket_league.reward_functions` ships exactly three: `GoalReward`, `TouchReward`, `CombinedReward`. Everything else is user-written.
 
 #### ⚠ 4.4.2 `TouchReward` is a dense cumulative signal, not a one-shot — verified from source
+
+> **WITHDRAWN IN PHASE 2:** the following interpretation treats per-transition counts as cumulative and is incorrect. Kept as historical text only. See the correction notice and [released-engine evidence](docs/UPSTREAM.md#7-the-touch-counter-claim-was-wrong-not-an-upstream-defect).
 
 `rlgym/rocket_league/reward_functions/touch_reward.py` **[V]**:
 
@@ -1114,6 +1130,8 @@ This section exists so that expectations are set by arithmetic rather than optim
 ---
 
 ## 13. Compatibility matrix — verified
+
+> **SUPERSEDED IN PHASE 2:** this historical matrix is not a valid installation plan. In particular the released Rocket League package requires NumPy <2. Use the [current locked profile](PROJECT.md#5-verified-dependency-profile) and [setup](docs/SETUP.md).
 
 | | Constraint | Value |
 |---|---|---|
