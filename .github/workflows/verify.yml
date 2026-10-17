@@ -55,20 +55,8 @@ jobs:
         run: |
           mkdir -p .rlai
           status=0
-          uv run --no-sync pytest -q -m 'not desktop' --junitxml=.rlai/python-junit.xml || status=$?
+          uv run --no-sync pytest -q --junitxml=.rlai/python-junit.xml || status=$?
           uv run --no-sync python scripts/report_junit.py .rlai/python-junit.xml 'Unit and real PPO tests'
-          exit "$status"
-      - name: Actual native Qt window, detached backend and real worker independence
-        env:
-          RLAI_NATIVE_TEST: "1"
-          QT_OPENGL: software
-          QTWEBENGINE_DISABLE_SANDBOX: "1"
-          QTWEBENGINE_CHROMIUM_FLAGS: --disable-gpu --disable-dev-shm-usage
-        run: |
-          status=0
-          xvfb-run -a -s '-screen 0 1440x1000x24' uv run --no-sync pytest -q -m desktop \
-            --basetemp=native-test-results --junitxml=.rlai/native-junit.xml || status=$?
-          uv run --no-sync python scripts/report_junit.py .rlai/native-junit.xml 'Native Qt desktop tests'
           exit "$status"
       - name: Actual browser lifecycle with isolated real CPU workers
         if: ${{ !cancelled() && (success() || failure()) }}

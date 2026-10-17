@@ -1,4 +1,4 @@
-"""Internal subprocess entry point. Only an explicitly confirmed run launches this module."""
+"""Internal subprocess entry point. Only an explicitly confirmed or direct run launches this module."""
 
 import argparse
 import json
@@ -45,11 +45,14 @@ def main() -> int:
                         "Check the Windows NVIDIA driver and WSL 2 GPU passthrough with rocket-ai doctor --probe. "
                         "No CPU fallback occurred. For a bounded correctness test, explicitly approve a CPU configuration."
                     )
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                torch.backends.cudnn.benchmark = True
                 torch.ones((8, 8), device=config.device).matmul(torch.ones((8, 8), device=config.device))
                 torch.cuda.synchronize()
                 if config.pin_memory:
                     torch.empty(1, pin_memory=True)
-                channel.emit("log", level="info", message=f"CUDA device: {torch.cuda.get_device_name(0)}; runtime {torch.version.cuda}")
+                channel.emit("log", level="info", message=f"CUDA device: {torch.cuda.get_device_name(0)} (TF32+cuDNN enabled); runtime {torch.version.cuda}")
             else:
                 channel.emit("log", level="warning", message="Explicit CPU correctness run; not a CUDA/target-machine benchmark")
             from .adapter import ControlledCoordinator
@@ -60,9 +63,12 @@ def main() -> int:
                 parent = json.loads(resume.read_text())
                 parent_dir = run_dir.parents[1] / "runs" / checked_id(parent["run_id"])
                 checkpoint_store = CheckpointStore(parent_dir)
-                checkpoint_store.require_valid(parent["checkpoint_id"], config.digest())
-                parent_metadata = json.loads((parent_dir / "metadata.json").read_text())
-                require_recovery_compatible(parent_metadata)
+                allow_evolution = bool(parent.get("allow_config_evolution"))
+                expected_hash = None if allow_evolution else config.digest()
+                checkpoint_store.require_valid(parent["checkpoint_id"], expected_hash)
+                if not allow_evolution:
+                    parent_metadata = json.loads((parent_dir / "metadata.json").read_text())
+                    require_recovery_compatible(parent_metadata)
                 checkpoint = checkpoint_store.path(parent["checkpoint_id"])
             # Retain a partially constructed instance so cleanup can see an initialized env interface.
             coordinator = ControlledCoordinator.__new__(ControlledCoordinator)

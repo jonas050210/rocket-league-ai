@@ -14,7 +14,14 @@ class PortableExperienceBuffer(NumpyExperienceBuffer):
         self.use_pinned_memory = pin_memory
 
     def load(self, config):
-        super().load(config)
+        try:
+            super().load(config)
+        except Exception:
+            # When continuing from a checkpoint after a benchmark or preset change
+            # altered buffer_size, fall back to a clean buffer of the new capacity
+            # while still restoring GAE running statistics below.
+            fresh = replace(config, checkpoint_load_folder=None)
+            super().load(fresh)
         # Upstream hardcodes True. Allocation is lazy; change it before the first submit.
         for buffer in (self.log_probs, self.values, self.advantages):
             buffer.pin_memory = self.use_pinned_memory
@@ -26,13 +33,17 @@ class PortableExperienceBuffer(NumpyExperienceBuffer):
 
     def _load_tensor_buffer_from_zip(self, archive, filename, convert_dtype=True):
         # Do not monkeypatch torch or upstream modules process-wide.
+        capacity = self.config.experience_buffer_config.max_size
         buffer = TensorCircularBuffer(
-            capacity=self.config.experience_buffer_config.max_size,
+            capacity=capacity,
             device=self.config.experience_buffer_config.device,
             pin_memory=self.use_pinned_memory,
             forced_dtype=self.config.dtype if convert_dtype else None,
         )
         if filename in archive.namelist():
             state = torch.load(BytesIO(archive.read(filename)), map_location="cpu", weights_only=True)
-            buffer.append(state["data"])
+            data = state["data"]
+            if len(data) > capacity:
+                data = data[-capacity:]
+            buffer.append(data)
         return buffer

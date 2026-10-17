@@ -60,25 +60,20 @@ def test_league_routes_are_reachable(tmp_path):
         assert matches(path, routes), path
 
 
-def test_desktop_smoke_matches_the_client_navigation_contract():
-    """The Qt smoke hard-codes the nav count and per-view headings.
-
-    CI's native step is the only place that executes it, so a stale constant
-    (7 vs 6 after Configuration moved into Training) failed there and nowhere
-    else. Pin the Python predicate to the client's own `names` map.
-    """
+def test_client_navigation_contract_includes_roadmap_and_no_desktop():
+    """Verify the web client navigation contract includes Roadmap and desktop.py is removed."""
     root = Path(__file__).parents[1]
-    desktop = (root / "src/rocket_league_ai/desktop.py").read_text()
+    assert not (root / "src/rocket_league_ai/desktop.py").exists()
     app = (root / "src/rocket_league_ai/web/app.js").read_text()
 
     names_block = re.search(r"const names = \{(.*?)\n\};", app, re.S).group(1)
     nav = re.findall(r"^\s{2}(\w+):", names_block, re.M)
-    assert nav == ["dashboard", "training", "monitoring", "models", "visualization", "benchmark"]
+    assert nav == ["dashboard", "roadmap", "training", "monitoring", "models", "visualization", "benchmark"]
+    assert 'button("start-benchmark"' in app
+    assert 'button("stop-benchmark"' in app
+    assert "data-benchmark-list" not in app
+    assert 'id="train-max-steps"' in app
+    assert 'id="train-duration-minutes"' in app
+    assert '"start-milestone"' in app
+    assert 'button("export-rlbot"' in app
 
-    expected = int(re.search(r"\[data-nav\]'\)\.length === (\d+)", desktop).group(1))
-    assert expected == len(nav)
-
-    routes = re.findall(r'\("(\w+)", "([^"]+)"\)', desktop)
-    assert [route for route, _ in routes] == [*nav, "dashboard"]
-    for _, heading in routes:
-        assert f'"{heading}"' in app, f"desktop smoke expects heading {heading!r}, not present in app.js"

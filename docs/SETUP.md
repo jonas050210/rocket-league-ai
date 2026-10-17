@@ -55,11 +55,11 @@ This installs service, training, desktop and developer checks. For reproducible 
 Narrower installations:
 
 ```bash
-# Headless service + real training, no desktop:
+# Headless service + real training:
 uv sync --frozen --extra training --python 3.12
 # Runtime-only full app, excluding developer tools:
-uv sync --frozen --extra training --extra desktop --no-dev --python 3.12
-# Service/UI inventory only, no real learner or native shell:
+uv sync --frozen --extra training --no-dev --python 3.12
+# Service/UI inventory only, no real learner:
 uv sync --frozen --no-dev --python 3.12
 ```
 
@@ -75,39 +75,15 @@ A service-only installation refuses a training proposal with missing-package ins
 - RocketSim 2.2.1's internal WHEEL tags are malformed for its ABI3 filename. `uv pip check` reports a CPython-3.9 tag warning even though the installed module and real environment run on 3.11. Standard `python -m pip check` passes. Do not patch/hide the metadata defect; see [UPSTREAM.md](UPSTREAM.md).
 - If pip is not installed in uv's venv, a non-mutating check can use `uv run --no-sync --with pip python -m pip check` (the temporary `pip` tool is outside the application lock). This command was used for dependency verification; pip is not a runtime dependency.
 
-## 4. Start the native application
-
-```bash
-uv run --no-sync rocket-ai desktop
-```
-
-The launcher imports native Qt first, then starts/connects to a detached loopback backend on port 8765. It opens an off-record native window and passes the workspace capability in a fragment that is removed by the client. **No training starts.** Close/reopen the window without shutting down an active run.
-
-Custom workspace/port:
-
-```bash
-uv run --no-sync rocket-ai desktop --data-dir .rlai/my-workspace \
-  --backend-url http://127.0.0.1:8870
-```
-
-Automatic backend startup is local HTTP/loopback only. A running backend belonging to another workspace is rejected, not silently reused. Explicit service mode:
+## 4. Start the Web Control Room
 
 ```bash
 uv run --no-sync rocket-ai backend --data-dir .rlai/my-workspace --port 8870
-uv run --no-sync rocket-ai desktop --data-dir .rlai/my-workspace \
-  --backend-url http://127.0.0.1:8870
-```
-
-Closing the desktop does not stop this service. Use Ctrl+C in its terminal or SIGTERM to the **backend process** for cooperative worker shutdown. Wait for shutdown acknowledgement; a second forced signal can bypass graceful cleanup. Uvicorn 0.42 re-raises the original termination signal after lifespan cleanup, so a SIGTERM process return of 143 / Python `-15` can accompany a fully successful graceful shutdown. Inspect durable run status and shutdown logs rather than treating exit zero as the only success signal.
-
-### Browser diagnostics / hosted preview
-
-```bash
 uv run --no-sync rocket-ai browser-url --data-dir .rlai/my-workspace \
   --backend-url http://127.0.0.1:8870
 ```
 
-Open the printed capability URL **privately and locally**. Never paste it into issues/chat or share it. Browser code uses relative URLs, not another machine's localhost. When using a hosted proxy, the browser-facing origin must be the proxied origin; do not copy a sandbox loopback address into the user's browser.
+Open the printed capability URL in your browser. Closing the browser tab does not stop the backend service. Use Ctrl+C in its terminal or SIGTERM to the **backend process** for cooperative worker shutdown. Wait for shutdown acknowledgement; a second forced signal can bypass graceful cleanup. Uvicorn 0.42 re-raises the original termination signal after lifespan cleanup, so a SIGTERM process return of 143 / Python `-15` can accompany a fully successful graceful shutdown. Inspect durable run status and shutdown logs rather than treating exit zero as the only success signal.
 
 For an empty, deliberately public diagnostic workspace only:
 

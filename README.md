@@ -11,33 +11,21 @@ Use Ubuntu 24.04, Python 3.12 and uv 0.13.1. Install the native Qt/WSLg prerequi
 ```bash
 uv sync --frozen --all-extras --python 3.12
 uv run --no-sync rocket-ai doctor --probe
-uv run --no-sync rocket-ai desktop
-```
-
-The desktop starts or connects to a **detached local backend**, not to a learner owned by the window. Close/reopen the GUI without stopping an active run. Configure, validate, review and explicitly confirm a run in the UI. CUDA is explicit and never silently replaced with CPU.
-
-For a CPU-only correctness smoke, explicitly approve CPU, 512 total steps, collection/batch 128, buffer 384, hidden widths `[32,32]`, and one-second episode/no-touch limits in the Training plan panel. A CPU smoke is not an RTX benchmark or strength claim.
-
-### Service-only / local diagnostics
-
-```bash
 uv run --no-sync rocket-ai backend
-uv run --no-sync rocket-ai browser-url  # private capability URL; do not share
+uv run --no-sync rocket-ai browser-url  # private capability URL; open in your browser
 ```
 
-The first Benchmark session defaults to CPU + CUDA and `n_proc` 1/2/4/8, with a 20-second measurement window and 3 repeats. On the target i7-12700F / RTX 4060 Ti host this is the fastest way to replace the 10%-CPU default with a measured `n_proc`; only device and `n_proc` are auto-adopted.
+The Web Control Room connects to the **detached local backend**. Close/reopen the browser tab without stopping an active run. Start the 1-click Auto-Benchmark (`POST /api/benchmarks/auto`) to test 30 ascending hardware stages (20s per stage, up to 32 parallel environments and 16,384 batch steps) and automatically adopt the fastest stable configuration.
 
-Training data/checkpoints live in `.rlai/` by default; change it with `--data-dir` or `RLAI_DATA_DIR`. Keep it on the Linux filesystem. Default service binding is loopback. Never share the access key, unredacted traces or a private workspace publicly.
-
-## Six views
+## Seven views in the Web Control Room
 
 - **Dashboard:** real run/episode/reward/speed signals, host resources and readiness.
-- **Training:** approved-plan editor, confirmed start, acknowledged pause/resume/stop, progress and experiment history.
+- **Roadmap:** 5 progressive AI milestones (`1M`, `10M`, `50M`, `150M`, `500M` steps) with live progress bars, estimated time remaining based on your measured average `steps/s`, and 1-click **Start Training** buttons that always continue from the newest valid checkpoint.
+- **Training:** simplified setup with 5 curated **Presets**, **Max Steps**, and live **Estimated Duration (ca. Zeit)**. Clicking **Start Training** starts immediately without confirmation modals and automatically resumes from the newest valid checkpoint.
 - **Monitoring:** durable live logs, warnings/errors, worker heartbeat and backend health.
-- **Models:** verified checkpoint inventory/metadata, confirmed recovery, manual designation and protected deletion.
+- **Models:** verified checkpoint inventory/metadata, 1-click **RLBot Export** (`bot.cfg` + `agent.py`), frozen-checkpoint evaluation, Elo ratings, and league matches.
 - **Visualization:** recorded-replay viewer rendering genuine evaluation trajectories (top-down schematic, play/pause/scrub/follow-ball); **not** a live 3D renderer.
-- **Benchmark:** device × parallel-environment sweeps of real training runs, each measured for a 20-second wall-clock window with warm-up exclusion, stability checks, CPU/GPU/VRAM peaks and an explainable recommendation. When strict gates pass, device and `n_proc` are adopted as the default (strategy fields untouched, previous plan recorded for revert).
-- **Evaluation (in Models):** frozen checkpoints vs seeded random/idle baselines, side-balanced games, Wilson intervals, checkpoint comparison, replay recording.
+- **Benchmark:** simplified 1-click **Start benchmark** / **Cancel benchmark** running a 30-stage × 20-second (~10 min) ascending hardware sweep (`n_proc` 1 → 32, `batch_size` 512 → 16,384, `episode_timeout_seconds` 15s → 90s) and automatically adopting the winning configuration for training.
 
 Checkpoints restore real learner/optimizer/buffer/GAE/RNG state at completed updates; simulator episodes reset. Recovery creates a new linked run and always requires confirmation. There is no automatic pruning or best-model promotion.
 

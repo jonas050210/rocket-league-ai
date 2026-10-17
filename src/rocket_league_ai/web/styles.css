@@ -2018,3 +2018,108 @@ footer {
   outline-offset: 2px;
 }
 .field-art { color: var(--line); opacity: 0.5; }
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: #1a1a1a;
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.preset-card:hover:not(:disabled) {
+  border-color: #555555;
+  background: #222222;
+}
+.preset-card.selected {
+  border-color: #ffffff;
+  background: #262626;
+}
+.preset-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.preset-top {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.preset-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.milestone-card.milestone-done {
+  border-color: #3e6b48;
+}
+.skill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #1d1d1d;
+  color: var(--ink);
+  font-size: 12px;
+}
+.skill-chip .icon {
+  width: 13px;
+  height: 13px;
+  color: var(--green);
+}
+.hotkey-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hotkey-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #1a1a1a;
+  color: var(--ink);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.hotkey-pill:hover {
+  border-color: #666;
+  background: #252525;
+}
+.hotkey-pill kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #2d2d2d;
+  border: 1px solid #444;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+}
+
+

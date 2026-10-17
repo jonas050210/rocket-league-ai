@@ -1,8 +1,8 @@
 # Rocket League AI — project reference
 
-**Authoritative current state · Phase 2 foundation · 2026-10-17 · application 0.2.0**
+**Authoritative current state · v0.3.0 · 2026-10-17 · Web Control Room + High-Scale Benchmark + Roadmap + Pro v3 Shaping + RLBot Export**
 
-This project is a local-first **desktop control room for real, headless RocketSim reinforcement learning**. It is a foundation, not a competitive bot. Read this file before changing the training architecture or strategy. The dependency lock and executable tests take precedence over historical research examples.
+This project is a local-first **web control room for real, headless RocketSim reinforcement learning** (`src/rocket_league_ai/`, `tests/`). The legacy PySide6 desktop wrapper (`desktop.py`) has been removed; all controls live in the 7-tab Web Control Room (`Dashboard`, `Roadmap`, `Training`, `Monitoring`, `Models`, `Visualization`, `Benchmark`).
 
 ## 1. Goal, platform and boundaries
 

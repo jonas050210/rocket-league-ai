@@ -15,7 +15,14 @@ from pathlib import Path
 
 from .benchmark import BenchmarkSpec, aggregate_iterations, combine_repeats, recommend
 from .checkpoints import CheckpointStore, file_hash, retention_candidates
-from .config import TrainingConfig, changes, digest
+from .config import (
+    ROADMAP_MILESTONES,
+    TRAINING_PRESETS,
+    TrainingConfig,
+    align_timesteps,
+    changes,
+    digest,
+)
 from .domain import ACTIVE, TERMINAL, AppError, EvaluationResult, RunStatus, control_target
 from .evaluation import (
     EvaluationSpec,
@@ -26,6 +33,7 @@ from .evaluation import (
     experiment_journal,
 )
 from .evaluation import summarize as summarize_evaluation
+from .live_match import LiveMatchController
 from .metadata import experiment_metadata, package_versions, require_recovery_compatible
 from .monitoring import SystemMonitor, next_experiment, recommendations
 from .persistence import Lease, atomic_json, lease_available
@@ -69,6 +77,7 @@ class Orchestrator:
             self._workspace_bytes_cache: tuple[float, int] = (0.0, 0)
             self.token = self._load_token()
             self.system = SystemMonitor()
+            self.live_match = LiveMatchController(self)
             self.watchdog = threading.Thread(target=self._watch, daemon=True, name="worker-supervisor")
             self.store.event("info", "backend_started", "Backend ready. Training starts only after explicit user confirmation.")
 
@@ -124,9 +133,22 @@ class Orchestrator:
             active = self.store.run(self.active.run_id) if self.active else None
             if active and (active.get("metadata") or {}).get("purpose") == "benchmark":
                 active = None
+            avg_sps, avg_measured = self.average_steps_per_second(runs)
+            latest_ckpt = self.latest_checkpoint_ref(runs, models)
+            highest_step = max(
+                [latest_ckpt["step"] if latest_ckpt else 0]
+                + [int((r.get("metrics") or {}).get("steps") or 0) for r in runs],
+                default=0,
+            )
             return {
                 "runs": runs, "active_run": active, "checkpoints": models,
-                "latest_valid": latest, "designated_best": self.store.setting("designated_best"),
+                "latest_valid": latest, "latest_checkpoint": latest_ckpt,
+                "highest_step": highest_step,
+                "average_steps_per_second": avg_sps,
+                "average_steps_measured": avg_measured,
+                "presets": list(TRAINING_PRESETS.values()),
+                "roadmap": self.roadmap_status(highest_step, avg_sps, avg_measured),
+                "designated_best": self.store.setting("designated_best"),
                 "plan": self.store.setting("plan"), "plan_revision": self.store.setting("plan_revision"),
                 "system": system, "recommendations": recommendations(
                     runs, system,
@@ -154,11 +176,341 @@ class Orchestrator:
                 "experiment_journal": experiment_journal(runs, self.store.evaluations(light=True)),
                 "next_experiment": next_experiment(runs, self.store.evaluations(light=True),
                                                    self._benchmark_snapshot(), self.store.setting("plan")),
+                "live_match": self.live_match.snapshot(),
                 "worker_health": {
                     "connected": self.active is not None,
                     "heartbeat_age_seconds": time.monotonic() - self.active.heartbeat if self.active else None,
                     "progress_age_seconds": self.active.progress_age if self.active else None,
                     "orphan_lease_held": self.active is None and not lease_available(self.root / "active-worker.lock"),
+                },
+            }
+
+    def latest_checkpoint_ref(self, runs: list[dict] | None = None, models: list[dict] | None = None) -> dict | None:
+        """Find the newest valid checkpoint across all non-benchmark runs."""
+        if runs is None:
+            all_runs = self.store.runs()
+            runs = [run for run in all_runs if (run.get("metadata") or {}).get("purpose") != "benchmark"]
+        if models is None:
+            models = [{**checkpoint, "run_id": run["id"], "run_name": run["name"]}
+                      for run in runs for checkpoint in self.checkpoints(run["id"]).inventory()]
+        valid = [item for item in models if item.get("integrity") == "valid"]
+        if not valid:
+            return None
+        best = max(valid, key=lambda item: (item.get("step", 0), item.get("created", 0.0)))
+        return {
+            "run_id": best["run_id"],
+            "run_name": best["run_name"],
+            "checkpoint_id": best["id"],
+            "step": best["step"],
+            "created": best["created"],
+        }
+
+    def average_steps_per_second(self, runs: list[dict] | None = None) -> tuple[float, bool]:
+        """Compute average steps/s from previous training runs and benchmark winners."""
+        if runs is None:
+            all_runs = self.store.runs()
+            runs = [run for run in all_runs if (run.get("metadata") or {}).get("purpose") != "benchmark"]
+        samples = []
+        for run in runs:
+            sps = (run.get("metrics") or {}).get("steps_per_second")
+            if isinstance(sps, int | float) and sps > 0:
+                samples.append(float(sps))
+        bench = self._benchmark_snapshot()
+        rec_sps = (((bench.get("session") or {}).get("recommendation") or {}).get("aggregate") or {}).get("agent_steps_per_second", {}).get("median")
+        if isinstance(rec_sps, int | float) and rec_sps > 0:
+            samples.append(float(rec_sps))
+        if samples:
+            return sum(samples) / len(samples), True
+        return 1500.0, False
+
+    def roadmap_status(self, highest_step: int, avg_sps: float, avg_measured: bool) -> list[dict]:
+        """Build roadmap milestones with live step progress and estimated time based on average steps/s."""
+        items = []
+        rate = max(avg_sps, 1.0)
+        for milestone in ROADMAP_MILESTONES:
+            target = milestone["target_steps"]
+            current = min(highest_step, target)
+            remaining = max(0, target - highest_step)
+            progress = min(100.0, (highest_step / max(target, 1)) * 100.0)
+            items.append({
+                **milestone,
+                "current_steps": current,
+                "remaining_steps": remaining,
+                "progress_percent": round(progress, 2),
+                "estimated_seconds": round(remaining / rate, 1),
+                "total_estimated_seconds": round(target / rate, 1),
+                "average_steps_per_second": round(rate, 1),
+                "average_steps_measured": avg_measured,
+                "completed": highest_step >= target,
+            })
+        return items
+
+    def start_direct(
+        self,
+        *,
+        preset: str | None = None,
+        max_steps: int | None = None,
+        duration_seconds: float | None = None,
+        milestone_id: str | None = None,
+        continue_from_latest: bool = True,
+    ) -> dict:
+        """Start training immediately without a confirmation dialog, continuing from the newest valid checkpoint."""
+        with self.lock:
+            self._require_idle()
+            missing = [name for name, version in package_versions().items() if version is None]
+            if missing:
+                raise AppError("Training extra is missing: " + ", ".join(missing) + ". Run uv sync --frozen --extra training.")
+            plan_dict = dict(self.store.setting("plan"))
+            # On a host without CUDA, if the plan still has the out-of-the-box cuda:0 default,
+            # preserve explicit CUDA check in worker unless a CPU preset/plan was set.
+            target_milestone = None
+            if milestone_id:
+                target_milestone = next((m for m in ROADMAP_MILESTONES if m["id"] == milestone_id), None)
+                if not target_milestone:
+                    raise AppError(f"Unknown roadmap milestone: {milestone_id}", 422)
+                preset = target_milestone["preset"]
+                max_steps = target_milestone["target_steps"]
+
+            if not preset and not milestone_id:
+                preset = "all_in_one_complete"
+
+            if preset:
+                preset_entry = (
+                    TRAINING_PRESETS.get(preset)
+                    if isinstance(TRAINING_PRESETS, dict)
+                    else next((p for p in TRAINING_PRESETS if p["id"] == preset), None)
+                )
+                if not preset_entry:
+                    raise AppError(f"Unknown training preset: {preset}", 422)
+                plan_dict.update(preset_entry["overrides"])
+                if max_steps is None and duration_seconds is None:
+                    max_steps = preset_entry["default_steps"]
+
+            if target_milestone:
+                plan_dict["name"] = target_milestone["title"]
+
+            # Auto-maximize hardware utilization (100% CPU threads + CUDA batch) if no benchmark was adopted yet
+            if not self.store.setting("benchmark_adoption") and int(plan_dict.get("n_proc") or 1) <= 1:
+                cpu_threads = os.cpu_count() or 8
+                target_nproc = min(32, max(2, cpu_threads))
+                plan_dict["n_proc"] = target_nproc
+                sys_snap = self.system.snapshot()
+                if sys_snap.get("gpu_name"):
+                    plan_dict["device"] = "cuda:0"
+                    plan_dict["pin_memory"] = True
+                    plan_dict["batch_size"] = 6400 if (6400 % (2 * target_nproc) == 0) else 8192
+                    plan_dict["n_minibatches"] = 8
+                    plan_dict["learning_rate"] = 0.00028
+                else:
+                    plan_dict["batch_size"] = max(2048, 2 * target_nproc * 160)
+                    plan_dict["n_minibatches"] = 4
+
+            parent = None
+            base_step = 0
+            if continue_from_latest:
+                latest_ckpt = self.latest_checkpoint_ref()
+                if latest_ckpt:
+                    parent_run = self.store.run(latest_ckpt["run_id"])
+                    # Keep hidden_sizes compatible with the checkpoint weights so actor/critic restore cleanly.
+                    plan_dict["hidden_sizes"] = tuple(parent_run["config"]["hidden_sizes"])
+                    base_step = int(latest_ckpt["step"])
+                    parent = {
+                        "run_id": latest_ckpt["run_id"],
+                        "checkpoint_id": latest_ckpt["checkpoint_id"],
+                        "step": base_step,
+                        "allow_config_evolution": True,
+                    }
+
+            batch_size = int(plan_dict.get("batch_size") or 512)
+            # Ensure batch_size is divisible by 2 * team_size * n_proc and n_minibatches.
+            n_proc = int(plan_dict.get("n_proc") or 1)
+            team_size = int(plan_dict.get("team_size") or 1)
+            step_quantum = 2 * team_size * n_proc
+            if batch_size % step_quantum != 0:
+                batch_size = max(128, ((batch_size // step_quantum) + 1) * step_quantum)
+            n_minibatches = int(plan_dict.get("n_minibatches") or 4)
+            while n_minibatches > 1 and (batch_size % n_minibatches != 0 or batch_size // n_minibatches < 16):
+                n_minibatches -= 1
+            plan_dict["n_minibatches"] = n_minibatches
+            plan_dict["batch_size"] = batch_size
+            plan_dict["timesteps_per_iteration"] = batch_size
+            plan_dict["buffer_size"] = 3 * batch_size
+
+            avg_sps, _ = self.average_steps_per_second()
+            if duration_seconds is not None and duration_seconds > 0:
+                requested_steps = max(batch_size, int(duration_seconds * max(avg_sps, 1.0)))
+                desired_total = base_step + requested_steps
+            elif max_steps is not None and max_steps > 0:
+                if target_milestone:
+                    # Milestone target_steps is the cumulative milestone goal; if already reached, add one milestone block.
+                    desired_total = max_steps if max_steps > base_step else base_step + max(batch_size * 4, max_steps // 10)
+                else:
+                    desired_total = max_steps if max_steps > base_step else base_step + max_steps
+            else:
+                default_budget = int(plan_dict.get("total_timesteps") or 8192)
+                desired_total = default_budget if default_budget > base_step else base_step + default_budget
+
+            plan_dict["total_timesteps"] = align_timesteps(desired_total, batch_size)
+            config = TrainingConfig.model_validate(plan_dict)
+            revision = int(self.store.setting("plan_revision") or 1)
+            self.store.set_settings({
+                "plan": config.model_dump(mode="json"),
+                "plan_revision": revision + 1,
+            })
+            launched = self._launch(config, parent=parent)
+            return {
+                "run_id": launched["run_id"],
+                "continued_from": parent,
+                "resumed_from": parent,
+                "base_step": base_step,
+                "total_timesteps": config.total_timesteps,
+                "config": config.model_dump(mode="json"),
+            }
+
+    def export_rlbot_bundle(self, run_id: str, checkpoint_id: str) -> dict:
+        """Build and persist a standalone RLBot v4/v5 export folder + manifest for a verified checkpoint."""
+        with self.lock:
+            run, checkpoint, checksum = self._target({"run_id": run_id, "checkpoint_id": checkpoint_id})
+            ckpt_path = self.checkpoints(run["id"]).path(checkpoint["id"])
+            export_dir = self.root / "exports" / f"rlbot_{checkpoint['id'][:16]}"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            weights_src = ckpt_path / "ppo_learner" / "actor_critic.pt"
+            if weights_src.is_file():
+                shutil.copy2(weights_src, export_dir / "actor_critic.pt")
+            bot_cfg = (
+                "[Locations]\n"
+                "looks_config = ./appearance.cfg\n"
+                "python_file = ./agent.py\n"
+                f"name = RLAI_{checkpoint['id'][:12]}\n\n"
+                "[Details]\n"
+                "developer = Rocket League AI Control Room\n"
+                f"description = Trained PPO checkpoint at {checkpoint['step']} steps ({run['name']})\n"
+                "fun_fact = 92-float DefaultObs + 90-action LookupTableAction (tick_skip=8)\n"
+                "language = Python\n"
+                "tags = 1v1\n"
+            )
+            appearance_cfg = (
+                "[Bot Loadout]\n"
+                "team_color_id = 27\n"
+                "custom_color_id = 0\n"
+                "car_id = 23\n"
+                "[Bot Loadout Orange]\n"
+                "team_color_id = 3\n"
+                "custom_color_id = 0\n"
+                "car_id = 23\n"
+            )
+            agent_code = (
+                '"""RLBot inference wrapper for Rocket League AI checkpoint."""\n'
+                "import math\nimport pathlib\nimport numpy as np\nimport torch\n"
+                "from rlgym.rocket_league.action_parsers import LookupTableAction\n"
+                "from rlgym.rocket_league.obs_builders import DefaultObs\n"
+                "from rlgym_learn_algos.ppo import DiscreteFF\n\n"
+                "HERE = pathlib.Path(__file__).resolve().parent\n"
+                f"CHECKPOINT_DIR = pathlib.Path({str(ckpt_path)!r})\n"
+                f"HIDDEN_SIZES = {tuple(run['config']['hidden_sizes'])!r}\n"
+                f"TICK_SKIP = {int(run['config']['tick_skip'])}\n\n"
+                "class RLAIBot:\n"
+                "    def __init__(self):\n"
+                "        self.actor = DiscreteFF(92, 90, HIDDEN_SIZES, torch.float32, 'cpu')\n"
+                "        local_pt = HERE / 'actor_critic.pt'\n"
+                "        pt_path = local_pt if local_pt.is_file() else (CHECKPOINT_DIR / 'ppo_learner' / 'actor_critic.pt')\n"
+                "        state = torch.load(pt_path, map_location='cpu', weights_only=True)\n"
+                "        self.actor.load_state_dict(state['actor'] if 'actor' in state else state)\n"
+                "        self.actor.eval()\n"
+                "        self.lookup = LookupTableAction()\n\n"
+                "    def act(self, obs_vector: np.ndarray) -> np.ndarray:\n"
+                "        with torch.no_grad():\n"
+                "            tensor = torch.as_tensor(obs_vector, dtype=torch.float32).unsqueeze(0)\n"
+                "            logits = self.actor(tensor)\n"
+                "            action_idx = int(torch.argmax(logits, dim=-1).item())\n"
+                "        return self.lookup._lookup_table[action_idx]\n\n"
+                "try:\n"
+                "    from rlbot.agents.base_agent import BaseAgent, SimpleControllerState\n"
+                "except ImportError:\n"
+                "    BaseAgent = object\n"
+                "    SimpleControllerState = None\n\n"
+                "class RLBotAgent(BaseAgent):\n"
+                "    def initialize_agent(self):\n"
+                "        self.bot = RLAIBot()\n"
+                "        self.ticks = TICK_SKIP\n"
+                "        self.prev_action = np.zeros(8, dtype=np.float32)\n"
+                "        self.controls = SimpleControllerState() if SimpleControllerState else None\n\n"
+                "    def get_output(self, packet):\n"
+                "        if self.ticks >= TICK_SKIP:\n"
+                "            obs = self._packet_to_obs(packet)\n"
+                "            self.prev_action = self.bot.act(obs)\n"
+                "            self.ticks = 0\n"
+                "        self.ticks += 1\n"
+                "        a = self.prev_action\n"
+                "        self.controls.throttle = float(a[0])\n"
+                "        self.controls.steer = float(a[1])\n"
+                "        self.controls.pitch = float(a[2])\n"
+                "        self.controls.yaw = float(a[3])\n"
+                "        self.controls.roll = float(a[4])\n"
+                "        self.controls.jump = bool(a[5] > 0.5)\n"
+                "        self.controls.boost = bool(a[6] > 0.5)\n"
+                "        self.controls.handbrake = bool(a[7] > 0.5)\n"
+                "        return self.controls\n\n"
+                "    def _packet_to_obs(self, packet) -> np.ndarray:\n"
+                "        me = packet.game_cars[self.index]\n"
+                "        inv = -1.0 if self.team == 1 else 1.0\n"
+                "        b = packet.game_ball.physics\n"
+                "        b_pos = np.array([b.location.x * inv, b.location.y * inv, b.location.z], dtype=np.float32) / 2300.0\n"
+                "        b_vel = np.array([b.velocity.x * inv, b.velocity.y * inv, b.velocity.z], dtype=np.float32) / 2300.0\n"
+                "        b_ang = np.array([b.angular_velocity.x * inv, b.angular_velocity.y * inv, b.angular_velocity.z], dtype=np.float32) / math.pi\n"
+                "        pads = np.zeros(34, dtype=np.float32)\n"
+                "        for i in range(min(34, packet.num_boost)):\n"
+                "            idx = (33 - i) if self.team == 1 else i\n"
+                "            pads[idx] = float(packet.game_boosts[i].timer) / 10.0\n"
+                "        flags = np.array([\n"
+                "            float(me.jumped), float(self.controls.handbrake if self.controls else 0.0),\n"
+                "            float(me.jumped), float(not me.has_wheel_contact and me.jumped),\n"
+                "            float(me.double_jumped), float(me.double_jumped),\n"
+                "            float(me.double_jumped), float(not me.double_jumped), 0.0\n"
+                "        ], dtype=np.float32)\n"
+                "        my_obs = self._car_obs(me, inv)\n"
+                "        enemy_obs = np.zeros(20, dtype=np.float32)\n"
+                "        for idx in range(packet.num_cars):\n"
+                "            if idx != self.index and packet.game_cars[idx].team != self.team:\n"
+                "                enemy_obs = self._car_obs(packet.game_cars[idx], inv)\n"
+                "                break\n"
+                "        return np.concatenate([b_pos, b_vel, b_ang, pads, flags, my_obs, enemy_obs]).astype(np.float32)\n\n"
+                "    def _car_obs(self, car, inv: float) -> np.ndarray:\n"
+                "        p = car.physics\n"
+                "        pos = np.array([p.location.x * inv, p.location.y * inv, p.location.z], dtype=np.float32) / 2300.0\n"
+                "        vel = np.array([p.velocity.x * inv, p.velocity.y * inv, p.velocity.z], dtype=np.float32) / 2300.0\n"
+                "        ang = np.array([p.angular_velocity.x * inv, p.angular_velocity.y * inv, p.angular_velocity.z], dtype=np.float32) / math.pi\n"
+                "        cp, sp = math.cos(p.rotation.pitch), math.sin(p.rotation.pitch)\n"
+                "        cy, sy = math.cos(p.rotation.yaw), math.sin(p.rotation.yaw)\n"
+                "        cr, sr = math.cos(p.rotation.roll), math.sin(p.rotation.roll)\n"
+                "        fwd = np.array([cp * cy * inv, cp * sy * inv, sp], dtype=np.float32)\n"
+                "        up = np.array([(-cr * sy * sp - sr * cy) * inv, (-cr * cy * sp + sr * sy) * inv, cp * cr], dtype=np.float32)\n"
+                "        extra = np.array([\n"
+                "            float(car.boost) / 100.0, 0.0, float(car.has_wheel_contact),\n"
+                "            float(self.controls.boost if self.controls else 0.0), float(car.is_super_sonic)\n"
+                "        ], dtype=np.float32)\n"
+                "        return np.concatenate([pos, fwd, up, vel, ang, extra])\n"
+            )
+            (export_dir / "bot.cfg").write_text(bot_cfg)
+            (export_dir / "appearance.cfg").write_text(appearance_cfg)
+            (export_dir / "agent.py").write_text(agent_code)
+            return {
+                "format": "rlai-rlbot-export-v1",
+                "run_id": run["id"],
+                "run_name": run["name"],
+                "checkpoint_id": checkpoint["id"],
+                "step": checkpoint["step"],
+                "manifest_sha256": checksum,
+                "obs_space": {"builder": "DefaultObs(zero_padding=1)", "width": 92, "dtype": "float32"},
+                "action_space": {"parser": "LookupTableAction()", "actions": 90, "tick_skip": 8},
+                "hidden_sizes": list(run["config"]["hidden_sizes"]),
+                "checkpoint_path": str(ckpt_path),
+                "export_dir": str(export_dir),
+                "rlbot_agent_py": agent_code,
+                "files": {
+                    "bot.cfg": bot_cfg,
+                    "appearance.cfg": appearance_cfg,
+                    "agent.py": agent_code,
                 },
             }
 
@@ -427,18 +779,39 @@ class Orchestrator:
             "gpu_memory_total_mib": sample.get("gpu_memory_total_mib"),
         }
 
-    def _adopt_benchmark_defaults(self, session_id: str, recommendation: dict) -> dict:
-        """Adopt only execution fields (device/n_proc) after strict safety gates.
+    def start_auto_benchmark(self) -> dict:
+        """Start the 1-click 10-minute (30 stages x 20s) high-scaling benchmark sweep and auto-adopt the winner."""
+        with self.lock:
+            sys_snap = self.system.snapshot()
+            best_device = "cuda:0" if sys_snap.get("gpu_name") else "cpu"
+            spec = BenchmarkSpec.default_auto_sweep(best_device)
+            return self.start_benchmark(spec)
 
-        The learning objective is untouched: batch size, network, reward,
-        seed and every strategy field remain exactly the approved plan's. The
-        previous plan is stored so one click can revert the change.
-        """
+    def _adopt_benchmark_defaults(self, session_id: str, recommendation: dict) -> dict:
+        """Adopt execution fields (and batch/episode settings in auto_sweep mode)."""
         candidate = recommendation.get("candidate")
         if not candidate:
             return {"status": "not-applicable", "reason": "no recommendation"}
         plan = TrainingConfig.model_validate(self.store.setting("plan"))
         update = {"device": candidate["device"], "n_proc": candidate["n_proc"]}
+        if "batch_size" in candidate:
+            cand_batch = int(candidate["batch_size"])
+            update["batch_size"] = cand_batch
+            update["timesteps_per_iteration"] = cand_batch
+            update["buffer_size"] = 3 * cand_batch
+            update["total_timesteps"] = align_timesteps(plan.total_timesteps, cand_batch)
+            n_mb = int(candidate.get("n_minibatches") or plan.n_minibatches)
+            while n_mb > 1 and (cand_batch % n_mb != 0 or cand_batch // n_mb < 16):
+                n_mb -= 1
+            update["n_minibatches"] = n_mb
+        if "learning_rate" in candidate:
+            update["learning_rate"] = float(candidate["learning_rate"])
+        if candidate["device"].startswith("cuda"):
+            update["pin_memory"] = True
+        if "episode_timeout_seconds" in candidate:
+            cand_ep = float(candidate["episode_timeout_seconds"])
+            update["episode_timeout_seconds"] = cand_ep
+            update["no_touch_timeout_seconds"] = min(float(plan.no_touch_timeout_seconds), cand_ep)
         changed = {key: {"before": getattr(plan, key), "after": value}
                    for key, value in update.items() if getattr(plan, key) != value}
         if not changed:
@@ -462,7 +835,7 @@ class Orchestrator:
         self.store.event(
             "info", "plan_adopted_from_benchmark",
             f"Benchmark {session_id[:12]} adopted {candidate['device']} with {candidate['n_proc']} "
-            "environment process(es) as the default for future runs. Strategy fields are unchanged.",
+            "environment process(es) as the default for future runs.",
             data=record,
         )
         return {"status": "adopted", "changes": changed, "plan_revision": revision + 1}
@@ -502,7 +875,8 @@ class Orchestrator:
                     continue
                 # Aggregate per repeat first (warm-up excluded and episode
                 # counters counted within each run), then combine repeats.
-                per_repeat = [aggregate_iterations(iterations, spec.warmup_iterations, spec.batch_size)
+                cand_batch = int(candidate.get("batch_size") or spec.batch_size)
+                per_repeat = [aggregate_iterations(iterations, spec.warmup_iterations, cand_batch)
                               for iterations in repeats_iterations]
                 aggregate = combine_repeats(per_repeat)
                 startup_samples = [item["startup_seconds"] for item in resources
@@ -1024,6 +1398,8 @@ class Orchestrator:
             worker.reader.join(timeout=5)
         self.stop_event.set()
         self.watchdog.join(timeout=3)
+        if hasattr(self, "live_match"):
+            self.live_match.stop()
         self.system.close()
         self.store.event("info", "backend_stopped", "Backend shut down. Checkpoints and experiment state retained.")
         self.store.close()

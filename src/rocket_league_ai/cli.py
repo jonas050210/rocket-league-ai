@@ -1,7 +1,6 @@
 """Explicit entry points. Opening the application never starts a training run."""
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -14,7 +13,6 @@ def doctor(probe: bool):
     result = {
         "python": sys.version.split()[0], "platform": sys.platform,
         "training_packages": package_versions(),
-        "desktop_installed": importlib.util.find_spec("PySide6") is not None,
         "cuda": {"probed": False, "available": None},
     }
     if probe:
@@ -48,19 +46,15 @@ def doctor(probe: bool):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="rocket-ai", description="Rocket League AI — local-first training control")
+    parser = argparse.ArgumentParser(prog="rocket-ai", description="Rocket League AI — local-first web training control")
     commands = parser.add_subparsers(dest="command", required=True)
     backend = commands.add_parser("backend", help="Start the independent control-plane service; no training auto-start")
     backend.add_argument("--host", default="127.0.0.1")
     backend.add_argument("--port", type=int, default=8765)
     backend.add_argument("--preview-readonly", action="store_true", help="Allow unauthenticated read-only diagnostics; writes still need the local key")
-    desktop = commands.add_parser("desktop", help="Open the native desktop shell, starting a detached backend if needed")
-    desktop.add_argument("--backend-url", default="http://127.0.0.1:8765")
-    desktop.add_argument("--smoke", action="store_true", help=argparse.SUPPRESS)
-    desktop.add_argument("--screenshot", type=Path, help=argparse.SUPPRESS)
     browser = commands.add_parser("browser-url", help="Print a local capability URL; keep its key private")
     browser.add_argument("--backend-url", default="http://127.0.0.1:8765")
-    for child in (backend, desktop, browser):
+    for child in (backend, browser):
         child.add_argument("--data-dir", type=Path, default=Path(os.environ.get("RLAI_DATA_DIR", ".rlai")))
     check = commands.add_parser("doctor", help="Inspect packages; --probe checks actual CUDA and RocketSim without training")
     check.add_argument("--probe", action="store_true")
@@ -79,12 +73,3 @@ def main():
         if not path.is_file():
             parser.error("Start rocket-ai backend for this workspace first.")
         print(args.backend_url.rstrip("/") + "/#token=" + path.read_text().strip())
-    else:
-        try:
-            from .desktop import launch
-
-            raise SystemExit(launch(args))
-        except ImportError as error:
-            parser.exit(2, f"Desktop dependency unavailable: {error}\nInstall the desktop extra and Ubuntu GUI libraries listed in docs/SETUP.md. The backend can run headlessly.\n")
-        except (RuntimeError, OSError) as error:
-            parser.exit(2, f"Desktop startup failed: {error}\nSee docs/SETUP.md for backend connection and WSLg recovery.\n")

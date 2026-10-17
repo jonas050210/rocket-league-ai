@@ -35,6 +35,9 @@ def extract_frame(state, game: int, decisions: int, score: tuple[int, int]) -> d
                 "position": [float(value) for value in physics.position],
                 "velocity": [float(value) for value in physics.linear_velocity],
                 "yaw": float(physics.yaw), "boost": float(car.boost_amount),
+                "on_ground": bool(getattr(car, "on_ground", True)),
+                "is_boosting": bool(getattr(car, "is_boosting", False)),
+                "is_supersonic": bool(getattr(car, "is_supersonic", False)),
             })
         return {
             "game": game, "t": decisions / DECISIONS_PER_SECOND,
