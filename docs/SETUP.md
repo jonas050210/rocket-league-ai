@@ -141,9 +141,9 @@ The approved default plan explicitly selects `cuda:0`; it must fail rather than 
 
 These are overrides, **not** a complete copy/paste replacement for the complete JSON editor; preserve the other fields of the current full draft. The form's batch field also sets collection size and 3× buffer capacity. Advanced JSON exposes all validated fields.
 
-1. Configuration → edit → **Validate draft**. Validation does not apply or start anything.
-2. **Review & apply** → inspect field differences/rationale/impact → tick review checkbox → confirm. Declining leaves the approved plan unchanged.
-3. Training → **New training run** → separately inspect/confirm. Initialization creates the real environment and an initial checkpoint.
+1. Training → **Approved plan** → edit → **Validate draft**. Validation does not apply or start anything.
+2. **Review plan changes** → inspect field differences/rationale/impact → tick review checkbox → confirm. Declining leaves the approved plan unchanged.
+3. Training → **New training run**. An unchanged approved plan starts immediately; a changed payload opens its difference for review. Initialization creates the real environment and an initial checkpoint.
 4. For pause/resume/stop testing, use a somewhat longer but still bounded budget such as 32,768 steps; a 512-step run may complete before you click pause. Requests acknowledge only at completed updates.
 5. Monitoring shows genuine structured logs and counters. Models shows actual checkpoints and explicitly “not evaluated.” Visualization explicitly has no connected renderer.
 

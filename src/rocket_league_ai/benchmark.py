@@ -6,8 +6,9 @@ per-iteration telemetry it already emits (collection / learning / iteration
 seconds, episodes) is aggregated here. Warm-up iterations are excluded,
 repeats are summarized with medians, and a recommendation is only made for
 configurations that completed every repeat stably within resource limits.
-Nothing here applies a configuration: adoption still requires the confirmed
-``apply_config`` proposal flow.
+Adoption is restricted to execution fields (device and n_proc): it needs the
+spec's ``auto_default`` flag and the strict stability gates, records the
+previous plan, and is reversible from the Benchmark page.
 """
 
 import statistics
@@ -18,10 +19,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .config import TrainingConfig
 
 # One candidate measurement run may never exceed this many agent steps, so a
-# benchmark click can never become an unbounded training session.
-MAX_MEASUREMENT_STEPS = 16384
+# benchmark click can never become an unbounded training session. The run is
+# also stopped by wall-clock measurement time (default 20 s), so this is a
+# hard safety ceiling rather than the normal stopping condition.
+MAX_MEASUREMENT_STEPS = 1_000_000
 MAX_CANDIDATES = 8
 STABILITY_MAX_CV = 0.25
+# A configuration is only safe to adopt as the default when its throughput is
+# tightly repeatable. This is deliberately stricter than "stable enough to rank".
+AUTO_DEFAULT_MAX_CV = 0.10
+AUTO_DEFAULT_MIN_REPEATS = 3
 
 
 class BenchmarkSpec(BaseModel):
@@ -31,11 +38,21 @@ class BenchmarkSpec(BaseModel):
     n_proc_values: list[int] = Field(default=[1], min_length=1, max_length=4)
     batch_size: int = Field(default=512, ge=128, le=4096)
     warmup_iterations: int = Field(default=1, ge=0, le=10)
-    measure_iterations: int = Field(default=3, ge=1, le=20)
-    repeats: int = Field(default=2, ge=1, le=5)
+    # A safety ceiling, not the normal stop: the 20 s wall-clock window ends
+    # the measurement on every realistic host. 1,900 iterations at 512 steps
+    # is 973k agent steps, just under the 1M per-run cap, and would only be
+    # reached faster than ~95 updates/s.
+    measure_iterations: int = Field(default=1900, ge=1, le=1900)
+    # Wall-clock measurement window, excluding warm-up and process startup.
+    measurement_seconds: int = Field(default=20, ge=5, le=600)
+    # Do not stop on time before this many measured iterations exist (slow CPU).
+    min_iterations: int = Field(default=2, ge=1, le=20)
+    repeats: int = Field(default=3, ge=1, le=5)
     max_cpu_percent: float = Field(default=100.0, gt=0, le=100)
     max_memory_percent: float = Field(default=95.0, gt=0, le=100)
-    timeout_seconds: int = Field(default=600, ge=30, le=3600)
+    max_gpu_memory_percent: float = Field(default=95.0, gt=0, le=100)
+    timeout_seconds: int = Field(default=180, ge=30, le=3600)
+    auto_default: bool = False
 
     @model_validator(mode="after")
     def check_spec(self) -> Self:
@@ -45,13 +62,39 @@ class BenchmarkSpec(BaseModel):
             raise ValueError("n_proc values must be between 1 and 8")
         if len(self.devices) * len(self.n_proc_values) > MAX_CANDIDATES:
             raise ValueError(f"at most {MAX_CANDIDATES} candidate configurations per benchmark")
-        steps = (self.warmup_iterations + self.measure_iterations) * self.batch_size
-        if steps > MAX_MEASUREMENT_STEPS:
+        # TrainingConfig requires the 1v1 collection wave to divide evenly.
+        for n_proc in self.n_proc_values:
+            if self.batch_size % (2 * n_proc):
+                raise ValueError(
+                    f"batch_size {self.batch_size} must be divisible by 2 * n_proc ({2 * n_proc}) "
+                    f"for {n_proc} environment process(es)"
+                )
+        # ``measure_iterations`` is only a ceiling. It is clamped to what fits
+        # in the per-run step cap, so raising batch_size (512 -> 4096) never
+        # turns an otherwise valid sweep into a validation error; the run is
+        # stopped by the wall clock long before the ceiling anyway.
+        if self.min_iterations > self.effective_measure_iterations:
             raise ValueError(
-                f"one measurement run would need {steps:,} agent steps; the benchmark cap is "
-                f"{MAX_MEASUREMENT_STEPS:,}. Reduce batch_size or iteration counts."
+                f"min_iterations {self.min_iterations} exceeds the "
+                f"{self.effective_measure_iterations} measured iterations that fit in the "
+                f"{MAX_MEASUREMENT_STEPS:,}-step cap at batch_size {self.batch_size}"
             )
+        if self.timeout_seconds <= self.measurement_seconds:
+            raise ValueError("timeout_seconds must exceed the measurement window")
         return self
+
+    @property
+    def effective_measure_iterations(self) -> int:
+        """The iteration ceiling that actually fits in one measurement budget.
+
+        The step cap is a hard safety bound, so a high ceiling combined with a
+        large batch is clamped here instead of rejecting the whole spec. With
+        the defaults (batch 512) the requested 1,900 iterations fit and the
+        wall-clock window is the only stop in practice.
+        """
+        warmup = self.warmup_iterations
+        available = MAX_MEASUREMENT_STEPS // self.batch_size - warmup
+        return max(1, min(self.measure_iterations, available))
 
     def candidates(self) -> list[dict]:
         return [
@@ -61,11 +104,15 @@ class BenchmarkSpec(BaseModel):
 
     def measurement_config(self, base: TrainingConfig, candidate: dict) -> TrainingConfig:
         """A bounded real training config for one candidate; strategy fields stay at the plan's."""
-        iterations = self.warmup_iterations + self.measure_iterations
+        # The step budget must not expire before the wall-clock window does, or
+        # a fast GPU would finish a "20 s" measurement after a few seconds and
+        # under-sample the window. Time is the normal stop; the same value also
+        # keeps the run under the hard step cap if a stop is ever missed.
+        budget = (MAX_MEASUREMENT_STEPS // self.batch_size) * self.batch_size
         return base.model_copy(update={
             "name": f"Benchmark · {candidate['device']} · {candidate['n_proc']} env",
             "device": candidate["device"], "n_proc": candidate["n_proc"],
-            "total_timesteps": iterations * self.batch_size,
+            "total_timesteps": budget,
             "timesteps_per_iteration": self.batch_size, "batch_size": self.batch_size,
             "buffer_size": 3 * self.batch_size,
             # Benchmark runs exist to measure, not to accumulate keepable models.
@@ -93,7 +140,12 @@ def aggregate_iterations(iterations: list[dict], warmup: int, batch_size: int) -
         return {"median": median, "min": min(values), "max": max(values),
                 "cv": (deviation / median) if median else 0.0}
 
-    first, last = iterations[0], iterations[-1]
+    # Episode counters are cumulative. The correct baseline is the last
+    # warm-up iteration (or zero when there is no warm-up), never iteration 0:
+    # with two warm-up iterations, using iteration 0 would count the second
+    # warm-up's episodes without counting its time.
+    baseline = iterations[warmup - 1] if warmup else iterations[0]
+    first, last = baseline, iterations[-1]
     episode_span = max((last.get("episodes") or 0) - (first.get("episodes") or 0), 0)
     wall = sum(item.get("iteration_seconds") or 0 for item in measured)
     return {
@@ -120,9 +172,14 @@ def combine_repeats(per_repeat: list[dict]) -> dict:
     def combined(key: str) -> dict:
         medians = [repeat[key]["median"] for repeat in per_repeat]
         median = statistics.median(medians)
-        deviation = statistics.pstdev(medians) if len(medians) > 1 else 0.0
+        between = statistics.pstdev(medians) if len(medians) > 1 else 0.0
+        between_cv = (between / median) if median else 0.0
+        # A single repeat has zero between-repeat variance; that must not be
+        # mistaken for stability. Keep the worst within-run variation too.
+        within_cv = max((repeat[key]["cv"] for repeat in per_repeat), default=0.0)
         return {"median": median, "min": min(medians), "max": max(medians),
-                "cv": (deviation / median) if median else 0.0,
+                "cv": max(between_cv, within_cv),
+                "cv_between_repeats": between_cv, "cv_within_repeats": within_cv,
                 "repeat_medians": medians}
 
     return {
@@ -143,6 +200,10 @@ def recommend(results: list[dict], spec: BenchmarkSpec) -> dict:
     or below the threshold, and sampled resource peaks within the spec limits.
     Maximum utilization is explicitly not the goal; unstable or
     resource-exceeding configurations are excluded with reasons.
+
+    ``auto_default`` is stricter and only covers execution fields (device and
+    environment-process count). A CUDA candidate without GPU telemetry is never
+    recommended, because its VRAM headroom is unverified.
     """
     stable, excluded = [], []
     for result in results:
@@ -151,9 +212,10 @@ def recommend(results: list[dict], spec: BenchmarkSpec) -> dict:
             reasons.append(result.get("error") or "measurement did not complete")
         else:
             aggregate = result["aggregate"]
-            if aggregate["agent_steps_per_second"]["cv"] > STABILITY_MAX_CV:
+            cv = aggregate["agent_steps_per_second"]["cv"]
+            if cv > STABILITY_MAX_CV:
                 reasons.append(
-                    f"unstable throughput (CV {aggregate['agent_steps_per_second']['cv']:.2f} "
+                    f"unstable throughput (CV {cv:.2f} "
                     f"> {STABILITY_MAX_CV}) across repeats/iterations"
                 )
             resources = result.get("resources") or {}
@@ -161,21 +223,58 @@ def recommend(results: list[dict], spec: BenchmarkSpec) -> dict:
                 reasons.append(f"CPU peak {resources['cpu_percent_peak']:.0f}% exceeds limit {spec.max_cpu_percent:.0f}%")
             if resources.get("memory_percent_peak") is not None and resources["memory_percent_peak"] > spec.max_memory_percent:
                 reasons.append(f"memory peak {resources['memory_percent_peak']:.0f}% exceeds limit {spec.max_memory_percent:.0f}%")
+            if resources.get("gpu_memory_percent_peak") is not None and resources["gpu_memory_percent_peak"] > spec.max_gpu_memory_percent:
+                reasons.append(
+                    f"VRAM peak {resources['gpu_memory_percent_peak']:.0f}% exceeds limit "
+                    f"{spec.max_gpu_memory_percent:.0f}%"
+                )
+            if result["candidate"]["device"].startswith("cuda") and resources.get("gpu_percent_peak") is None:
+                reasons.append("CUDA candidate has no GPU telemetry; utilization and VRAM headroom are unverified")
         (excluded if reasons else stable).append((result, reasons))
     if not stable:
-        return {"candidate": None,
+        return {"candidate": None, "auto_default": False,
                 "explanation": "No candidate completed stably within the resource limits; no recommendation is made.",
                 "excluded": [{"candidate": item[0]["candidate"], "reasons": item[1]} for item in excluded]}
     ranked = sorted(stable, key=lambda item: item[0]["aggregate"]["agent_steps_per_second"]["median"], reverse=True)
     best, _ = ranked[0]
     aggregate = best["aggregate"]
+    cv = aggregate["agent_steps_per_second"]["cv"]
+    resources = best.get("resources") or {}
+    gpu_verified = not best["candidate"]["device"].startswith("cuda") or resources.get("gpu_percent_peak") is not None
+    auto_reasons = []
+    repeats_verified = spec.repeats >= 2
+    if not repeats_verified:
+        auto_reasons.append("a single repeat cannot establish repeatability; use at least 2")
+    if cv > AUTO_DEFAULT_MAX_CV:
+        auto_reasons.append(f"CV {cv:.2f} > {AUTO_DEFAULT_MAX_CV} for automatic adoption")
+    if spec.repeats < AUTO_DEFAULT_MIN_REPEATS:
+        auto_reasons.append(f"{spec.repeats} repeat(s) < {AUTO_DEFAULT_MIN_REPEATS} required for automatic adoption")
+    if not gpu_verified:
+        auto_reasons.append("GPU telemetry is missing")
+    auto_default = spec.auto_default and not auto_reasons
     explanation = (
         f"{best['candidate']['device']} with {best['candidate']['n_proc']} environment process(es) was the fastest "
         f"stable configuration: median {aggregate['agent_steps_per_second']['median']:.1f} agent steps/s "
         f"(simulation {aggregate['simulation_steps_per_second']['median']:.1f}/s, PPO "
-        f"{aggregate['ppo_steps_per_second']['median']:.1f}/s, CV {aggregate['agent_steps_per_second']['cv']:.2f}). "
-        "This is a throughput recommendation only; it says nothing about learning quality. "
-        "Adopting it still requires a reviewed apply_config proposal."
+        f"{aggregate['ppo_steps_per_second']['median']:.1f}/s, CV {cv:.2f}). "
+        "This is a throughput recommendation only; it says nothing about learning quality."
     )
-    return {"candidate": best["candidate"], "aggregate": aggregate, "explanation": explanation,
-            "excluded": [{"candidate": item[0]["candidate"], "reasons": item[1]} for item in excluded if item[1]]}
+    if not repeats_verified:
+        explanation += " Only one repeat was run, so repeatability across sessions is unverified."
+    if auto_default:
+        explanation += " Device and environment-process count were adopted as the default for future runs."
+    elif spec.auto_default:
+        explanation += " The default plan was not changed: " + "; ".join(auto_reasons) + "."
+    else:
+        explanation += " Adopting it still requires a reviewed apply_config proposal."
+    return {
+        "candidate": best["candidate"], "aggregate": aggregate, "explanation": explanation,
+        "auto_default": auto_default, "auto_default_blockers": auto_reasons,
+        "safety": {"gpu_verified": gpu_verified, "cv": cv, "repeats": spec.repeats,
+                   "repeats_verified": repeats_verified,
+                   "measurement_seconds": spec.measurement_seconds,
+                   "cpu_percent_peak": resources.get("cpu_percent_peak"),
+                   "memory_percent_peak": resources.get("memory_percent_peak"),
+                   "gpu_memory_percent_peak": resources.get("gpu_memory_percent_peak")},
+        "excluded": [{"candidate": item[0]["candidate"], "reasons": item[1]} for item in excluded if item[1]],
+    }

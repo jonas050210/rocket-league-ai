@@ -3,7 +3,7 @@ import os
 import time
 
 import pytest
-from conftest import unit_checkpoint_writer
+from conftest import requires_training, unit_checkpoint_writer
 
 from rocket_league_ai.api import create_app
 from rocket_league_ai.config import TrainingConfig
@@ -49,6 +49,7 @@ def test_configuration_errors_are_actionable_and_no_plan_change(client):
     assert client.get("/api/snapshot").json()["plan"] == original
 
 
+@requires_training
 def test_start_requires_persisted_single_use_explicit_confirmation(client, manager, monkeypatch):
     calls = []
     monkeypatch.setattr(manager, "_launch", lambda config: calls.append(config) or {"run_id": "unit-test-only"})
@@ -66,6 +67,7 @@ def test_start_requires_persisted_single_use_explicit_confirmation(client, manag
     assert manager.store.proposal(proposal["id"])["status"] == "approved"
 
 
+@requires_training
 def test_strategy_apply_is_confirmed_and_stales_old_proposals(client, manager):
     old = manager.propose("start_run", {})
     config = TrainingConfig(device="cpu", seed=456)
@@ -79,6 +81,7 @@ def test_strategy_apply_is_confirmed_and_stales_old_proposals(client, manager):
     assert manager.store.runs() == []
 
 
+@requires_training
 def test_rejected_expired_and_extra_payloads(client, manager):
     proposal = manager.propose("start_run", {})
     assert client.post(f"/api/proposals/{proposal['id']}/reject", json={}).status_code == 200

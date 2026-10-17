@@ -3,8 +3,9 @@
 import random
 
 import pytest
+from conftest import requires_training
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, requires_training]
 
 
 @pytest.fixture

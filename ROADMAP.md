@@ -37,7 +37,7 @@ The first two delivery verification gates have actual results in `docs/VERIFICAT
 ## Implementation status — 2026-10-17 improvement-plan delivery
 
 Implemented and locally verified in this sandbox (CPU only, no GPU/display):
-P0 CI contracts repaired (seven views, evaluation capability), per-repeat
+P0 CI contracts repaired (six views, evaluation capability), per-repeat
 benchmark statistics, stale metadata fixed; evaluation scaled (parallel
 games, frozen checkpoint opponents, progress, stop endpoint, additive schema
 migration); opt-in reward shaping (``shaped-v2``), ``mixed-scenarios-v1``

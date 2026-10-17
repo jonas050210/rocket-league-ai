@@ -10,12 +10,13 @@ from pathlib import Path
 
 import httpx
 import pytest
+from conftest import requires_training
 from test_training_integration import approved, wait_for
 
 from rocket_league_ai.checkpoints import CheckpointStore
 from rocket_league_ai.persistence import lease_available
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, requires_training]
 
 
 @contextmanager

@@ -6,6 +6,15 @@ from fastapi.testclient import TestClient
 from rocket_league_ai.api import create_app
 from rocket_league_ai.checkpoints import REQUIRED
 from rocket_league_ai.config import TrainingConfig
+from rocket_league_ai.metadata import package_versions
+
+# Integration tests that launch the real worker/evaluator need the locked
+# training extra. Pure unit tests never skip: CI installs every extra, while a
+# control-plane-only checkout still verifies validation, storage and API logic.
+requires_training = pytest.mark.skipif(
+    any(version is None for version in package_versions().values()),
+    reason="training extra is not installed (uv sync --frozen --all-extras)",
+)
 
 # Protect test runner and spawned simulations from BLAS oversubscription before any NumPy import.
 for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):

@@ -134,7 +134,7 @@ Not executed here (target-host gates, unchanged): CUDA/RTX 4060 Ti throughput sw
 
 Executed in the CPU sandbox (no GPU/display; CUDA gates remain open):
 
-- P0: desktop/browser contracts updated to the real seven views and the
+- P0: desktop/browser contracts updated to the real six views and the
   implemented evaluation capability; benchmark aggregation is per repeat
   (constructed-data test proves warm-ups of later repeats no longer leak);
   run metadata no longer claims evaluation is unimplemented.
@@ -178,3 +178,129 @@ experiment. See docs/TARGET_HOST.md for the prepared procedures.
 - **E**: Playwright coverage extended to Models (evaluation + league)
   and Benchmark surfaces in the read-only preview; `npm run test:ui`
   passes locally (4 passed, 1 platform-conditional skip).
+## Addendum — benchmark-first iteration (2026-10-17, this session)
+
+Implemented (code, not target-host evidence):
+
+- **Benchmark window:** `BenchmarkSpec.measurement_seconds=20` by default; a
+  candidate is stopped at an update boundary by wall clock, with
+  `min_iterations` protecting slow CPUs and `measure_iterations` as a high ceiling (1,900).
+  A hard `timeout_seconds` still bounds a stuck run. `repeats` defaults to 3.
+- **Statistics:** warm-up episode counts use the last warm-up iteration as the
+  baseline; repeat CV is `max(between-repeat, within-run)`, so one repeat can
+  no longer be labelled stable by zero between-repeat variance. VRAM peaks
+  and missing CUDA telemetry participate in exclusion.
+- **Automatic adoption:** when requested (`auto_default`), only `device` and
+  `n_proc` are written to the plan, with `plan_revision` increment, an audit
+  event, a stored previous plan and a UI revert. Requires three repeats,
+  CV ≤ 0.10 and GPU telemetry for CUDA.
+- **Disposable measurements:** benchmark runs are marked
+  `purpose=benchmark`, filtered from Training history/checkpoint inventory and
+  their run directories are removed after the session. SQLite keeps the
+  lightweight benchmark record.
+- **CPU diagnosis:** Monitoring now reports `cpu_threads_busy` and per-core
+  utilization, so "10% CPU" on a 20-thread host is explained as roughly two
+  busy threads rather than an idle machine.
+- **UI:** Configuration route moved into Training as the Approved plan panel
+  (legacy `#configuration` redirect); six navigation views; 20 s benchmark
+  form, throughput chart and session history; pure black/white theme with a
+  minimum 12 px readability pass; replay renderer uses an explicit field
+  mapping (x ±4096, y ±5120, goal 1,785.51 uu wide), not a hard-coded scale.
+- **League HTTP gap:** `/api/leagues` and `/api/leagues/{id}/stop` now exist,
+  and a static client→API route contract test prevents the previous 404.
+- **Replay:** empty state draws an outlined field instead of a green canvas;
+  `requestAnimationFrame` playback, zoom, follow, altitude cue and a geometry
+  self-test exposed as `window.__RLAI_GEOMETRY__.selfTest()`.
+
+Executed in the CPU sandbox (Python 3.11.2, no training packages installed in
+the temporary venv):
+
+- `ruff check src tests` — all checks passed.
+- `node --check` for `web/app.js` and `tests/ui/control-room.spec.cjs`;
+  `compileall -q src`; `create_app()` constructs.
+- `pytest -q` — **112 passed, 30 skipped, 0 failed**. Every skip is the
+  explicit `requires_training` marker: the integration modules and three API
+  lifecycle tests launch the real worker/evaluator and therefore need the
+  locked training extra. The pure/API suite includes the new client→API route
+  contract test, which fails if the client calls an unregistered endpoint.
+- `pytest tests/test_benchmark.py -q` — 12 passed, 1 skipped (same marker).
+  This includes the 20-second budget test, warm-up baseline, single-repeat CV,
+  auto-default gates and the end-to-end auto-adoption test (which previously
+  emitted an unhandled worker-thread warning from run-directory cleanup; the
+  cleanup is now best-effort).
+- Geometry self-test via Node:
+  `{"fieldWidth":715,"fieldHeight":572,"orangeRight":true,"blueLeft":true,"positiveXUp":true,"goalWidth":124.67184082031247}`.
+  The Playwright spec now pins 715 / 572 / 124.6718 and samples the halfway
+  line (`world (0, 3000)`) so a mapping regression fails loudly.
+- Live backend smoke on `127.0.0.1:8899`: `/api/health` ready (`training_auto_start:false`);
+  `/api/snapshot` contains `benchmark`, `benchmark_sessions`,
+  `benchmark_adoption` and `visualization_available:true`; `/api/leagues` 200;
+  invalid benchmark spec 422; an otherwise valid benchmark returns 409 with
+  the explicit `Training extra is missing` message; `/assets/app.js` 200
+  (`text/javascript`, CSP `script-src 'self'`).
+
+### Browser suite (Chromium via `npm ci` + `@sparticuz/chromium`)
+
+Run with the sandbox venv: `RLAI_TEST_PYTHON=/tmp/rlvenv/bin/python PYTHONPATH=src npm test`.
+The suite starts two real backends (control on 8871, read-only preview on 8872).
+
+| Test | Result |
+|---|---|
+| read-only preview: six views, honest unavailable features, offline assets, responsive layout | **passed** |
+| capability prompt, wrong-key rejection, URL fragment removal, no auto-start | **passed** |
+| cached draft disables controls on disconnect and survives reconnect | **passed** |
+| twenty-second smoke: every view keeps rendering under polling | **passed** (22.6 s: 3.3 s per view across all six, zero page errors) |
+| real GUI vertical slice (validate → review → approve → pause → …) | fails only at the real-training step: this sandbox has no Torch/RocketSim, so the Pause button never becomes enabled. Validation, diff, cancel, approval and the unchanged-plan inline start all executed before that point. |
+| actual worker CUDA failure | skipped (`RLAI_TEST_CUDA_UNAVAILABLE` opt-in only) |
+
+Two defects were found and fixed by these runs:
+
+1. The header row overflowed at 420 px because the top bar
+   was a single 72 px flex row; it now wraps and right-aligns its status group,
+   so `scrollWidth <= innerWidth` holds at 420 px.
+2. The halfway line used the vertical coordinate for both endpoints, so it was
+   not drawn at all in the empty state. It is now drawn from
+   `px(-x, 0)` to `px(x, 0)`. This is exactly the regression the new
+   geometry/pixel assertions exist to catch; the earlier pixel check sampled a
+   point that the field outline also covered, which is why it passed before.
+
+A third defect was found by re-reading the runbook against the validators:
+the fixed 1,900-iteration ceiling times a 1,024 or 2,048 batch exceeded the
+1,000,000-step cap, so step 3's "compare batch 1024 and 2048" was rejected
+with a 422. The ceiling is now clamped to what fits (`effective_measure_iterations`:
+1,900 / 975 / 487 at batch 512 / 1,024 / 2,048), the stop logic uses the
+clamped value, and a test pins the mapping.
+
+A fourth defect was found by code review against the refresh loop, not by a
+browser run: clicking "Advanced · complete validated configuration" opened the
+JSON editor, and the next one-second poll rebuilt the panel and closed it
+again. Opening the disclosure now enters the same edit-guard as typing, so the
+documented "edit the complete JSON" workflow is actually usable.
+
+### CI (Ubuntu 24.04, Python 3.12, all extras)
+
+The pull request runs the full suite (143 tests, 0 skips) plus native Qt under
+Xvfb and 6 Chromium lifecycle tests. The first run failed exactly one test,
+which is recorded here because it was a real design bug and not a flake:
+
+- `test_real_benchmark_measures_a_genuine_cpu_run` asserted
+  `iterations_measured == 2` for a 2-iteration ceiling. The run budget now
+  outlasts the time window, so the worker kept measuring until the stop
+  request was acknowledged: 8 updates. The ceiling is a *best-effort* stop
+  acknowledged at an update boundary, so the old exact count was wrong. The
+  test now sets a 5 s window, asserts `stop_reason == "time"`, a measured
+  window ≥ 4.5 s and a bounded iteration count. The controller poll was also
+  reduced from 0.25 s to 0.1 s to bound that overshoot.
+
+A third and fourth CI-only defect followed: a window-stopped run ends as
+`stopped` (the test asserted `completed`), and the native Qt smoke still
+hard-coded `[data-nav] length === 7`, so it never reported ready after
+Configuration moved into Training. Both are fixed; a new static contract test
+pins the Qt predicate to the client's `names` map and to its headings, so this
+class of drift fails in the fast Python step instead of only under Xvfb.
+
+The 20-second benchmark was **not executed** in this sandbox because it has no
+RocketSim/Torch/GPU; the 409 above is the honest boundary, not a pass. CI
+executes the real CPU worker and the 5 s window above. Native Qt, WSLg, the
+target-host sweep and the 400-game baseline remain unexecuted here. No
+throughput, skill or hardware claim is made from this sandbox.

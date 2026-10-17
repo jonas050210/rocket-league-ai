@@ -20,16 +20,24 @@ class SystemMonitor:
 
     def _run(self):
         psutil.cpu_percent()
+        psutil.cpu_percent(percpu=True)
         executable = shutil.which("nvidia-smi")
         if not executable and Path("/usr/lib/wsl/lib/nvidia-smi").is_file():
             executable = "/usr/lib/wsl/lib/nvidia-smi"
         while not self.stop_event.is_set():
             memory = psutil.virtual_memory()
+            cpu_percent = psutil.cpu_percent()
+            cpu_count = psutil.cpu_count()
             sample = {
-                "cpu_percent": psutil.cpu_percent(), "cpu_count": psutil.cpu_count(),
+                "cpu_percent": cpu_percent, "cpu_count": cpu_count,
+                # A 20-thread host at "10% CPU" is roughly two saturated threads.
+                # Showing the implied busy-thread count prevents that reading from
+                # being mistaken for an idle machine.
+                "cpu_threads_busy": (cpu_percent / 100 * cpu_count) if cpu_count else None,
+                "cpu_percent_per_core": psutil.cpu_percent(percpu=True),
                 "memory_used_bytes": memory.used, "memory_total_bytes": memory.total,
                 "memory_percent": memory.percent, "gpu_percent": None, "gpu_memory_used_mib": None,
-                "gpu_memory_total_mib": None, "gpu_name": None,
+                "gpu_memory_total_mib": None, "gpu_memory_percent": None, "gpu_name": None,
                 "gpu_reason": "nvidia-smi unavailable; GPU utilization cannot be measured on this host",
                 "sampled_at": time.time(),
             }
@@ -41,14 +49,19 @@ class SystemMonitor:
                         check=True,
                     )
                     name, utilization, used, total = result.stdout.splitlines()[0].split(",")
+                    used_mib, total_mib = float(used), float(total)
                     sample.update(gpu_name=name.strip(), gpu_percent=float(utilization),
-                                  gpu_memory_used_mib=float(used), gpu_memory_total_mib=float(total),
+                                  gpu_memory_used_mib=used_mib, gpu_memory_total_mib=total_mib,
+                                  gpu_memory_percent=(used_mib / total_mib * 100) if total_mib else None,
                                   gpu_reason=None)
                 except (OSError, subprocess.SubprocessError, ValueError, IndexError):
                     sample["gpu_reason"] = "GPU query unsupported or timed out (some WSL NVML queries are unavailable)"
             with self.lock:
                 self.sample = sample
-            self.stop_event.wait(2)
+            # Two seconds made a 20-second benchmark window contain only ~10
+            # resource samples. One second keeps peaks meaningful without
+            # measurable overhead.
+            self.stop_event.wait(1)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -76,6 +89,20 @@ def recommendations(runs: list[dict], system: dict, *, evaluations: list[dict] |
         result.append({"severity": "warning", "title": "Host memory pressure",
                        "rationale": "Measured memory utilization exceeds 90%",
                        "impact": "Consider a smaller process/buffer budget for a new experiment. No changes applied."})
+    if runs:
+        cpu_count = system.get("cpu_count") or 1
+        busy = system.get("cpu_threads_busy")
+        n_proc = (runs[0].get("config") or {}).get("n_proc")
+        if busy is not None and cpu_count >= 8 and busy < max(2.0, cpu_count * 0.25):
+            result.append({
+                "severity": "info",
+                "title": "Training uses only a small fraction of this CPU",
+                "rationale": f"{busy:.1f} of {cpu_count} logical threads are busy"
+                             + (f" with n_proc={n_proc}" if n_proc is not None else "")
+                             + ". One simulator process plus single-thread BLAS is intentional, not a stuck run.",
+                "impact": "Run a 20-second benchmark sweep to measure whether a higher n_proc is faster and stable; "
+                          "CPU utilization alone says nothing about learning quality.",
+            })
     result.extend(_extra_insights(runs, evaluations, metric_history, benchmark, workspace_bytes))
     return result
 
@@ -131,7 +158,7 @@ def _extra_insights_impl(runs, evaluations, metric_history, benchmark) -> list[d
     if session.get("status") == "completed" and recommendation.get("candidate"):
         result.append({"severity": "info", "title": "Benchmark recommendation available",
                        "rationale": recommendation["explanation"],
-                       "impact": "Review it on the Benchmark page; adoption requires a confirmed configuration proposal and is never automatic."})
+                       "impact": "Review it on the Benchmark page. Device and n_proc may already have been auto-adopted when every stability gate passed; strategy fields are never changed."})
     return result
 
 

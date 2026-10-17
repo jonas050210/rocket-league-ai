@@ -68,3 +68,12 @@ def test_retention_candidates_keep_newest_and_protected():
 def test_disk_insight_uses_measured_workspace_size():
     titles = [item["title"] for item in recommendations([], SYSTEM, workspace_bytes=6 * 1024**3)]
     assert "Workspace disk usage is growing" in titles
+
+
+def test_low_cpu_insight_explains_single_process_training():
+    runs = [{"status": "running", "config": {"n_proc": 1}, "metrics": {"steps": 512}}]
+    system = {**SYSTEM, "cpu_count": 20, "cpu_threads_busy": 1.1}
+    insight = [item for item in recommendations(runs, system)
+               if "small fraction" in item["title"]]
+    assert insight and "n_proc=1" in insight[0]["rationale"]
+    assert "20-second benchmark" in insight[0]["impact"]

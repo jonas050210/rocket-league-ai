@@ -7,12 +7,13 @@ Kept deliberately tiny (hidden 32, batch 128) so they stay bounded on CPU.
 import time
 
 import pytest
+from conftest import requires_training
 
 from rocket_league_ai.benchmark import BenchmarkSpec
 from rocket_league_ai.config import TrainingConfig
 from rocket_league_ai.evaluation import EvaluationSpec
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, requires_training]
 
 
 def wait_for(predicate, timeout=1200):
@@ -37,8 +38,11 @@ def small_plan(manager, **overrides):
 
 def test_real_benchmark_measures_a_genuine_cpu_run(manager):
     small_plan(manager)
+    # Five seconds is the minimum window, used here to keep CI bounded. The
+    # point of the assertion is that the genuine run is stopped by wall clock.
     spec = BenchmarkSpec(devices=["cpu"], n_proc_values=[1], batch_size=128,
-                         warmup_iterations=1, measure_iterations=2, repeats=1, timeout_seconds=900)
+                         warmup_iterations=1, measure_iterations=500, min_iterations=2,
+                         measurement_seconds=5, repeats=1, timeout_seconds=900)
     session = manager.start_benchmark(spec)
     assert wait_for(lambda: manager.store.benchmark(session["id"])["status"] != "running")
     session = manager.store.benchmark(session["id"])
@@ -49,10 +53,22 @@ def test_real_benchmark_measures_a_genuine_cpu_run(manager):
     assert aggregate["agent_steps_per_second"]["median"] > 0
     assert aggregate["simulation_steps_per_second"]["median"] > 0
     assert aggregate["ppo_steps_per_second"]["median"] > 0
-    assert aggregate["iterations_measured"] == 2
+    resources = results[0]["resources"]
+    assert resources["stop_reason"] == "time", resources
+    assert resources["measurement_seconds"] >= 4.5, resources
+    assert resources["startup_seconds"] >= 0
+    # Iteration count is a consequence of the window, not a fixed number; the
+    # stop request is acknowledged at an update boundary, so a little
+    # overshoot is expected and honest.
+    assert 2 <= aggregate["iterations_measured"] <= spec.effective_measure_iterations + 20
     assert session["recommendation"]["candidate"] == {"device": "cpu", "n_proc": 1}
-    # The measurement was a real run in the experiment history.
-    assert manager.store.run(results[0]["run_id"])["status"] == "completed"
+    # The measurement was a real training run that really ran: it stopped at
+    # the update boundary we asked for, and its durable record is marked as a
+    # disposable benchmark (hidden from history, directory cleaned up).
+    run = manager.store.run(results[0]["run_id"])
+    assert run["status"] in {"completed", "stopped"}, run["status"]
+    assert run["metrics"]["steps"] > 0
+    assert run["metadata"]["purpose"] == "benchmark"
 
 
 def test_real_evaluation_of_trained_checkpoint_with_replay(manager):

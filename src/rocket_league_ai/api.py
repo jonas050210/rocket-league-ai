@@ -16,7 +16,7 @@ from . import __version__
 from .benchmark import BenchmarkSpec
 from .config import TrainingConfig
 from .domain import AppError
-from .evaluation import EvaluationSpec, compare_evaluations
+from .evaluation import EvaluationSpec, LeagueSpec, compare_evaluations
 from .orchestration import Orchestrator
 
 
@@ -164,6 +164,19 @@ def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdow
     @app.get("/api/evaluations/{evaluation_id}/trajectory", dependencies=[Depends(authorize)])
     def trajectory(evaluation_id: str):
         return app.state.manager.trajectory(evaluation_id)
+
+    @app.get("/api/leagues", dependencies=[Depends(authorize)])
+    def leagues():
+        manager = app.state.manager
+        return {"leagues": manager.store.leagues()}
+
+    @app.post("/api/leagues", dependencies=[Depends(authorize)])
+    def start_league(body: LeagueSpec):
+        return app.state.manager.start_league(body)
+
+    @app.post("/api/leagues/{league_id}/stop", dependencies=[Depends(authorize)])
+    def stop_league(league_id: str):
+        return app.state.manager.stop_league(league_id)
 
     assets = Path(__file__).parent / "web"
     app.mount("/assets", StaticFiles(directory=assets), name="assets")
