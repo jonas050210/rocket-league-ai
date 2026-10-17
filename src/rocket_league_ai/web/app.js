@@ -77,6 +77,19 @@ let configDraft = null,
   logLevel = "all",
   logSearch = "",
   refreshPromise = null;
+let benchmarkForm = {
+  devices: ["cpu"],
+  n_proc_values: [1],
+  batch_size: 512,
+  warmup_iterations: 1,
+  measure_iterations: 3,
+  repeats: 2,
+  max_cpu_percent: 100,
+  max_memory_percent: 95,
+  timeout_seconds: 600,
+};
+let evaluationForm = { opponent_id: "random-v1", games: 20, seed: 1000 };
+let replay = { id: null, data: null, frame: 0, playing: false, speed: 1, follow: true, timer: null };
 let busy = false,
   toastTimer,
   lastConnectedAt = null;
@@ -326,7 +339,7 @@ function dashboard() {
     ) +
     runError(run) +
     metricsGrid(run) +
-    `<div class="two-col"><section class="panel active-run"><div class="panel-header"><h2>Active experiment</h2>${statusPill(state.active_run?.status)}</div><div class="run-stage"><div class="run-copy"><h2>${state.active_run ? esc(run.name) : "Your next run<br>starts here."}</h2><p>${state.active_run ? "Real 1v1 simulation, one shared policy, and an explicit plan. Your run continues independently of this window." : "A focused foundation for a self-trained agent. Start small, observe clearly, and build on verified results."}</p><a class="button secondary" href="#training">${icon(state.active_run ? "monitoring" : "training")}${state.active_run ? "View training run" : "Open training controls"}${icon("arrow")}</a></div>${fieldArt()}</div><div class="run-footer"><span>${icon("cpu")}<b>HEADLESS</b></span><span>1v1 Soccar <b>·</b> Tick skip 8</span><span>${icon("lock")}User-initiated only</span></div></section>${readiness()}</div><div class="two-col">${chart(run)}${resources(system)}</div><div class="two-col balanced">${recentActivity()}<section class="panel"><div class="panel-header"><div><h2>Policy health</h2><p>Learning is not the same as winning</p></div>${icon("trophy")}</div><div class="metric-pairs"><div class="metric-pair"><span>Policy entropy</span><strong>${number(m.entropy, 3)}</strong></div><div class="metric-pair"><span>Evaluation win rate</span><strong>Not evaluated</strong></div></div><div class="panel-body"><div class="system-note">${icon("info")}<span>No win rate is inferred from self-play reward. A frozen-opponent evaluator is a future milestone.</span></div></div></section></div>`
+    `<div class="two-col"><section class="panel active-run"><div class="panel-header"><h2>Active experiment</h2>${statusPill(state.active_run?.status)}</div><div class="run-stage"><div class="run-copy"><h2>${state.active_run ? esc(run.name) : "Your next run<br>starts here."}</h2><p>${state.active_run ? "Real 1v1 simulation, one shared policy, and an explicit plan. Your run continues independently of this window." : "A focused foundation for a self-trained agent. Start small, observe clearly, and build on verified results."}</p><a class="button secondary" href="#training">${icon(state.active_run ? "monitoring" : "training")}${state.active_run ? "View training run" : "Open training controls"}${icon("arrow")}</a></div>${fieldArt()}</div><div class="run-footer"><span>${icon("cpu")}<b>HEADLESS</b></span><span>1v1 Soccar <b>·</b> Tick skip 8</span><span>${icon("lock")}User-initiated only</span></div></section>${readiness()}</div><div class="two-col">${chart(run)}${resources(system)}</div><div class="two-col balanced">${recentActivity()}<section class="panel"><div class="panel-header"><div><h2>Policy health</h2><p>Learning is not the same as winning</p></div>${icon("trophy")}</div><div class="metric-pairs"><div class="metric-pair"><span>Policy entropy</span><strong>${number(m.entropy, 3)}</strong></div><div class="metric-pair"><span>Evaluation win rate</span><strong>${(state.evaluation_comparison || [])[0] ? `${number(state.evaluation_comparison[0].win_rate * 100, 0)}% vs ${esc(state.evaluation_comparison[0].opponent_id)}` : "Not evaluated"}</strong></div></div><div class="panel-body"><div class="system-note">${icon("info")}<span>${(state.evaluation_comparison || [])[0] ? `Best measured checkpoint by lower 95% bound over ${state.evaluation_comparison[0].games} games. See Models for intervals and opponents.` : "No win rate is inferred from self-play reward. Evaluate a checkpoint in Models against a frozen scripted baseline."}</span></div></div></section></div>`
   );
 }
 function training() {
@@ -390,6 +403,28 @@ function monitoring() {
     `<div class="stat-grid">${stat("Backend health", connected ? "Connected" : "Disconnected", "", "Independent control-plane process", "shield")}${stat("Worker heartbeat", health.heartbeat_age_seconds == null ? "—" : number(health.heartbeat_age_seconds, 1), health.heartbeat_age_seconds == null ? "" : "s", health.connected ? "Time since last worker message" : "No active training worker", "monitoring")}${stat("Visible CPU threads", number(state.system.cpu_count), "", "Actual backend host allocation", "cpu")}${stat("GPU peak allocation", bytes(runMetrics(state.active_run).gpu_peak_bytes), "", "PyTorch measurement, when available", "bolt")}</div><section class="panel"><div class="panel-header"><div><h2>Live event stream</h2><p>Structured, durable, and resumed by sequence cursor</p></div><span class="live-indicator"><i></i>${connected ? "LIVE" : "RECONNECTING"}</span></div><div class="log-toolbar"><div class="log-filters">${["all", "warning", "error"].map((level) => `<button data-log-level="${level}" class="${logLevel === level ? "selected" : ""}">${level === "all" ? "All events" : level === "warning" ? "Warnings" : "Errors"}</button>`).join("")}</div><input class="log-search" id="log-search" aria-label="Filter logs" placeholder="Filter event messages…" value="${esc(logSearch)}"></div><div class="log-stream" id="log-stream" aria-label="Live logs">${filtered.length ? filtered.map((event) => `<div class="log-line"><time class="log-time">${time(event.ts)}</time><span class="log-level ${esc(event.level)}">${esc(event.level)}</span><span class="log-message">${esc(event.message)}</span></div>`).join("") : '<span class="muted">No matching events.</span>'}</div><div class="log-footer"><span>Cursor ${cursor} · Showing ${filtered.length} events</span><span>No messages are synthesized</span></div></section><div class="two-col" style="margin-top:20px">${resources()}${advisoryPanel()}</div>`
   );
 }
+function latestEvaluation(checkpointId) {
+  return (state.evaluations || []).find(
+    (item) => item.status === "completed" && item.result?.candidate_checkpoint_id === checkpointId,
+  );
+}
+function evaluationSection(valid) {
+  const evaluations = state.evaluations || [];
+  const running = evaluations.some((item) => item.status === "running");
+  const options = valid
+    .map((item) => `<option value="${item.run_id}|${item.id}">${esc(item.id.slice(0, 24))} · ${esc(item.run_name)} · step ${number(item.step)}</option>`)
+    .join("");
+  const rows = evaluations
+    .map((item) => {
+      const r = item.result;
+      return `<tr><td>${r ? esc(r.candidate_checkpoint_id.slice(0, 24)) : esc(item.spec.checkpoint_id.slice(0, 24))}<small>${item.created ? date(item.created) : ""}</small></td><td>${esc(item.spec.opponent_id)}</td><td>${esc(item.status)}</td><td>${r ? `${r.wins}W · ${r.losses}L · ${r.draws}D` : "—"}</td><td>${r ? `${r.goals_for} – ${r.goals_against}` : "—"}</td><td>${r ? `${number(r.win_rate * 100, 0)}% [${number(r.win_rate_ci95[0] * 100, 0)}–${number(r.win_rate_ci95[1] * 100, 0)}]` : "—"}</td><td>${item.trajectory ? `<a class="text-button" href="#visualization" data-action="open-replay" data-evaluation-id="${item.id}">${icon("visualization")}Replay</a>` : ""}${item.error ? esc(item.error) : ""}</td></tr>`;
+    })
+    .join("");
+  const comparison = (state.evaluation_comparison || [])
+    .map((entry, index) => `<div class="recommendation"><strong>#${index + 1} · ${esc(entry.candidate_checkpoint_id.slice(0, 24))}</strong><p>vs ${esc(entry.opponent_id)}: win rate ${number(entry.win_rate * 100, 0)}% over ${entry.games} games; ranked by lower 95% bound (${number(entry.score_lower_bound * 100, 0)}%). Goals ${entry.goals_for}–${entry.goals_against}.</p></div>`)
+    .join("");
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Checkpoint evaluation</h2><p>Frozen weights vs scripted baselines · side-balanced · seeded</p></div><span class="pill muted-pill">${running ? "EVALUATING" : "REPRODUCIBLE"}</span></div><div class="panel-body"><div class="form-grid"><label class="field">Checkpoint<select id="eval-checkpoint" ${valid.length ? "" : "disabled"}>${options || '<option value="">No valid checkpoint</option>'}</select></label><label class="field">Opponent<select id="eval-opponent"><option value="random-v1" ${evaluationForm.opponent_id === "random-v1" ? "selected" : ""}>Random actions (seeded)</option><option value="idle-v1" ${evaluationForm.opponent_id === "idle-v1" ? "selected" : ""}>Idle (no input)</option></select></label><label class="field">Games (even, both sides)<input id="eval-games" type="number" min="2" max="400" step="2" value="${evaluationForm.games}"></label><label class="field">Seed<input id="eval-seed" type="number" min="0" value="${evaluationForm.seed}"></label></div><div class="config-actions">${button("start-evaluation", "Start evaluation", "trophy", "primary", !writable() || !idle() || !valid.length || running)}</div><p class="subtle">Evaluation runs in a separate process with inference-only frozen weights; it never trains and never changes the designated best. Win rates include 95% Wilson intervals — small samples stay visibly uncertain.</p></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CHECKPOINT</th><th>OPPONENT</th><th>STATUS</th><th>RECORD</th><th>GOALS</th><th>WIN RATE · 95% CI</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}${comparison ? `<div class="panel-body"><h3>Comparison (by lower confidence bound)</h3>${comparison}</div>` : ""}</section>`;
+}
 function models() {
   const best = state.designated_best;
   const valid = state.checkpoints.filter((item) => item.integrity === "valid");
@@ -399,7 +434,7 @@ function models() {
       "Recovery-ready checkpoints. Preserved by default, never automatically pruned.",
       button("report", "Export inventory", "download", "secondary", !connected),
     ) +
-    `<div class="stat-grid">${stat("Saved checkpoints", number(state.checkpoints.length), "", "Published, not pending writes", "models")}${stat("Integrity verified", number(valid.length), "", "SHA-256 file manifests", "shield")}${stat("Designated best", best ? "Manually set" : "Not set", "", "Explicit user designation only", "trophy")}${stat("Evaluation results", "Not available", "", "No competitive claim yet", "chart")}</div><section class="panel"><div class="panel-header"><div><h2>Checkpoint inventory</h2><p>Click a checkpoint to inspect its real metadata and recovery contract</p></div><span class="pill muted-pill">LOCAL STORAGE</span></div>${
+    `<div class="stat-grid">${stat("Saved checkpoints", number(state.checkpoints.length), "", "Published, not pending writes", "models")}${stat("Integrity verified", number(valid.length), "", "SHA-256 file manifests", "shield")}${stat("Designated best", best ? "Manually set" : "Not set", "", "Explicit user designation only", "trophy")}${stat("Evaluation results", number((state.evaluations || []).filter((item) => item.status === "completed").length), "", "Frozen-opponent evaluations only", "chart")}</div><section class="panel"><div class="panel-header"><div><h2>Checkpoint inventory</h2><p>Click a checkpoint to inspect its real metadata and recovery contract</p></div><span class="pill muted-pill">LOCAL STORAGE</span></div>${
       state.checkpoints.length
         ? `<div class="table-wrap"><table><thead><tr><th>CHECKPOINT</th><th>AGENT STEPS</th><th>INTEGRITY</th><th>EVALUATION</th><th>ACTIONS</th></tr></thead><tbody>${state.checkpoints
             .map((item) => {
@@ -415,7 +450,7 @@ function models() {
                 state.latest_valid[item.run_id] === item.id &&
                 valid.filter((value) => value.run_id === item.run_id).length <=
                   1;
-              return `<tr><td><button class="text-button" data-action="inspect-model" ${target}>${icon("file")}${esc(item.id.slice(0, 17))}</button><small>${esc(item.run_name)} · ${item.created ? date(item.created) : "Unknown date"}</small>${designated ? '<span class="model-designation">DESIGNATED BEST · MANUAL</span>' : ""}</td><td>${number(item.step)}</td><td><span class="${item.integrity === "valid" ? "model-check" : "bad-text"}">${icon(item.integrity === "valid" ? "check" : "info")}${esc(item.integrity)}</span></td><td><small style="margin:0">Not evaluated</small></td><td class="actions">${button("recover-checkpoint", "Recover", "refresh", "secondary", !writable() || !idle() || item.integrity !== "valid" || !canRecover, target)}${button("designate", "Designate", "trophy", "ghost", !writable() || !idle() || item.integrity !== "valid" || designated, target)}${button("delete-checkpoint", "Delete", "delete", "ghost", !writable() || !idle() || item.integrity !== "valid" || designated || last, target)}</td></tr>`;
+              return `<tr><td><button class="text-button" data-action="inspect-model" ${target}>${icon("file")}${esc(item.id.slice(0, 17))}</button><small>${esc(item.run_name)} · ${item.created ? date(item.created) : "Unknown date"}</small>${designated ? '<span class="model-designation">DESIGNATED BEST · MANUAL</span>' : ""}</td><td>${number(item.step)}</td><td><span class="${item.integrity === "valid" ? "model-check" : "bad-text"}">${icon(item.integrity === "valid" ? "check" : "info")}${esc(item.integrity)}</span></td><td>${latestEvaluation(item.id) ? `<small style="margin:0">${number(latestEvaluation(item.id).result.win_rate * 100, 0)}% vs ${esc(latestEvaluation(item.id).result.opponent_id)} (n=${latestEvaluation(item.id).result.games})</small>` : '<small style="margin:0">Not evaluated</small>'}</td><td class="actions">${button("recover-checkpoint", "Recover", "refresh", "secondary", !writable() || !idle() || item.integrity !== "valid" || !canRecover, target)}${button("designate", "Designate", "trophy", "ghost", !writable() || !idle() || item.integrity !== "valid" || designated, target)}${button("delete-checkpoint", "Delete", "delete", "ghost", !writable() || !idle() || item.integrity !== "valid" || designated || last, target)}</td></tr>`;
             })
             .join("")}</tbody></table></div>`
         : empty(
@@ -424,7 +459,8 @@ function models() {
             "A checkpoint is published at initialization, at the approved cadence, and on pause or stop. Incomplete writes are never offered for recovery.",
             `<a class="button secondary" href="#training">${icon("training")}Open training</a>`,
           )
-    }</section><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Recommended candidates</h2><p>Evidence before promotion</p></div><span class="pill muted-pill">FUTURE EVALUATION</span></div><div class="panel-body"><div class="system-note">${icon("info")}<span>No candidates are recommended without measured, frozen-opponent evaluation results. A manual designation is not proof of strength.</span></div></div></section><section class="panel"><div class="panel-header"><div><h2>Recovery contract</h2><p>Clear about what is restored</p></div>${icon("shield")}</div><div class="panel-body"><p class="resource-note">Actor, critic, optimizers, experience buffer, GAE statistics, RNG state, and counters are restored at a completed update. New simulator episodes start after recovery. The original run and checkpoints remain untouched.</p></div></section></div>`
+    }</section><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Recommended candidates</h2><p>Evidence before promotion</p></div><span class="pill muted-pill">EVALUATION-BACKED</span></div><div class="panel-body">${(state.evaluation_comparison || []).length ? `<div class="system-note">${icon("info")}<span>Ranked by lower 95% Wilson bound in the evaluation table below. Designation remains manual and requires your confirmation.</span></div>` : `<div class="system-note">${icon("info")}<span>No candidates are recommended without measured, frozen-opponent evaluation results. A manual designation is not proof of strength.</span></div>`}</div></section><section class="panel"><div class="panel-header"><div><h2>Recovery contract</h2><p>Clear about what is restored</p></div>${icon("shield")}</div><div class="panel-body"><p class="resource-note">Actor, critic, optimizers, experience buffer, GAE statistics, RNG state, and counters are restored at a completed update. New simulator episodes start after recovery. The original run and checkpoints remain untouched.</p></div></section></div>` +
+    evaluationSection(valid)
   );
 }
 function configInput(
@@ -471,52 +507,115 @@ function configuration() {
   );
 }
 function visualization() {
+  const recorded = (state.evaluations || []).filter(
+    (item) => item.status === "completed" && item.trajectory,
+  );
+  const options = recorded
+    .map(
+      (item) =>
+        `<option value="${item.id}" ${replay.id === item.id ? "selected" : ""}>${esc(item.result.candidate_checkpoint_id.slice(0, 24))} vs ${esc(item.result.opponent_id)} · ${item.result.games} games</option>`,
+    )
+    .join("");
   return (
     heading(
       "Visualization",
-      "A dedicated home for observation inspection and future match rendering.",
-      `<span class="pill muted-pill">INTEGRATION POINT</span>`,
+      "Recorded evaluation replays, rendered locally. Training stays headless.",
+      `<span class="pill muted-pill">RECORDED REPLAY · TOP-DOWN</span>`,
     ) +
-    `<section class="panel"><div class="panel-header"><div><h2>Match & observation workspace</h2><p>Decoupled from the headless training loop</p></div>${statusPill("idle")}</div><div class="visualization-canvas">${fieldArt()}${empty("visualization", "A window into the agent. Not a cost to every step.", "No renderer is connected in this phase. Future snapshots and selected match playback will attach here without rendering every training simulation.", '<span class="pill muted-pill">NOT IMPLEMENTED · NO SIMULATED PLAYBACK</span>')}</div><div class="viz-specs"><span>OBSERVATION CONTRACT<strong>DefaultObs · float32 · 92 values</strong></span><span>ACTION CONTRACT<strong>90 discrete · 8 physics ticks</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>EXTENSION<strong>ObservationVisualizer protocol</strong></span></div></section><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Why rendering is separate</h2><p>Protect training throughput and responsiveness</p></div>${icon("cpu")}</div><div class="panel-body"><p class="subtle">The desktop process never owns a simulator or a CUDA training context. Future visualization will consume selected observations or evaluation artifacts, not drive the collector.</p></div></section><section class="panel"><div class="panel-header"><div><h2>Known integration limit</h2><p>No hidden compatibility override</p></div>${icon("info")}</div><div class="panel-body"><p class="subtle">The published RLGym 2.0.1 package requires NumPy &lt; 2. Current rlviser-py requires NumPy 2. A compatible renderer profile must be verified in a later phase.</p></div></section></div>`
+    `<section class="panel"><div class="panel-header"><div><h2>Replay viewer</h2><p>Real RocketSim trajectories recorded during evaluation — a schematic top-down view, not a 3D renderer</p></div>${statusPill(replay.data ? "paused" : "idle")}</div><div class="panel-body"><div class="replay-controls"><label class="field">Recorded evaluation<select id="replay-select" ${recorded.length ? "" : "disabled"}>${options || '<option value="">No replay recorded yet</option>'}</select></label><button class="button secondary" data-action="load-replay" ${recorded.length && writable() ? "" : "disabled"}>${icon("play")}Load replay</button><button class="button secondary" data-action="replay-toggle" ${replay.data ? "" : "disabled"}>${icon(replay.playing ? "pause" : "play")}${replay.playing ? "Pause" : "Play"}</button><label class="field">Speed<select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label><label class="approval-check"><input type="checkbox" id="replay-follow" ${replay.follow ? "checked" : ""}> Follow ball</label></div><canvas id="replay-canvas" width="920" height="620" aria-label="Top-down replay of a recorded evaluation game"></canvas><input id="replay-scrub" type="range" min="0" max="${replay.data ? replay.data.frames.length - 1 : 0}" value="${replay.frame}" ${replay.data ? "" : "disabled"} aria-label="Scrub replay"><div class="replay-readout" id="replay-readout">${replay.data ? esc(replayReadout()) : "Run an evaluation from Models to record a replay. Opening this viewer never affects a training run."}</div></div><div class="viz-specs"><span>SOURCE<strong>Evaluation trajectory artifact</strong></span><span>FRAME RATE<strong>Decision rate · 15 Hz per car</strong></span><span>TRAINING MODE<strong>Headless · renderer = None</strong></span><span>BOUNDARY<strong>No live 3D renderer (NumPy/renderer conflict documented)</strong></span></div></section>`
   );
+}
+function replayReadout() {
+  if (!replay.data) return "";
+  const frame = replay.data.frames[replay.frame];
+  if (!frame) return "";
+  const ballSpeed = frame.ball_velocity
+    ? Math.hypot(...frame.ball_velocity).toFixed(1)
+    : "—";
+  return `Game ${frame.game + 1} · t=${frame.t.toFixed(2)}s · Score blue ${frame.score[0]} – orange ${frame.score[1]} · Ball speed ${ballSpeed} uu/s · Frame ${replay.frame + 1}/${replay.data.frames.length} · Candidate: ${esc(replay.data.candidate_side_by_game[frame.game] || "?")}`;
+}
+function drawReplayFrame() {
+  const canvas = document.getElementById("replay-canvas");
+  if (!canvas || !replay.data) return;
+  const frame = replay.data.frames[replay.frame];
+  if (!frame) return;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  // Soccar field: x in [-4096, 4096], y in [-5120, 5120]; map y to canvas x.
+  let centreX = 0, centreY = 0;
+  if (replay.follow) { centreX = frame.ball[1]; centreY = frame.ball[0]; }
+  const scale = replay.follow ? 0.11 : Math.min(W / 10600, H / 8800);
+  const px = (wx, wy) => [W / 2 + (wy - centreX) * scale, H / 2 - (wx - centreY) * scale];
+  ctx.fillStyle = "#0b3d2e";
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = "rgba(255,255,255,0.65)";
+  ctx.lineWidth = 2;
+  const [fx0, fy0] = px(-5120, -4096), [fx1, fy1] = px(5120, 4096);
+  ctx.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+  ctx.beginPath();
+  const [cx, cy] = px(0, 0);
+  ctx.moveTo(cx, fy0); ctx.lineTo(cx, fy1); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, 500 * scale, 0, Math.PI * 2); ctx.stroke();
+  for (const goalY of [-5120, 5120]) {
+    const [gx0, gy0] = px(goalY - 0, -893), [gx1, gy1] = px(goalY, 893);
+    ctx.strokeRect(Math.min(gx0, gx1), Math.min(gy0, gy1), Math.abs(gx1 - gx0) || 4, Math.abs(gy1 - gy0));
+  }
+  for (const car of frame.cars) {
+    const [x, y] = px(car.position[1], car.position[0]);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(-(car.yaw || 0));
+    ctx.fillStyle = car.team === "blue" ? "#3b82f6" : "#f97316";
+    ctx.fillRect(-14, -8, 28, 16);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(8, -5, 6, 10);
+    ctx.restore();
+  }
+  const [bx, by] = px(frame.ball[1], frame.ball[0]);
+  ctx.beginPath();
+  ctx.arc(bx, by, 7, 0, Math.PI * 2);
+  ctx.fillStyle = "#f8fafc";
+  ctx.fill();
+  ctx.strokeStyle = "#111827";
+  ctx.stroke();
+  const readout = document.getElementById("replay-readout");
+  if (readout) readout.textContent = replayReadout();
+  const scrub = document.getElementById("replay-scrub");
+  if (scrub && document.activeElement !== scrub) scrub.value = replay.frame;
+}
+function stopReplayTimer() {
+  if (replay.timer) { clearInterval(replay.timer); replay.timer = null; }
+  replay.playing = false;
 }
 
 
 function benchmark() {
-  const run = viewedRun();
-  const live = run?.id === state.active_run?.id;
-  return heading(
-    "Benchmark",
-    "Automated performance benchmark to measure stable training configurations.",
-    '<span class="pill muted-pill">AUTO-RECOMMENDATION AVAILABLE</span>'
-  ) +
-  '<section class="panel"><div class="panel-header"><div><h2>Benchmark Configuration</h2><p>Measure stable throughput and resource utilization.</p></div>' + icon("cpu") + '</div>' +
-  '<div class="benchmark-config"><div class="form-grid">' +
-  '<section class="panel"><div class="panel-header"><div><h3>Execution Modes</h3></div></div>' +
-  '<label class="radio-item"><input type="radio" name="mode" value="cpu"' + (' checked' if True else '') + '> CPU-only simulation and PPO training</label>' +
-  '<label class="radio-item"><input type="radio" name="mode" value="cuda"' + (' checked' if False else '') + '> CPU-based simulation with PPO training on CUDA GPU</label>' +
-  '<label class="radio-item"><input type="radio" name="mode" value="mixed"' + (' checked' if False else '') + '> Mixed: varying parallel env counts and batch sizes</section>' +
-  '<section class="panel"><div class="panel-header"><div><h3>Measurement Settings</h3></div></div>' +
-  '<!-- configInput placeholders would go here -->' +
-  '<div class="action-buttons">' +
-  '<button class="button primary" data-action="start-benchmark" disabled>Start Benchmark</button>' +
-  '<button class="button secondary" data-action="auto-recommend" disabled>Auto Recommendation</button>' +
-  '</div></div>' +
-  '<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark Results</h2><p>Comparative analysis of measured configurations.</p></div>' + icon("chart") + '</div>' +
-  '<div class="benchmark-results" hidden>' + renderBenchmarkResults(run) + '</div>' +
-  '</section></section>' +
-  '<div class="two-col balanced" style="margin-top:20px">' +
-  '<section class="panel"><div class="panel-header"><div><h2>Stability & Reliability</h2><p>Detecting unstable configurations and resource limits.</p></div>' + icon("shield") + '</div>' +
-  '<div class="panel-body"><p class="subtle">Benchmarks detect memory exhaustion, resource saturation, and unstable configurations. Failed runs are recorded with error details for later review. No configuration change occurs without explicit user approval.</p></div></section>' +
-  '<section class="panel"><div class="panel-header"><div><h2>Throughput vs Learning Quality</h2><p>Raw throughput measurements are separated from learning quality.</p></div>' + icon("info") + '</div>' +
-  '<div class="panel-body"><p class="subtle">Higher steps per second does not imply better gameplay. A configuration that trains faster may not learn effectively. The auto-recommendation identifies the fastest stable configuration, not the one that learns best.</p></div></section>' +
-  '</div>';
-
-function renderBenchmarkResults(run) {
-  if (!run) {
-    return '<div class="chart-empty"><span>Start a benchmark to see results</span></div>';
-  }
-  return '<div class="benchmark-summary"><strong>No benchmark has been run yet.</strong><br>Start a benchmark configuration to measure performance.</div>';
+  const running = state.benchmark?.running;
+  const check = (list, value) => (list.includes(value) ? "checked" : "");
+  return (
+    heading(
+      "Benchmark",
+      "Real bounded training runs that find a fast, stable configuration for this hardware.",
+      running
+        ? button("stop-benchmark", "Stop benchmark", "stop", "secondary", !writable())
+        : button("start-benchmark", "Start benchmark", "play", "primary", !writable() || !idle()),
+    ) +
+    `<section class="panel"><div class="panel-header"><div><h2>Benchmark configuration</h2><p>Each candidate is measured with genuine warm-up + measured PPO iterations; nothing is simulated</p></div>${icon("cpu")}</div><div class="panel-body"><div class="form-grid"><fieldset class="field"><legend>Learner devices</legend><label class="approval-check"><input type="checkbox" data-benchmark-list="devices" value="cpu" ${check(benchmarkForm.devices, "cpu")}> CPU simulation + CPU PPO</label><label class="approval-check"><input type="checkbox" data-benchmark-list="devices" value="cuda:0" ${check(benchmarkForm.devices, "cuda:0")}> CPU simulation + CUDA PPO</label></fieldset><fieldset class="field"><legend>Parallel environments</legend>${[1, 2, 4, 8].map((value) => `<label class="approval-check"><input type="checkbox" data-benchmark-list="n_proc_values" value="${value}" ${check(benchmarkForm.n_proc_values, value)}> ${value} env process${value > 1 ? "es" : ""}</label>`).join("")}</fieldset><label class="field">Batch / iteration agent steps<input type="number" data-benchmark="batch_size" value="${benchmarkForm.batch_size}" min="128" step="128"><small>Also the collection size, as in the training adapter.</small></label><label class="field">Warm-up iterations<input type="number" data-benchmark="warmup_iterations" value="${benchmarkForm.warmup_iterations}" min="0" max="10"><small>Excluded from all statistics.</small></label><label class="field">Measured iterations<input type="number" data-benchmark="measure_iterations" value="${benchmarkForm.measure_iterations}" min="1" max="20"></label><label class="field">Repeats per candidate<input type="number" data-benchmark="repeats" value="${benchmarkForm.repeats}" min="1" max="5"><small>Medians across repeats; instability excludes a candidate.</small></label><label class="field">CPU limit %<input type="number" data-benchmark="max_cpu_percent" value="${benchmarkForm.max_cpu_percent}" min="1" max="100"></label><label class="field">Memory limit %<input type="number" data-benchmark="max_memory_percent" value="${benchmarkForm.max_memory_percent}" min="1" max="100"></label></div><p class="subtle">A measurement run is capped at 16,384 agent steps and uses the approved plan's strategy fields. Benchmark runs appear in Training history. Adopting a recommendation always requires a separate reviewed configuration proposal — throughput is not learning quality.</p></div></section><div id="benchmark-live">${benchmarkLive()}</div><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Stability before speed</h2><p>How a recommendation is earned</p></div>${icon("shield")}</div><div class="panel-body"><p class="subtle">A candidate must complete every repeat, keep throughput variation (CV) at or below 0.25, and stay within the resource limits. The fastest stable candidate wins; maximum utilization alone never does. Failed candidates keep their real error.</p></div></section><section class="panel"><div class="panel-header"><div><h2>Throughput ≠ learning</h2><p>Kept deliberately separate</p></div>${icon("info")}</div><div class="panel-body"><p class="subtle">Simulation steps/s, PPO steps/s and episodes/min are measured independently. Whether a configuration actually plays better is decided only by checkpoint evaluation in Models.</p></div></section></div>`
+  );
+}
+function benchmarkLive() {
+  const bench = state.benchmark || { session: null, results: [] };
+  if (!bench.session)
+    return `<section class="panel" style="margin-top:20px"><div class="panel-body">${empty("chart", "No benchmark has been run yet.", "Start a benchmark to measure genuine candidate configurations on this host. Results persist here and in the status report.")}</div></section>`;
+  const session = bench.session;
+  const rows = bench.results
+    .map((item) => {
+      const a = item.aggregate;
+      return `<tr><td>${esc(item.candidate.device)} · ${item.candidate.n_proc} env</td><td>${esc(item.status)}</td><td>${a ? number(a.agent_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.simulation_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.ppo_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.episodes_per_minute, 1) : "—"}</td><td>${a ? number(a.agent_steps_per_second.cv, 2) : "—"}</td><td>${item.resources ? `${number(item.resources.cpu_percent_peak, 0)}% CPU · ${number(item.resources.memory_percent_peak, 0)}% RAM` : "—"}</td><td>${item.error ? esc(item.error) : ""}</td></tr>`;
+    })
+    .join("");
+  const rec = session.recommendation;
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Benchmark results</h2><p>Session ${esc(session.id.slice(0, 12))} · ${esc(session.status)} · ${date(session.created)}</p></div>${statusPill(session.status === "running" ? "running" : "idle")}</div>${rows ? `<div class="table-wrap"><table><thead><tr><th>CANDIDATE</th><th>STATUS</th><th>AGENT STEPS/S</th><th>SIM STEPS/S</th><th>PPO STEPS/S</th><th>EPISODES/MIN</th><th>CV</th><th>RESOURCE PEAKS</th><th>ERROR</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="panel-body"><p class="subtle">Measurements are running. Each candidate executes real bounded training runs; results appear as candidates complete.</p></div>'}${rec ? `<div class="panel-body"><div class="recommendation"><strong>Recommendation</strong><p>${esc(rec.explanation)}</p>${rec.candidate ? button("apply-benchmark-recommendation", "Review as configuration proposal", "arrow", "primary", !writable() || !idle()) : ""}${(rec.excluded || []).map((item) => `<p class="subtle">Excluded ${esc(item.candidate.device)} · ${item.candidate.n_proc} env: ${esc(item.reasons.join("; "))}</p>`).join("")}</div></div>` : ""}${session.error ? `<div class="panel-body"><p class="bad-text">${esc(session.error)}</p></div>` : ""}</section>`;
 }
 const views = {
   dashboard,
@@ -539,6 +638,15 @@ function render(force = false) {
     $("#plan-revision").textContent = state.plan_revision;
     $("#apply-config").disabled = !writable() || !idle();
     $('[data-action="validate-config"]').disabled = !writable();
+    return;
+  }
+  if (route === "benchmark" && $("#content").dataset.page === "benchmark" && !force) {
+    const live = $("#benchmark-live");
+    if (live) live.innerHTML = benchmarkLive();
+    return;
+  }
+  if (route === "visualization" && $("#content").dataset.page === "visualization" && !force) {
+    drawReplayFrame();
     return;
   }
   const focus = document.activeElement?.id;
@@ -568,6 +676,7 @@ function render(force = false) {
     $("#log-stream").scrollTop = pinned
       ? $("#log-stream").scrollHeight
       : scroll || 0;
+  if (route === "visualization") drawReplayFrame();
 }
 async function refresh() {
   if (refreshPromise) return refreshPromise;
@@ -806,6 +915,71 @@ async function action(action, element) {
       run_id: element.dataset.runId,
       checkpoint_id: element.dataset.checkpointId,
     });
+  if (action === "start-benchmark") {
+    const session = await api("benchmarks", benchmarkForm);
+    toast(`Benchmark started (${session.id.slice(0, 12)}). Real bounded runs are measuring candidates.`);
+    await refresh();
+    return;
+  }
+  if (action === "stop-benchmark") {
+    await api("benchmarks/stop", {});
+    toast("Benchmark stop requested. The current measurement run is stopping safely.");
+    await refresh();
+    return;
+  }
+  if (action === "apply-benchmark-recommendation") {
+    const candidate = state.benchmark?.session?.recommendation?.candidate;
+    if (!candidate) throw new Error("No stable benchmark recommendation is available.");
+    const config = structuredClone(state.plan);
+    config.device = candidate.device;
+    config.n_proc = candidate.n_proc;
+    config.batch_size = state.benchmark.session.spec.batch_size;
+    config.timesteps_per_iteration = config.batch_size;
+    config.buffer_size = config.batch_size * 3;
+    return review("apply_config", { config });
+  }
+  if (action === "start-evaluation") {
+    const selected = $("#eval-checkpoint")?.value || "";
+    const [run_id, checkpoint_id] = selected.split("|");
+    if (!run_id || !checkpoint_id) throw new Error("Select a valid checkpoint first.");
+    evaluationForm.opponent_id = $("#eval-opponent").value;
+    evaluationForm.games = Number($("#eval-games").value);
+    evaluationForm.seed = Number($("#eval-seed").value);
+    await api("evaluations", { run_id, checkpoint_id, ...evaluationForm });
+    toast("Evaluation started in a separate frozen-inference process.");
+    await refresh();
+    return;
+  }
+  if (action === "load-replay" || action === "open-replay") {
+    const id = element.dataset.evaluationId || $("#replay-select")?.value;
+    if (!id) throw new Error("Select a recorded evaluation first.");
+    const data = await api(`evaluations/${id}/trajectory`);
+    stopReplayTimer();
+    replay = { id, data, frame: 0, playing: false, speed: Number($("#replay-speed")?.value || 1), follow: true, timer: null };
+    location.hash = "visualization";
+    render(true);
+    return;
+  }
+  if (action === "replay-toggle") {
+    if (!replay.data) return;
+    replay.playing = !replay.playing;
+    if (replay.playing) {
+      replay.timer = setInterval(() => {
+        replay.frame += 1;
+        if (replay.frame >= replay.data.frames.length) {
+          replay.frame = replay.data.frames.length - 1;
+          stopReplayTimer();
+          render(true);
+          return;
+        }
+        drawReplayFrame();
+      }, 1000 / (15 * replay.speed));
+    } else {
+      stopReplayTimer();
+    }
+    render(true);
+    return;
+  }
   if (action === "validate-config") {
     try {
       const result = await api("config/validate", draft());
@@ -854,6 +1028,32 @@ document.addEventListener("input", (event) => {
   if (event.target.id === "log-search") {
     logSearch = event.target.value;
     render(true);
+    return;
+  }
+  if (event.target.id === "replay-scrub") {
+    replay.frame = Number(event.target.value);
+    drawReplayFrame();
+    return;
+  }
+  if (event.target.id === "replay-speed") {
+    replay.speed = Number(event.target.value);
+    return;
+  }
+  if (event.target.id === "replay-follow") {
+    replay.follow = event.target.checked;
+    drawReplayFrame();
+    return;
+  }
+  if (event.target.dataset.benchmarkList) {
+    const key = event.target.dataset.benchmarkList;
+    const value = key === "n_proc_values" ? Number(event.target.value) : event.target.value;
+    const list = new Set(benchmarkForm[key]);
+    if (event.target.checked) list.add(value); else list.delete(value);
+    benchmarkForm[key] = [...list];
+    return;
+  }
+  if (event.target.dataset.benchmark) {
+    benchmarkForm[event.target.dataset.benchmark] = Number(event.target.value);
     return;
   }
   if (event.target.id === "config-json") {

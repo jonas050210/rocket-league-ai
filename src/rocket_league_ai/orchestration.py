@@ -12,9 +12,12 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .benchmark import BenchmarkSpec, aggregate_iterations, recommend
 from .checkpoints import CheckpointStore, file_hash
 from .config import TrainingConfig, changes, digest
-from .domain import ACTIVE, TERMINAL, AppError, RunStatus, control_target
+from .domain import ACTIVE, TERMINAL, AppError, EvaluationResult, RunStatus, control_target
+from .evaluation import EvaluationSpec, GameRecord, compare_evaluations
+from .evaluation import summarize as summarize_evaluation
 from .metadata import experiment_metadata, package_versions, require_recovery_compatible
 from .monitoring import SystemMonitor, recommendations
 from .persistence import Lease, atomic_json, lease_available
@@ -48,6 +51,11 @@ class Orchestrator:
             self.closing = False
             self.stall_timeout, self.shutdown_timeout = stall_timeout, shutdown_timeout
             self.checkpoint_stores: dict[str, CheckpointStore] = {}
+            # At most one auxiliary workload (benchmark or evaluation) at a time;
+            # both are forbidden while a training worker is active and vice versa.
+            self.auxiliary: str | None = None
+            self.benchmark_stop = threading.Event()
+            self.evaluation_process: subprocess.Popen | None = None
             self.token = self._load_token()
             self.system = SystemMonitor()
             self.watchdog = threading.Thread(target=self._watch, daemon=True, name="worker-supervisor")
@@ -103,9 +111,18 @@ class Orchestrator:
                 "runs": runs, "active_run": active, "checkpoints": models,
                 "latest_valid": latest, "designated_best": self.store.setting("designated_best"),
                 "plan": self.store.setting("plan"), "plan_revision": self.store.setting("plan_revision"),
-                "system": system, "recommendations": recommendations(runs, system),
-                "training_packages": package_versions(), "evaluation_available": False,
-                "visualization_available": False,
+                "system": system, "recommendations": recommendations(
+                    runs, system,
+                    evaluations=self.store.evaluations(limit=10),
+                    metric_history=[event["data"] for event in self.store.events_for_run(runs[0]["id"], "training_metrics")] if runs else [],
+                    benchmark=self._benchmark_snapshot(),
+                ),
+                "training_packages": package_versions(),
+                "evaluation_available": all(version is not None for version in package_versions().values()),
+                "visualization_available": True,
+                "benchmark": self._benchmark_snapshot(),
+                "evaluations": self.store.evaluations(),
+                "evaluation_comparison": compare_evaluations(self.store.evaluations()),
                 "worker_health": {
                     "connected": self.active is not None,
                     "heartbeat_age_seconds": time.monotonic() - self.active.heartbeat if self.active else None,
@@ -117,6 +134,8 @@ class Orchestrator:
     def _require_idle(self):
         if self.closing:
             raise AppError("Backend is shutting down. Reconnect after it has restarted.")
+        if self.auxiliary:
+            raise AppError(f"A {self.auxiliary} is in progress. Wait for it to finish or stop it first.")
         if self.active:
             raise AppError("A worker is still active. Stop it and wait for the terminal acknowledgement.")
         if not lease_available(self.root / "active-worker.lock"):
@@ -294,6 +313,231 @@ class Orchestrator:
         self.store.event("info", "run_starting", "Explicitly authorized training worker is starting", run["id"], {"parent": parent})
         return {"run_id": run["id"]}
 
+    # -- Hardware benchmark (genuine bounded runs, never auto-applied) -------
+    def _benchmark_snapshot(self):
+        sessions = self.store.benchmarks(limit=1)
+        if not sessions:
+            return {"session": None, "results": [], "running": False}
+        session = sessions[0]
+        return {"session": session, "results": self.store.benchmark_results(session["id"]),
+                "running": session["status"] == "running"}
+
+    def start_benchmark(self, spec: BenchmarkSpec) -> dict:
+        with self.lock:
+            self._require_idle()
+            missing = [name for name, version in package_versions().items() if version is None]
+            if missing:
+                raise AppError("Training extra is missing: " + ", ".join(missing) +
+                               ". Run uv sync --frozen --extra training before benchmarking.")
+            session = self.store.create_benchmark(spec.model_dump(mode="json"))
+            self.auxiliary = "benchmark"
+            self.benchmark_stop.clear()
+            self.store.event("info", "benchmark_started",
+                             f"Benchmark started: {len(spec.candidates())} candidate(s), {spec.repeats} repeat(s) each, "
+                             f"warm-up {spec.warmup_iterations} + {spec.measure_iterations} measured iterations "
+                             f"of {spec.batch_size} agent steps. Each measurement is a real bounded training run.")
+            thread = threading.Thread(target=self._run_benchmark, args=(session["id"], spec),
+                                      daemon=True, name="benchmark")
+            thread.start()
+            return session
+
+    def stop_benchmark(self) -> dict:
+        with self.lock:
+            if self.auxiliary != "benchmark":
+                raise AppError("No benchmark is running.")
+            self.benchmark_stop.set()
+            if self.active:
+                try:
+                    self.control(self.active.run_id, "stop")
+                except AppError:
+                    pass
+            self.store.event("warning", "benchmark_stop_requested", "Benchmark stop requested by user.")
+            return {"status": "stopping"}
+
+    def _run_benchmark(self, session_id: str, spec: BenchmarkSpec):
+        try:
+            plan = TrainingConfig.model_validate(self.store.setting("plan"))
+            for candidate in spec.candidates():
+                if self.benchmark_stop.is_set():
+                    break
+                repeats_iterations, resources, run_ids, error = [], [], [], None
+                for _ in range(spec.repeats):
+                    if self.benchmark_stop.is_set():
+                        break
+                    config = spec.measurement_config(plan, candidate)
+                    iterations, sampled, run_id, run_error = self._measure_once(config, spec)
+                    run_ids.append(run_id)
+                    if sampled:
+                        resources.append(sampled)
+                    if run_error:
+                        error = run_error
+                        break
+                    repeats_iterations.append(iterations)
+                if error or len(repeats_iterations) != spec.repeats:
+                    self.store.save_benchmark_result(session_id, {
+                        "candidate": candidate, "status": "failed",
+                        "error": error or "Benchmark stopped before all repeats completed.",
+                        "run_id": run_ids[-1] if run_ids else None,
+                    })
+                    continue
+                # Aggregate across repeats: pool measured iterations so the CV
+                # reflects both within-run and between-run variability.
+                pooled = [iteration for iterations in repeats_iterations for iteration in iterations]
+                aggregate = aggregate_iterations(pooled, spec.warmup_iterations, spec.batch_size)
+                merged = {
+                    "cpu_percent_peak": max((item["cpu_percent_peak"] for item in resources), default=None),
+                    "memory_percent_peak": max((item["memory_percent_peak"] for item in resources), default=None),
+                    "gpu_percent_peak": max((item["gpu_percent_peak"] for item in resources if item.get("gpu_percent_peak") is not None), default=None),
+                    "gpu_memory_used_mib_peak": max((item["gpu_memory_used_mib_peak"] for item in resources if item.get("gpu_memory_used_mib_peak") is not None), default=None),
+                    "gpu_peak_bytes": max((item["gpu_peak_bytes"] for item in resources if item.get("gpu_peak_bytes") is not None), default=None),
+                }
+                self.store.save_benchmark_result(session_id, {
+                    "candidate": candidate, "status": "completed", "aggregate": aggregate,
+                    "resources": merged, "run_id": run_ids[-1],
+                })
+            results = self.store.benchmark_results(session_id)
+            recommendation = recommend(results, spec)
+            stopped = self.benchmark_stop.is_set()
+            self.store.update_benchmark(session_id, status="stopped" if stopped else "completed",
+                                        recommendation=recommendation)
+            self.store.event("info", "benchmark_finished",
+                             "Benchmark stopped by user." if stopped else
+                             f"Benchmark finished. {recommendation['explanation']}")
+        except Exception as error:  # keep the session honest instead of hanging in "running"
+            self.store.update_benchmark(session_id, status="failed", error=str(error))
+            self.store.event("error", "benchmark_failed", str(error))
+        finally:
+            with self.lock:
+                if self.auxiliary == "benchmark":
+                    self.auxiliary = None
+
+    def _measure_once(self, config: TrainingConfig, spec: BenchmarkSpec):
+        """Run one genuine bounded training run and collect its real telemetry.
+
+        Returns (iterations, resources, run_id, error). Iterations are the
+        worker's own per-update measurements in order; nothing is synthesized.
+        """
+        with self.lock:
+            launched = self._launch(config)
+        run_id = launched["run_id"]
+        peaks = {"cpu_percent_peak": 0.0, "memory_percent_peak": 0.0,
+                 "gpu_percent_peak": None, "gpu_memory_used_mib_peak": None, "gpu_peak_bytes": None}
+        deadline = time.monotonic() + spec.timeout_seconds
+        run = self.store.run(run_id)
+        while run["status"] in ACTIVE and time.monotonic() < deadline and not self.benchmark_stop.is_set():
+            sample = self.system.snapshot()
+            peaks["cpu_percent_peak"] = max(peaks["cpu_percent_peak"], sample.get("cpu_percent") or 0)
+            peaks["memory_percent_peak"] = max(peaks["memory_percent_peak"], sample.get("memory_percent") or 0)
+            if sample.get("gpu_percent") is not None:
+                peaks["gpu_percent_peak"] = max(peaks["gpu_percent_peak"] or 0, sample["gpu_percent"])
+            if sample.get("gpu_memory_used_mib") is not None:
+                peaks["gpu_memory_used_mib_peak"] = max(peaks["gpu_memory_used_mib_peak"] or 0, sample["gpu_memory_used_mib"])
+            time.sleep(0.25)
+            run = self.store.run(run_id)
+        if run["status"] in ACTIVE:
+            with self.lock:
+                try:
+                    self.control(run_id, "stop")
+                except AppError:
+                    pass
+            return [], peaks, run_id, f"measurement exceeded {spec.timeout_seconds}s and was stopped"
+        if run["status"] != RunStatus.COMPLETED:
+            return [], peaks, run_id, run.get("error") or f"measurement run ended as {run['status']}"
+        iterations, cursor = [], 0
+        while True:
+            batch = self.store.events(cursor, 1000)
+            for event in batch["events"]:
+                if event["run_id"] == run_id and event["kind"] == "training_metrics":
+                    metrics = event["data"]
+                    if metrics.get("steps") and (not iterations or iterations[-1]["steps"] != metrics["steps"]):
+                        iterations.append(metrics)
+            if batch["cursor"] == cursor:
+                break
+            cursor = batch["cursor"]
+        final = self.store.run(run_id)["metrics"]
+        if final.get("gpu_peak_bytes") is not None:
+            peaks["gpu_peak_bytes"] = final["gpu_peak_bytes"]
+        if len(iterations) <= spec.warmup_iterations:
+            return [], peaks, run_id, "worker reported too few completed iterations to measure"
+        return iterations, peaks, run_id, None
+
+    # -- Checkpoint evaluation (separate frozen-inference subprocess) --------
+    def start_evaluation(self, spec: EvaluationSpec) -> dict:
+        with self.lock:
+            self._require_idle()
+            missing = [name for name, version in package_versions().items() if version is None]
+            if missing:
+                raise AppError("Training extra is missing: " + ", ".join(missing) +
+                               ". Run uv sync --frozen --extra training before evaluating.")
+            run, checkpoint, _ = self._target({"run_id": spec.run_id, "checkpoint_id": spec.checkpoint_id})
+            evaluation = self.store.create_evaluation(spec.model_dump(mode="json"))
+            self.auxiliary = "evaluation"
+            self.store.event("info", "evaluation_started",
+                             f"Evaluating {checkpoint['id']} against {spec.opponent_id} over {spec.games} "
+                             f"side-balanced games (seed {spec.seed}). Opponent and candidate weights are frozen.",
+                             run["id"])
+            thread = threading.Thread(target=self._run_evaluation,
+                                      args=(evaluation["id"], spec), daemon=True, name="evaluation")
+            thread.start()
+            return evaluation
+
+    def _run_evaluation(self, evaluation_id: str, spec: EvaluationSpec):
+        directory = self.root / "evaluations" / evaluation_id
+        try:
+            directory.mkdir(parents=True, mode=0o700)
+            request = {"spec": spec.model_dump(mode="json"), "root": str(self.root)}
+            atomic_json(directory / "request.json", request)
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-m", "rocket_league_ai.training.evaluate",
+                 "--request", str(directory / "request.json"), "--output", str(directory)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+            )
+            self.evaluation_process = process
+            output, _ = process.communicate(timeout=spec.games * spec.max_game_seconds + 600)
+            if process.returncode != 0:
+                raise AppError(f"Evaluation process failed: {output.strip().splitlines()[-1] if output.strip() else 'no output'}")
+            payload = json.loads((directory / "result.json").read_text())
+            games = [GameRecord.model_validate(game) for game in payload["games"]]
+            run = self.store.run(spec.run_id)
+            result = summarize_evaluation(
+                spec, games, candidate_id=payload["candidate_id"],
+                candidate_config_hash=run["config_hash"],
+                environment_version=run["config"]["environment_version"],
+            )
+            # Cross-check counting with the shared frozen contract model.
+            EvaluationResult(
+                candidate_id=result["candidate_id"], opponent_id=result["opponent_id"],
+                wins=result["wins"], losses=result["losses"], draws=result["draws"],
+                games=result["games"], seed=result["seed"], side_balanced=True,
+                environment_version=result["environment_version"],
+                goals_for=result["goals_for"], goals_against=result["goals_against"],
+            )
+            trajectory = f"evaluations/{evaluation_id}/trajectory.json" if (directory / "trajectory.json").is_file() else None
+            self.store.update_evaluation(evaluation_id, status="completed", result=result, trajectory=trajectory)
+            self.store.event("info", "evaluation_finished",
+                             f"Evaluation completed: {result['wins']}W/{result['losses']}L/{result['draws']}D, "
+                             f"goals {result['goals_for']}–{result['goals_against']}, win rate "
+                             f"{result['win_rate']:.0%} (95% CI {result['win_rate_ci95'][0]:.0%}–{result['win_rate_ci95'][1]:.0%}).",
+                             spec.run_id)
+        except Exception as error:
+            self.store.update_evaluation(evaluation_id, status="failed", error=str(error))
+            self.store.event("error", "evaluation_failed", str(error), spec.run_id)
+        finally:
+            self.evaluation_process = None
+            with self.lock:
+                if self.auxiliary == "evaluation":
+                    self.auxiliary = None
+
+    def trajectory(self, evaluation_id: str) -> dict:
+        evaluation = self.store.evaluation(evaluation_id)
+        if evaluation["status"] != "completed" or not evaluation.get("trajectory"):
+            raise AppError("No recorded replay is available for this evaluation.", 404)
+        path = self.root / evaluation["trajectory"]
+        if not path.is_file():
+            raise AppError("The recorded replay file is missing from the workspace.", 404)
+        return json.loads(path.read_text())
+
     def control(self, run_id: str, command: str):
         with self.lock:
             checked_id(run_id)
@@ -413,6 +657,9 @@ class Orchestrator:
     def close(self):
         with self.lock:
             self.closing = True
+            self.benchmark_stop.set()
+            if self.evaluation_process and self.evaluation_process.poll() is None:
+                self.evaluation_process.terminate()
             worker = self.active
             if worker and worker.process.poll() is None:
                 try:

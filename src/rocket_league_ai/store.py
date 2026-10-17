@@ -55,6 +55,20 @@ class Store:
                 plan_revision INTEGER NOT NULL, status TEXT NOT NULL,
                 created REAL NOT NULL, expires REAL NOT NULL, result TEXT
             );
+            CREATE TABLE IF NOT EXISTS benchmarks (
+                id TEXT PRIMARY KEY, spec TEXT NOT NULL, status TEXT NOT NULL,
+                recommendation TEXT, error TEXT, created REAL NOT NULL, updated REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS benchmark_results (
+                id TEXT PRIMARY KEY, benchmark_id TEXT NOT NULL, candidate TEXT NOT NULL,
+                status TEXT NOT NULL, aggregate TEXT, resources TEXT, error TEXT,
+                run_id TEXT, created REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS benchmark_results_session ON benchmark_results(benchmark_id);
+            CREATE TABLE IF NOT EXISTS evaluations (
+                id TEXT PRIMARY KEY, spec TEXT NOT NULL, status TEXT NOT NULL,
+                result TEXT, trajectory TEXT, error TEXT, created REAL NOT NULL, updated REAL NOT NULL
+            );
         """)
         if self.setting("plan") is None:
             self.set_settings({"plan": TrainingConfig().model_dump(mode="json"), "plan_revision": 1})
@@ -88,7 +102,8 @@ class Store:
         if row is None:
             return None
         value = dict(row)
-        for field in ("config", "metadata", "metrics", "payload", "result", "data"):
+        for field in ("config", "metadata", "metrics", "payload", "result", "data",
+                      "spec", "candidate", "aggregate", "resources", "recommendation"):
             if field in value and value[field] is not None:
                 value[field] = json.loads(value[field])
         return value
@@ -157,6 +172,15 @@ class Store:
                 "UPDATE proposals SET status='failed', result=? WHERE status='executing'",
                 (canonical({"error": "Backend interrupted during action; inspect inventory before retrying."}),),
             )
+            self.db.execute(
+                "UPDATE benchmarks SET status='interrupted', error='Backend restarted during the benchmark. "
+                "Completed candidate results are retained; start a new benchmark to re-measure the rest.' "
+                "WHERE status='running'"
+            )
+            self.db.execute(
+                "UPDATE evaluations SET status='interrupted', error='Backend restarted during evaluation. "
+                "No partial result is reported; start a new evaluation.' WHERE status='running'"
+            )
 
     def event(self, level: str, kind: str, message: str, run_id: str | None = None, data=None) -> int:
         with self.lock, self.db:
@@ -173,6 +197,14 @@ class Store:
             ).fetchall()
             events = [self.decode(row) for row in rows]
             return {"events": events, "cursor": events[-1]["seq"] if events else after}
+
+    def events_for_run(self, run_id: str, kind: str, limit: int = 200) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM events WHERE run_id=? AND kind=? ORDER BY seq DESC LIMIT ?",
+                (checked_id(run_id), kind, min(limit, 1000)),
+            ).fetchall()
+            return [self.decode(row) for row in reversed(rows)]
 
     def save_proposal(self, value: dict) -> dict:
         with self.lock, self.db:
@@ -197,3 +229,98 @@ class Store:
                 "UPDATE proposals SET status=?,result=? WHERE id=?",
                 (status, canonical(result) if result is not None else None, checked_id(proposal_id)),
             )
+
+    # -- Benchmark sessions and genuine measurement results -----------------
+    def create_benchmark(self, spec: dict) -> dict:
+        benchmark_id, now = new_id(), time.time()
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO benchmarks(id,spec,status,created,updated) VALUES (?,?,?,?,?)",
+                (benchmark_id, canonical(spec), "running", now, now),
+            )
+        return self.benchmark(benchmark_id)
+
+    def benchmark(self, benchmark_id: str) -> dict:
+        with self.lock:
+            row = self.db.execute("SELECT * FROM benchmarks WHERE id=?", (checked_id(benchmark_id),)).fetchone()
+            result = self.decode(row)
+            if result is None:
+                raise AppError("Benchmark not found. Refresh the benchmark history.", 404)
+            return result
+
+    def benchmarks(self, limit: int = 20) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM benchmarks ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
+            return [self.decode(row) for row in rows]
+
+    def update_benchmark(self, benchmark_id: str, **fields) -> dict:
+        if not fields.keys() <= {"status", "recommendation", "error"}:
+            raise ValueError("Only benchmark lifecycle fields may be updated")
+        fields["updated"] = time.time()
+        for key in ("recommendation",):
+            if key in fields and fields[key] is not None:
+                fields[key] = canonical(fields[key])
+        with self.lock, self.db:
+            self.db.execute(
+                f"UPDATE benchmarks SET {', '.join(key + '=?' for key in fields)} WHERE id=?",
+                (*fields.values(), checked_id(benchmark_id)),
+            )
+        return self.benchmark(benchmark_id)
+
+    def save_benchmark_result(self, benchmark_id: str, result: dict) -> dict:
+        result_id, now = new_id(), time.time()
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO benchmark_results VALUES (?,?,?,?,?,?,?,?,?)",
+                (result_id, checked_id(benchmark_id), canonical(result["candidate"]), result["status"],
+                 canonical(result["aggregate"]) if result.get("aggregate") else None,
+                 canonical(result["resources"]) if result.get("resources") else None,
+                 result.get("error"), result.get("run_id"), now),
+            )
+        with self.lock:
+            row = self.db.execute("SELECT * FROM benchmark_results WHERE id=?", (result_id,)).fetchone()
+            return self.decode(row)
+
+    def benchmark_results(self, benchmark_id: str) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM benchmark_results WHERE benchmark_id=? ORDER BY created", (checked_id(benchmark_id),),
+            ).fetchall()
+            return [self.decode(row) for row in rows]
+
+    # -- Checkpoint evaluations ----------------------------------------------
+    def create_evaluation(self, spec: dict) -> dict:
+        evaluation_id, now = new_id(), time.time()
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO evaluations(id,spec,status,created,updated) VALUES (?,?,?,?,?)",
+                (evaluation_id, canonical(spec), "running", now, now),
+            )
+        return self.evaluation(evaluation_id)
+
+    def evaluation(self, evaluation_id: str) -> dict:
+        with self.lock:
+            row = self.db.execute("SELECT * FROM evaluations WHERE id=?", (checked_id(evaluation_id),)).fetchone()
+            result = self.decode(row)
+            if result is None:
+                raise AppError("Evaluation not found. Refresh the evaluation history.", 404)
+            return result
+
+    def evaluations(self, limit: int = 50) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM evaluations ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
+            return [self.decode(row) for row in rows]
+
+    def update_evaluation(self, evaluation_id: str, **fields) -> dict:
+        if not fields.keys() <= {"status", "result", "trajectory", "error"}:
+            raise ValueError("Only evaluation lifecycle fields may be updated")
+        fields["updated"] = time.time()
+        for key in ("result",):
+            if key in fields and fields[key] is not None:
+                fields[key] = canonical(fields[key])
+        with self.lock, self.db:
+            self.db.execute(
+                f"UPDATE evaluations SET {', '.join(key + '=?' for key in fields)} WHERE id=?",
+                (*fields.values(), checked_id(evaluation_id)),
+            )
+        return self.evaluation(evaluation_id)

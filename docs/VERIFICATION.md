@@ -111,3 +111,21 @@ Xvfb success does **not** certify interactive WSLg, the native file-save/cancel 
 - Renderer compatibility, curriculum/league, larger match modes, deployment/original-game control: not implemented, not tested, not part of this delivery.
 
 [ROADMAP.md](../ROADMAP.md) supplies measurable next criteria. Passing correctness checks never authorizes automatic strategy changes, training starts, model promotion or valuable-data deletion.
+
+## Addendum — benchmark / evaluation / replay delivery (2026-10-17, this session)
+
+Environment: Debian 12, Python 3.11.2 venv with the locked training stack pip-installed (torch 2.9.1+cu128, `cuda.is_available() == False`), 2 cores, ~3 GiB RAM, no GPU/display. This is a CPU correctness environment, not the RTX target host.
+
+Executed and verified:
+
+| Command / flow | Result |
+|---|---|
+| `pytest -q -m 'not desktop'` (full suite incl. real-training integration) | **114 passed, 2 deselected** in ~59 s (98 pre-existing + 16 new) |
+| `ruff check src tests`; `node --check src/rocket_league_ai/web/app.js` | Passed (the previously broken benchmark UI JavaScript now parses) |
+| New genuine integration: real benchmark measurement run | Passed — bounded 384-step CPU run measured through the existing worker |
+| New genuine integration: real evaluation of a trained checkpoint | Passed — side-balanced games vs `idle-v1`, trajectory frames recorded, kickoff ball at centre verified |
+| Live backend + HTTP benchmark | Session completed: **1,529 agent steps/s** (2,485 sim steps/s, 10,514 PPO steps/s, 352.7 episodes/min, batch 128, 1 env, this sandbox) with a fastest-stable recommendation |
+| Live HTTP evaluation vs `random-v1` (384-step checkpoint, 4 games) | **0W/0L/4D, goals 0–0, win rate 0% (95% CI 0–49%)** — an honest weak baseline; no improvement claimed |
+| Replay artifact | 302 decision-rate frames over 4 games; sides alternate blue/orange; first-frame car/ball kickoff positions correct |
+
+Not executed here (target-host gates, unchanged): CUDA/RTX 4060 Ti throughput sweeps, WSLg native desktop certification, 400-game evaluation comparisons, 30-minute soak, sudden-power-loss storage test. Browser UI tests (`npm test`) were not re-run in this sandbox; the UI was verified by syntax check, API-level flows and the live backend above.

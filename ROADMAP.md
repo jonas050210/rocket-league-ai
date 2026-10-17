@@ -63,7 +63,11 @@ The first two delivery verification gates have actual results in `docs/VERIFICAT
 
 Pass/fail must identify the host and fault protocol. Unit fault injection is not evidence of physical power-loss durability. True sudden-power-loss certification remains a separate storage test.
 
-## N2 — Separately approved: frozen-opponent evaluator
+## N2 — Frozen-opponent evaluator (foundation implemented 2026-10-17)
+
+**Status:** implemented and verified on CPU in this sandbox. `training/evaluate.py` plays genuine side-balanced RocketSim games with a frozen checkpoint actor (greedy CPU inference) against seeded `random-v1`/`idle-v1` baselines; results persist with Wilson 95% intervals, goals and per-game records; checkpoints are compared by lower confidence bound in Models. A 384-step foundation checkpoint measured 0W/0L/4D vs random — a working baseline, not strength. Remaining for the full gate: 400-game comparisons on the target host, a frozen *learned* opponent pool/league, and promotion proposals backed by this evidence (designation is still manual).
+
+## N2-history — Original evaluator gate (superseded by the status above)
 
 **Why before recommendations:** training reward, entropy and checkpoint age do not establish playing strength.
 
@@ -80,7 +84,11 @@ Pass/fail must identify the host and fault protocol. Unit fault injection is not
 
 No competitive threshold/rank is promised by a 400-game harness. It can faithfully measure a weak baseline policy.
 
-## N3 — Separately approved: measured throughput characterization
+## N3 — Measured throughput characterization (benchmark implemented 2026-10-17)
+
+**Status:** the benchmark harness is implemented and verified on CPU in this sandbox: candidates (device × 1–8 env processes) run genuine bounded training runs through the existing worker; warm-up iterations are excluded; simulation/PPO/episode throughput, resource peaks and stability (CV ≤ 0.25) produce an explainable fastest-stable recommendation that is never auto-applied. First sandbox measurement (batch 128, 1 env): 1,529 agent steps/s. Remaining: the B2–B5 sweeps on the RTX target host below, which no CPU number substitutes for.
+
+## N3-history — Original throughput gates (still the target-host procedure)
 
 Preserve the intent of historical gates B1–B5, but use the actual locked stack and current safety contracts. No benchmark is currently passed on the RTX target.
 

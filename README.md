@@ -2,7 +2,7 @@
 
 A local-first **desktop control room for headless RocketSim reinforcement learning**. Real RLGym Learn / PPO / PyTorch training, an independent backend, explicit user control, live monitoring and recoverable checkpoints.
 
-**Phase 2 foundation — not a competitive agent.** No evaluator, match renderer, opponent league or original-game automation is implemented. Missing metrics/results are labeled honestly; nothing starts training merely because you open the app.
+**Phase 2 foundation + measured tooling — not a competitive agent.** Includes a genuine hardware benchmark (real bounded runs, fastest-stable recommendation), frozen-checkpoint evaluation against scripted baselines with confidence intervals, and a recorded-replay viewer. No opponent league, 3D/live renderer or original-game automation is implemented. Missing metrics/results are labeled honestly; nothing starts training merely because you open the app.
 
 ## Start on Ubuntu / WSL 2
 
@@ -34,7 +34,9 @@ Training data/checkpoints live in `.rlai/` by default; change it with `--data-di
 - **Monitoring:** durable live logs, warnings/errors, worker heartbeat and backend health.
 - **Models:** verified checkpoint inventory/metadata, confirmed recovery, manual designation and protected deletion.
 - **Configuration:** validated drafts, visible differences, reviewed apply and immutable per-run parameters.
-- **Visualization:** explicit future integration point, **not** fabricated rendering.
+- **Visualization:** recorded-replay viewer rendering genuine evaluation trajectories (top-down schematic, play/pause/scrub/follow-ball); **not** a live 3D renderer.
+- **Benchmark:** device × parallel-environment sweeps of real bounded training runs with warm-up exclusion, stability checks, resource peaks and an explainable recommendation (adoption still needs a confirmed configuration proposal).
+- **Evaluation (in Models):** frozen checkpoints vs seeded random/idle baselines, side-balanced games, Wilson intervals, checkpoint comparison, replay recording.
 
 Checkpoints restore real learner/optimizer/buffer/GAE/RNG state at completed updates; simulator episodes reset. Recovery creates a new linked run and always requires confirmation. There is no automatic pruning or best-model promotion.
 
