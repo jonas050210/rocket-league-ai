@@ -24,3 +24,4 @@ exports/
 test-results/
 playwright-report/
 native-test-results/
+.venv

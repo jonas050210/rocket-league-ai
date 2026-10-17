@@ -70,3 +70,16 @@ def test_evaluation_is_a_validated_contract_not_an_inferred_metric():
     assert EvaluationResult(**kwargs).games == 10
     with pytest.raises(ValidationError, match="must equal"):
         EvaluationResult(**{**kwargs, "wins": 8})
+
+
+def test_ppo_knobs_and_shaping_validation():
+    config = TrainingConfig(clip_range=0.3, max_grad_norm=1.0)
+    assert config.clip_range == 0.3 and config.max_grad_norm == 1.0
+    with pytest.raises(ValidationError):
+        TrainingConfig(reward_velocity_to_ball_weight=0.5)  # shaping requires v2
+    shaped = TrainingConfig(reward_version="goal10-touch0.1-shaped-v2",
+                            reward_velocity_to_ball_weight=0.5, reward_ball_to_goal_weight=0.25)
+    assert shaped.reward_ball_to_goal_weight == 0.25
+    with pytest.raises(ValidationError):
+        TrainingConfig(reward_version="goal10-touch0.1-shaped-v2")  # v2 without weights is meaningless
+    assert TrainingConfig(environment_version="mixed-scenarios-v1").environment_version == "mixed-scenarios-v1"

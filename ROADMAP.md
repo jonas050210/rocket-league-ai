@@ -34,6 +34,33 @@ A checkbox records evidence, not an aspiration. An interface, a configured CI jo
 
 The first two delivery verification gates have actual results in `docs/VERIFICATION.md`, not merely a configured job. The sandbox still lacks the native GUI runtime; the native pass is on Ubuntu/Xvfb CI with standard packages. The unchecked RTX/WSLg item is a separate operator-host gate, not an inferred pass or authorization to start another phase.
 
+## Implementation status — 2026-10-17 improvement-plan delivery
+
+Implemented and locally verified in this sandbox (CPU only, no GPU/display):
+P0 CI contracts repaired (seven views, evaluation capability), per-repeat
+benchmark statistics, stale metadata fixed; evaluation scaled (parallel
+games, frozen checkpoint opponents, progress, stop endpoint, additive schema
+migration); opt-in reward shaping (``shaped-v2``), ``mixed-scenarios-v1``
+starting states, exposed PPO ``clip_range``/``max_grad_norm``; next-experiment
+advice, checkpoint comparison UI, replay goal markers, light snapshots.
+
+Extension delivery (same day, packages A–E): evaluation scenarios and
+multi-seed wraps, per-frame replay action debug + JSON export, Elo ratings
+(checkpoint matches only), experiment journal with Wilson-separated
+verdicts, checkpoint league round-robin (confirmed start, sequential
+frozen matches), retention suggestions (never automatic), workspace-usage
+warning, recovery candidates, completion toasts, benchmark initialization
+overhead. Browser tests now cover the benchmark/evaluation surfaces.
+
+Still open and **not** executed (target-host / operator decisions):
+N0 CUDA/WSLg certification, N1 soak, GPU benchmark sweeps, the 400-game
+baseline, the first shaping experiment, any budget increase. Prepared
+step-by-step in [docs/TARGET_HOST.md](docs/TARGET_HOST.md).
+No gameplay improvement is claimed anywhere: the only measured evaluation
+remains 0W/0L/4D of a 384-step checkpoint vs random. PFSP-style opponent
+sampling, automatic hyperparameter tuning, 2v2/3v3 and 3D rendering were
+considered and deliberately deferred (see gap review in PR #5).
+
 ## N0 — Next: target-host certification (before tuning or skill claims)
 
 **Entry:** foundation tests pass; user explicitly authorizes any test training plan. Keep current plan/checkpoints unchanged until reviewed.
@@ -63,7 +90,11 @@ The first two delivery verification gates have actual results in `docs/VERIFICAT
 
 Pass/fail must identify the host and fault protocol. Unit fault injection is not evidence of physical power-loss durability. True sudden-power-loss certification remains a separate storage test.
 
-## N2 — Separately approved: frozen-opponent evaluator
+## N2 — Frozen-opponent evaluator (foundation implemented 2026-10-17)
+
+**Status:** implemented and verified on CPU in this sandbox. `training/evaluate.py` plays genuine side-balanced RocketSim games with a frozen checkpoint actor (greedy CPU inference) against seeded `random-v1`/`idle-v1` baselines; results persist with Wilson 95% intervals, goals and per-game records; checkpoints are compared by lower confidence bound in Models. A 384-step foundation checkpoint measured 0W/0L/4D vs random — a working baseline, not strength. Remaining for the full gate: 400-game comparisons on the target host, a frozen *learned* opponent pool/league, and promotion proposals backed by this evidence (designation is still manual).
+
+## N2-history — Original evaluator gate (superseded by the status above)
 
 **Why before recommendations:** training reward, entropy and checkpoint age do not establish playing strength.
 
@@ -80,7 +111,11 @@ Pass/fail must identify the host and fault protocol. Unit fault injection is not
 
 No competitive threshold/rank is promised by a 400-game harness. It can faithfully measure a weak baseline policy.
 
-## N3 — Separately approved: measured throughput characterization
+## N3 — Measured throughput characterization (benchmark implemented 2026-10-17)
+
+**Status:** the benchmark harness is implemented and verified on CPU in this sandbox: candidates (device × 1–8 env processes) run genuine bounded training runs through the existing worker; warm-up iterations are excluded; simulation/PPO/episode throughput, resource peaks and stability (CV ≤ 0.25) produce an explainable fastest-stable recommendation that is never auto-applied. First sandbox measurement (batch 128, 1 env): 1,529 agent steps/s. Remaining: the B2–B5 sweeps on the RTX target host below, which no CPU number substitutes for.
+
+## N3-history — Original throughput gates (still the target-host procedure)
 
 Preserve the intent of historical gates B1–B5, but use the actual locked stack and current safety contracts. No benchmark is currently passed on the RTX target.
 

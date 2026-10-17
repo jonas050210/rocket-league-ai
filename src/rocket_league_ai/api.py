@@ -13,10 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from . import __version__
-import uuid
-import time
+from .benchmark import BenchmarkSpec
 from .config import TrainingConfig
 from .domain import AppError
+from .evaluation import EvaluationSpec, compare_evaluations
 from .orchestration import Orchestrator
 
 
@@ -39,44 +39,6 @@ class ControlRequest(BaseModel):
 
 
 
-class BenchmarkConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    mode: Literal["cpu", "cuda", "mixed"] = "cpu"
-    warmup_steps: int = Field(default=100, ge=0, le=10000)
-    measurement_steps: int = Field(default=1000, ge=128, le=100000)
-    repeat_runs: int = Field(default=3, ge=1, le=50)
-    max_n_proc: int = Field(default=1, ge=1, le=8)
-    n_epochs: int = Field(default=1, ge=1, le=10)
-    batch_size: int = Field(default=512, ge=128, le=65536)
-
-class BenchmarkResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    mode: str
-    config_hash: str
-    warmup_steps: int
-    measurement_steps: int
-    repeat_runs: int
-    max_n_proc: int
-    n_epochs: int
-    batch_size: int
-    sim_throughput: float | None = None
-    ppo_throughput: float | None = None
-    episode_throughput: float | None = None
-    cpu_utilization: float | None = None
-    ram_used_mb: float | None = None
-    gpu_utilization: float | None = None
-    gpu_vram_used_mb: float | None = None
-    errors: list[str] = Field(default_factory=list)
-    timestamp: float
-    hardware_info: dict = {}
-
-class BenchmarkStatus(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    running: bool
-    current_mode: str | None
-    progress: float | None
-    completed_runs: int
-    error: str | None
 def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdown_timeout=20):
     @asynccontextmanager
     async def lifespan(app):
@@ -164,97 +126,44 @@ def create_app(root: Path, *, preview_readonly=False, stall_timeout=120, shutdow
 
     @app.get("/api/report", dependencies=[Depends(authorize)])
     def report():
-        return {"schema_version": 1, "scope": "foundation status; not a competitive evaluation",
+        return {"schema_version": 1, "scope": "measured foundation status plus benchmark/evaluation evidence",
                 "snapshot": app.state.manager.snapshot(),
                 "events": app.state.manager.store.events(0, 1000),
-                "limitations": ["No evaluator/renderer implemented", "No skill or win-rate claim",
+                "limitations": ["Replay viewer is a recorded top-down schematic, not a 3D renderer",
+                                "Evaluation covers scripted baselines only; no rank claim",
                                 "Recovery resets simulator episodes", "CUDA/WSLg require target-host verification"]}
 
-    
+    @app.post("/api/benchmarks", dependencies=[Depends(authorize)])
+    def start_benchmark(body: BenchmarkSpec):
+        return app.state.manager.start_benchmark(body)
 
-    @app.post("/api/benchmark/start", dependencies=[Depends(authorize)])
-    def start_benchmark(body: BenchmarkConfig):
-        """Start a reproducible benchmark session."""
-        run_id = uuid4().hex[:12]
+    @app.get("/api/benchmarks", dependencies=[Depends(authorize)])
+    def benchmarks():
         manager = app.state.manager
-        # Store benchmark config in the manager for the frontend to poll
-        if not hasattr(manager, "active_benchmark"):
-            manager.active_benchmark = {}
-        manager.active_benchmark["config"] = body.model_dump()
-        manager.active_benchmark["run_id"] = run_id
-        manager.active_benchmark["progress"] = 0
-        manager.active_benchmark["completed_runs"] = 0
-        manager.active_benchmark["current_mode"] = body["mode"]
-        manager.active_benchmark["errors"] = []
-        manager.active_benchmark["started_at"] = time.time()
-        return {"run_id": run_id, "status": "started", "message": "Benchmark session started. Use /api/benchmark/status to monitor."}
+        return {"sessions": manager.store.benchmarks(),
+                "latest": manager._benchmark_snapshot()}
 
-    @app.get("/api/benchmark/status", dependencies=[Depends(authorize)])
-    def benchmark_status():
-        """Get current benchmark session status."""
-        manager = app.state.manager
-        if hasattr(manager, "active_benchmark") and manager.active_benchmark:
-            bm = manager.active_benchmark
-            return {
-                "running": bm.get("progress", 0) < 100,
-                "current_mode": bm.get("current_mode"),
-                "progress": bm.get("progress", 0),
-                "completed_runs": bm.get("completed_runs", 0),
-                "error": bm.get("error"),
-            }
-        return {"running": False, "current_mode": None, "progress": 0, "completed_runs": 0, "error": None}
+    @app.post("/api/benchmarks/stop", dependencies=[Depends(authorize)])
+    def stop_benchmark():
+        return app.state.manager.stop_benchmark()
 
-    @app.post("/api/benchmark/step", dependencies=[Depends(authorize)])
-    def benchmark_step():
-        """Advance benchmark by one measurement step."""
-        manager = app.state.manager
-        if hasattr(manager, "active_benchmark") and manager.active_benchmark:
-            bm = manager.active_benchmark
-            progress = bm.get("progress", 0)
-            mode = bm.get("current_mode", "cpu")
-            # Simulate benchmark progress
-            if progress < 100:
-                bm["progress"] = min(progress + 10, 100)
-                if progress >= 90:  # Complete after final step
-                    bm["completed_runs"] = bm.get("completed_runs", 0) + 1
-                    bm["progress"] = 100
-            return {"progress": bm["progress"], "completed": bm["progress"] >= 100}
-        return {"progress": 0, "completed": True}
+    @app.post("/api/evaluations", dependencies=[Depends(authorize)])
+    def start_evaluation(body: EvaluationSpec):
+        return app.state.manager.start_evaluation(body)
 
-    @app.post("/api/benchmark/stop", dependencies=[Depends(authorize)])
-    def benchmark_stop():
-        """Stop the current benchmark session."""
+    @app.get("/api/evaluations", dependencies=[Depends(authorize)])
+    def evaluations():
         manager = app.state.manager
-        if hasattr(manager, "active_benchmark") and manager.active_benchmark:
-            bm = manager.active_benchmark
-            bm["progress"] = 100
-            return {"status": "stopped", "message": "Benchmark stopped."}
-        return {"status": "no_active_benchmark"}
+        return {"evaluations": manager.store.evaluations(),
+                "comparison": compare_evaluations(manager.store.evaluations())}
 
-    @app.get("/api/benchmark/results", dependencies=[Depends(authorize)])
-    def benchmark_results():
-        """Get benchmark results from the last completed session."""
-        manager = app.state.manager
-        # In a full implementation, this would persist results to disk
-        # For now, return structured placeholder based on configuration
-        if hasattr(manager, "active_benchmark") and manager.active_benchmark:
-            bm = manager.active_benchmark
-            config = bm.get("config", {})
-            return {
-                "run_id": bm.get("run_id"),
-                "mode": config.get("mode", "cpu"),
-                "sim_throughput": 0.0,  # Would be measured
-                "ppo_throughput": 0.0,  # Would be measured
-                "episode_throughput": 0.0,  # Would be measured
-                "cpu_utilization": None,
-                "ram_used_mb": None,
-                "gpu_utilization": None,
-                "gpu_vram_used_mb": None,
-                "errors": bm.get("errors", []),
-                "timestamp": time.time(),
-                "hardware_info": {"note": "Measured on backend host"},
-            }
-        return {"run_id": None, "mode": "cpu", "sim_throughput": 0.0, "ppo_throughput": 0.0, "episode_throughput": 0.0, "cpu_utilization": None, "ram_used_mb": None, "gpu_utilization": None, "gpu_vram_used_mb": None, "errors": [], "timestamp": time.time(), "hardware_info": {"note": "No benchmark has been run"}}
+    @app.post("/api/evaluations/{evaluation_id}/stop", dependencies=[Depends(authorize)])
+    def stop_evaluation(evaluation_id: str):
+        return app.state.manager.stop_evaluation(evaluation_id)
+
+    @app.get("/api/evaluations/{evaluation_id}/trajectory", dependencies=[Depends(authorize)])
+    def trajectory(evaluation_id: str):
+        return app.state.manager.trajectory(evaluation_id)
 
     assets = Path(__file__).parent / "web"
     app.mount("/assets", StaticFiles(directory=assets), name="assets")

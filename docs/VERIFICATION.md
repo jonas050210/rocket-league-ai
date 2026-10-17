@@ -111,3 +111,70 @@ Xvfb success does **not** certify interactive WSLg, the native file-save/cancel 
 - Renderer compatibility, curriculum/league, larger match modes, deployment/original-game control: not implemented, not tested, not part of this delivery.
 
 [ROADMAP.md](../ROADMAP.md) supplies measurable next criteria. Passing correctness checks never authorizes automatic strategy changes, training starts, model promotion or valuable-data deletion.
+
+## Addendum — benchmark / evaluation / replay delivery (2026-10-17, this session)
+
+Environment: Debian 12, Python 3.11.2 venv with the locked training stack pip-installed (torch 2.9.1+cu128, `cuda.is_available() == False`), 2 cores, ~3 GiB RAM, no GPU/display. This is a CPU correctness environment, not the RTX target host.
+
+Executed and verified:
+
+| Command / flow | Result |
+|---|---|
+| `pytest -q -m 'not desktop'` (full suite incl. real-training integration) | **114 passed, 2 deselected** in ~59 s (98 pre-existing + 16 new) |
+| `ruff check src tests`; `node --check src/rocket_league_ai/web/app.js` | Passed (the previously broken benchmark UI JavaScript now parses) |
+| New genuine integration: real benchmark measurement run | Passed — bounded 384-step CPU run measured through the existing worker |
+| New genuine integration: real evaluation of a trained checkpoint | Passed — side-balanced games vs `idle-v1`, trajectory frames recorded, kickoff ball at centre verified |
+| Live backend + HTTP benchmark | Session completed: **1,529 agent steps/s** (2,485 sim steps/s, 10,514 PPO steps/s, 352.7 episodes/min, batch 128, 1 env, this sandbox) with a fastest-stable recommendation |
+| Live HTTP evaluation vs `random-v1` (384-step checkpoint, 4 games) | **0W/0L/4D, goals 0–0, win rate 0% (95% CI 0–49%)** — an honest weak baseline; no improvement claimed |
+| Replay artifact | 302 decision-rate frames over 4 games; sides alternate blue/orange; first-frame car/ball kickoff positions correct |
+
+Not executed here (target-host gates, unchanged): CUDA/RTX 4060 Ti throughput sweeps, WSLg native desktop certification, 400-game evaluation comparisons, 30-minute soak, sudden-power-loss storage test. Browser UI tests (`npm test`) were not re-run in this sandbox; the UI was verified by syntax check, API-level flows and the live backend above.
+
+## Addendum — improvement-plan delivery (2026-10-17, this session)
+
+Executed in the CPU sandbox (no GPU/display; CUDA gates remain open):
+
+- P0: desktop/browser contracts updated to the real seven views and the
+  implemented evaluation capability; benchmark aggregation is per repeat
+  (constructed-data test proves warm-ups of later repeats no longer leak);
+  run metadata no longer claims evaluation is unimplemented.
+- P1: genuine integration test plays a parallel (2 workers) mirror
+  evaluation — candidate vs its own frozen checkpoint, 4 games, completed
+  with progress persisted; checkpoint opponents are labelled
+  `checkpoint:<id>`; additive `progress` migration verified against an
+  old-schema database.
+- P2: shaped-v2 + mixed-scenarios config trains genuinely (256 steps) and
+  saves a valid checkpoint; mixed scenarios produce varied real resets;
+  shaping direction/normalization unit-tested from physics state.
+- P3: snapshot evaluations are light (detail verified only via the
+  evaluations API), next-experiment suggestions unit-tested, checkpoint
+  comparison and replay goal markers are frontend-only honest renderings.
+
+Not executed: browser/native CI suites for these commits (running on the
+PR), all RTX/WSLg items, the 400-game baseline, any shaping/budget
+experiment. See docs/TARGET_HOST.md for the prepared procedures.
+
+
+## Addendum — extension packages A–E (2026-10-17, this session)
+
+- **A**: scenario-override evaluation (kickoff/mixed), multi-seed wrap
+  scheduling with per-game persisted seeds, replay frames carry the
+  chosen candidate action, its policy probability and the decoded
+  control vector (lookup table incl. idle action 8); action readout and
+  JSON export in the viewer. Unit tests incl. FakeEnv action recording.
+- **B**: chronological Elo (K=32, start 1500) over checkpoint-vs-
+  checkpoint evaluations only; scripted baselines never contribute.
+  Experiment journal diffs run configs and only claims an effect when
+  Wilson intervals separate. Partial/legacy records are tolerated.
+- **C**: league round-robin service over 2–6 frozen checkpoints, one
+  side-balanced match per pair through the normal evaluation pipeline;
+  genuine integration test trains a real run, runs a 2-checkpoint
+  league to completion and asserts both enter the Elo table.
+- **D**: retention candidates (beyond five newest per run; designated
+  best and last-valid per run protected; suggestions only, deletion
+  stays a confirmed individual proposal), measured workspace size with
+  a >5 GB warning, recovery candidates panel, terminal-transition
+  toasts, per-candidate benchmark initialization overhead.
+- **E**: Playwright coverage extended to Models (evaluation + league)
+  and Benchmark surfaces in the read-only preview; `npm run test:ui`
+  passes locally (4 passed, 1 platform-conditional skip).

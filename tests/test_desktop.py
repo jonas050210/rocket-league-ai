@@ -26,7 +26,7 @@ def desktop_smoke(root, url, screenshot):
         capture_output=True, text=True, timeout=40,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "six views loaded, backend connected; closing GUI only" in result.stdout
+    assert "seven views loaded, backend connected; closing GUI only" in result.stdout
     assert screenshot.is_file() and screenshot.stat().st_size > 1000
     assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 

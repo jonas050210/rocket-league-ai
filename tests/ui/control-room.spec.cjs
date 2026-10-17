@@ -60,7 +60,7 @@ const prepareDraft = async (page, overrides = {}) => {
 };
 
 // These tests drive the actual application and real PPO workers, never a mocked API.
-test("read-only preview: all six views, honest unavailable features, offline assets, responsive layout", async ({
+test("read-only preview: all seven views, honest unavailable features, offline assets, responsive layout", async ({
   page,
 }, info) => {
   const errors = [],
@@ -71,7 +71,7 @@ test("read-only preview: all six views, honest unavailable features, offline ass
   });
   await page.goto(preview);
   await expect(page.locator("#connection")).toHaveText("Backend connected");
-  await expect(page.locator("#navigation [data-nav]")).toHaveCount(6);
+  await expect(page.locator("#navigation [data-nav]")).toHaveCount(7);
   await expect(
     page.getByRole("button", { name: "New training run" }),
   ).toBeDisabled();
@@ -82,6 +82,7 @@ test("read-only preview: all six views, honest unavailable features, offline ass
     models: "Models",
     configuration: "Configuration",
     visualization: "Visualization",
+    benchmark: "Benchmark",
   };
   for (const [route, title] of Object.entries(headings)) {
     await nav(page, route);
@@ -96,9 +97,18 @@ test("read-only preview: all six views, honest unavailable features, offline ass
       ),
     ).toBe(true);
   }
+  await nav(page, "visualization");
   await expect(
-    page.getByText("NOT IMPLEMENTED · NO SIMULATED PLAYBACK"),
+    page.getByText("Run an evaluation from Models to record a replay."),
   ).toBeVisible();
+  await nav(page, "models");
+  await expect(page.getByText("Checkpoint evaluation")).toBeVisible();
+  await expect(page.getByText("Checkpoint league")).toBeVisible();
+  await nav(page, "benchmark");
+  await expect(
+    page.getByRole("button", { name: "Start benchmark" }),
+  ).toBeDisabled();
+  await expect(page.getByText("No benchmark has been run yet.")).toBeVisible();
   await nav(page, "configuration");
   await expect(
     page.getByRole("button", { name: "Validate draft" }),
@@ -204,6 +214,14 @@ test("real GUI vertical slice: validate, review, reject, approve, pause, reconne
   await expect(
     page.getByRole("button", { name: "Stop run", exact: true }),
   ).toBeDisabled();
+  await nav(page, "models");
+  await expect(page.getByText("Checkpoint evaluation")).toBeVisible();
+  await expect(page.getByText("Checkpoint league")).toBeVisible();
+  await nav(page, "benchmark");
+  await expect(
+    page.getByRole("button", { name: "Start benchmark" }),
+  ).toBeDisabled();
+  await expect(page.getByText("No benchmark has been run yet.")).toBeVisible();
   await nav(page, "configuration");
   await expect(
     page.getByRole("button", { name: "Validate draft" }),
@@ -303,7 +321,8 @@ test("real GUI vertical slice: validate, review, reject, approve, pause, reconne
   await download.saveAs(filename);
   const report = JSON.parse(fs.readFileSync(filename, "utf8"));
   expect(report.snapshot.runs[0].metrics.steps).toBeGreaterThan(0);
-  expect(report.snapshot.evaluation_available).toBe(false);
+  expect(report.snapshot.evaluation_available).toBe(true);
+  expect(report.snapshot.evaluations).toEqual([]);
   expect(JSON.stringify(report)).not.toContain(key());
 
   await first.getByRole("button", { name: "Recover", exact: true }).click();

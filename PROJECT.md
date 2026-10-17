@@ -16,7 +16,9 @@ Deliver a small, observable, recoverable learning application before optimizing 
 - Explicitly initiated runs, update-boundary pause/resume/stop, failure reporting, verified checkpoints and confirmed recovery.
 - Immutable experiment configuration, reproducibility metadata (including actual training source hash), structured durable events and conservative advisory monitoring.
 
-**Not implemented:** evaluator, frozen opponent pool/league, curriculum, observation renderer/playback, original-game/RLBot control, deployment export, 2v2/3v3, competitive training, automatic strategy changes, automatic best-model promotion or automatic deletion. Interfaces for evaluation/opponents/visualization are contracts, not working substitutes.
+**Improvement-plan delivery (2026-10-17):** CI contracts repaired for the seven-view UI; benchmark statistics are per-repeat (warm-up excluded per repeat, CV across repeat medians); evaluation scales to parallel game workers and frozen checkpoint opponents with progress/stop and additive schema migration; opt-in `shaped-v2` reward components and `mixed-scenarios-v1` starting states are available as separately approved experiment variables (defaults unchanged); PPO clip/grad-norm are validated config fields; Models compares checkpoints with CI-aware verdicts; the dashboard proposes one evidence-linked next experiment. Prepared but **not executed**: RTX/WSLg certification, GPU sweeps, 400-game baseline, shaping experiment, budget increase — see [docs/TARGET_HOST.md](docs/TARGET_HOST.md).
+
+**Implemented since the foundation:** a genuine hardware benchmark (bounded real runs, warm-up exclusion, median/CV statistics, explainable fastest-stable recommendation; adoption only via confirmed `apply_config`), a frozen-checkpoint evaluator against seeded scripted baselines (`random-v1`, `idle-v1`) with side-balanced games, Wilson confidence intervals and recorded replays, and a top-down replay viewer for those recordings. **Not implemented:** frozen opponent pool/league, curriculum, 3D/live renderer, original-game/RLBot control, deployment export, 2v2/3v3, competitive training, automatic strategy changes, automatic best-model promotion or automatic deletion.
 
 ## 2. Non-negotiable control rules
 
@@ -38,9 +40,9 @@ Deliver a small, observable, recoverable learning application before optimizing 
 | Dashboard | Connection/run state, agent steps, episodes, measured reward/throughput history, entropy, measured host CPU/RAM and best-effort GPU telemetry, activity, report | Missing readings show unavailable; win rate says not evaluated |
 | Training | Review/start, pause/resume/stop, budget/progress, immutable metadata, experiment history, recovery action | Learner/update-boundary acknowledgement, not bit-exact match continuation |
 | Monitoring | Cursor-resumed structured logs, warning/error filters, text search, worker heartbeat, resources, backend health, advisory insights | GPU NVML information may be unsupported under WSL |
-| Models | Real inventory, SHA-256 integrity, metadata inspection, confirmed recovery/designation/deletion, protections | No evaluator or strength-based checkpoint recommendation |
+| Models | Real inventory, SHA-256 integrity, metadata inspection, confirmed recovery/designation/deletion, protections; frozen-checkpoint evaluation vs scripted baselines with Wilson intervals and checkpoint comparison | Scripted baselines only; no league, no rank claim; designation remains manual |
 | Configuration | Validated draft, complete JSON, cross-field errors, visible changes and reviewed apply; approved-plan revision | Draft editing/validation has no training side effect |
-| Visualization | Documented observation/action contract and a dedicated future integration surface | Explicitly no renderer and no simulated playback |
+| Visualization | Recorded-replay viewer: top-down schematic rendering of genuine evaluation trajectories (play/pause/scrub/speed/follow-ball), independent of training | Recorded replays only; no live or 3D renderer (NumPy/renderer conflict documented) |
 
 The client uses relative same-origin URLs and local assets only. No CDN, JavaScript framework, telemetry service, W&B account or npm runtime is needed. The browser diagnostic client and native window use exactly the same application UI.
 

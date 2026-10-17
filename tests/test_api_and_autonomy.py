@@ -22,8 +22,10 @@ def test_launch_has_no_training_side_effect(client, manager):
     assert client.get("/api/health").json()["training_auto_start"] is False
     state = client.get("/api/snapshot").json()
     assert state["runs"] == [] and state["active_run"] is None
-    assert state["evaluation_available"] is False
-    assert state["visualization_available"] is False
+    from rocket_league_ai.metadata import package_versions
+    assert state["evaluation_available"] is all(v is not None for v in package_versions().values())
+    assert state["visualization_available"] is True  # recorded-replay viewer
+    assert state["benchmark"]["session"] is None and state["evaluations"] == []
     assert state["designated_best"] is None
     assert manager.active is None
     assert os.stat(manager.root / "access-token").st_mode & 0o777 == 0o600
@@ -161,8 +163,10 @@ def test_preview_is_read_only_without_capability(tmp_path):
 def test_report_does_not_invent_evaluations(client):
     report = client.get("/api/report").json()
     assert report["snapshot"]["checkpoints"] == []
-    assert report["snapshot"]["evaluation_available"] is False
-    assert "not a competitive evaluation" in report["scope"]
+    # No evaluation has run, so none may be reported; availability reflects the stack.
+    assert report["snapshot"]["evaluations"] == []
+    assert report["snapshot"]["evaluation_comparison"] == []
+    assert "benchmark/evaluation evidence" in report["scope"]
     assert "access-token" not in json.dumps(report)
 
 
