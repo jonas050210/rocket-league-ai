@@ -60,7 +60,8 @@ class SystemMonitor:
 
 
 def recommendations(runs: list[dict], system: dict, *, evaluations: list[dict] | None = None,
-                    metric_history: list[dict] | None = None, benchmark: dict | None = None) -> list[dict]:
+                    metric_history: list[dict] | None = None, benchmark: dict | None = None,
+                    workspace_bytes: int | None = None) -> list[dict]:
     """Read-only insights from genuine measurements; no executor ever acts on them."""
     result = []
     if not system.get("gpu_name"):
@@ -75,11 +76,20 @@ def recommendations(runs: list[dict], system: dict, *, evaluations: list[dict] |
         result.append({"severity": "warning", "title": "Host memory pressure",
                        "rationale": "Measured memory utilization exceeds 90%",
                        "impact": "Consider a smaller process/buffer budget for a new experiment. No changes applied."})
-    result.extend(_extra_insights(runs, evaluations, metric_history, benchmark))
+    result.extend(_extra_insights(runs, evaluations, metric_history, benchmark, workspace_bytes))
     return result
 
 
-def _extra_insights(runs, evaluations, metric_history, benchmark) -> list[dict]:
+def _extra_insights(runs, evaluations, metric_history, benchmark, workspace_bytes=None) -> list[dict]:
+    result = _extra_insights_impl(runs, evaluations, metric_history, benchmark)
+    if workspace_bytes is not None and workspace_bytes > 5 * 1024**3:
+        result.insert(0, {"severity": "warning", "title": "Workspace disk usage is growing",
+                          "rationale": f"The workspace occupies {workspace_bytes / 1024**3:.1f} GB; checkpoints are never pruned automatically.",
+                          "impact": "Review retention candidates in Models; deletion always requires an individual confirmed proposal."})
+    return result
+
+
+def _extra_insights_impl(runs, evaluations, metric_history, benchmark) -> list[dict]:
     """Bottleneck, stagnation and next-experiment insights from real records only."""
     result = []
     latest = runs[0] if runs else None

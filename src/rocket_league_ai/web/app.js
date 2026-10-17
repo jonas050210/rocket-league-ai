@@ -338,6 +338,7 @@ function dashboard() {
         ),
     ) +
     runError(run) +
+    (state.recovery_candidates?.length ? `<div class="callout">${icon("refresh")}<div class="callout-copy"><strong>Recovery available</strong><p>${state.recovery_candidates.map((item) => `${esc(item.name)} (${esc(item.status)})`).join(" · ")} — a verified checkpoint exists. Recovery always starts a new linked run after your confirmation.</p></div>${button("recover", "Review recovery", "refresh", "secondary", !writable() || !idle(), `data-run-id="${state.recovery_candidates[0].run_id}"`)}</div>` : "") +
     metricsGrid(run) +
     `<div class="two-col"><section class="panel active-run"><div class="panel-header"><h2>Active experiment</h2>${statusPill(state.active_run?.status)}</div><div class="run-stage"><div class="run-copy"><h2>${state.active_run ? esc(run.name) : "Your next run<br>starts here."}</h2><p>${state.active_run ? "Real 1v1 simulation, one shared policy, and an explicit plan. Your run continues independently of this window." : "A focused foundation for a self-trained agent. Start small, observe clearly, and build on verified results."}</p><a class="button secondary" href="#training">${icon(state.active_run ? "monitoring" : "training")}${state.active_run ? "View training run" : "Open training controls"}${icon("arrow")}</a></div>${fieldArt()}</div><div class="run-footer"><span>${icon("cpu")}<b>HEADLESS</b></span><span>1v1 Soccar <b>·</b> Tick skip 8</span><span>${icon("lock")}User-initiated only</span></div></section>${readiness()}</div><div class="two-col">${chart(run)}${resources(system)}</div><div class="two-col balanced">${recentActivity()}<section class="panel"><div class="panel-header"><div><h2>Policy health</h2><p>Learning is not the same as winning</p></div>${icon("trophy")}</div><div class="metric-pairs"><div class="metric-pair"><span>Policy entropy</span><strong>${number(m.entropy, 3)}</strong></div><div class="metric-pair"><span>Evaluation win rate</span><strong>${(state.evaluation_comparison || [])[0] ? `${number(state.evaluation_comparison[0].win_rate * 100, 0)}% vs ${esc(state.evaluation_comparison[0].opponent_id)}` : "Not evaluated"}</strong></div></div><div class="panel-body"><div class="system-note">${icon("info")}<span>${(state.evaluation_comparison || [])[0] ? `Best measured checkpoint by lower 95% bound over ${state.evaluation_comparison[0].games} games. See Models for intervals and opponents.` : "No win rate is inferred from self-play reward. Evaluate a checkpoint in Models against a frozen scripted baseline."}</span></div></div></section></div>`
   );
@@ -434,7 +435,7 @@ function models() {
       "Recovery-ready checkpoints. Preserved by default, never automatically pruned.",
       button("report", "Export inventory", "download", "secondary", !connected),
     ) +
-    `<div class="stat-grid">${stat("Saved checkpoints", number(state.checkpoints.length), "", "Published, not pending writes", "models")}${stat("Integrity verified", number(valid.length), "", "SHA-256 file manifests", "shield")}${stat("Designated best", best ? "Manually set" : "Not set", "", "Explicit user designation only", "trophy")}${stat("Evaluation results", number((state.evaluations || []).filter((item) => item.status === "completed").length), "", "Frozen-opponent evaluations only", "chart")}</div><section class="panel"><div class="panel-header"><div><h2>Checkpoint inventory</h2><p>Click a checkpoint to inspect its real metadata and recovery contract</p></div><span class="pill muted-pill">LOCAL STORAGE</span></div>${
+    `<div class="stat-grid">${stat("Saved checkpoints", number(state.checkpoints.length), "", "Published, not pending writes", "models")}${stat("Integrity verified", number(valid.length), "", "SHA-256 file manifests", "shield")}${stat("Designated best", best ? "Manually set" : "Not set", "", "Explicit user designation only", "trophy")}${stat("Evaluation results", number((state.evaluations || []).filter((item) => item.status === "completed").length), "", "Frozen-opponent evaluations only", "chart")}${stat("Workspace usage", bytes(state.workspace_bytes), "", "Checkpoints are never pruned automatically", "cpu")}</div><section class="panel"><div class="panel-header"><div><h2>Checkpoint inventory</h2><p>Click a checkpoint to inspect its real metadata and recovery contract</p></div><span class="pill muted-pill">LOCAL STORAGE</span></div>${
       state.checkpoints.length
         ? `<div class="table-wrap"><table><thead><tr><th>CHECKPOINT</th><th>AGENT STEPS</th><th>INTEGRITY</th><th>EVALUATION</th><th>ACTIONS</th></tr></thead><tbody>${state.checkpoints
             .map((item) => {
@@ -460,7 +461,7 @@ function models() {
             `<a class="button secondary" href="#training">${icon("training")}Open training</a>`,
           )
     }</section><div class="two-col balanced" style="margin-top:20px"><section class="panel"><div class="panel-header"><div><h2>Recommended candidates</h2><p>Evidence before promotion</p></div><span class="pill muted-pill">EVALUATION-BACKED</span></div><div class="panel-body">${(state.evaluation_comparison || []).length ? `<div class="system-note">${icon("info")}<span>Ranked by lower 95% Wilson bound in the evaluation table below. Designation remains manual and requires your confirmation.</span></div>` : `<div class="system-note">${icon("info")}<span>No candidates are recommended without measured, frozen-opponent evaluation results. A manual designation is not proof of strength.</span></div>`}</div></section><section class="panel"><div class="panel-header"><div><h2>Recovery contract</h2><p>Clear about what is restored</p></div>${icon("shield")}</div><div class="panel-body"><p class="resource-note">Actor, critic, optimizers, experience buffer, GAE statistics, RNG state, and counters are restored at a completed update. New simulator episodes start after recovery. The original run and checkpoints remain untouched.</p></div></section></div>` +
-    evaluationSection(valid) + compareSection(valid) + ratingsJournalSection() + leagueSection(valid)
+    evaluationSection(valid) + compareSection(valid) + ratingsJournalSection() + leagueSection(valid) + retentionSection()
   );
 }
 let compareSelection = { a: "", b: "" };
@@ -500,6 +501,16 @@ function leagueSection(valid) {
   const checks = valid.map((item) => `<label class="approval-check"><input type="checkbox" data-league-checkpoint value="${item.run_id}|${item.id}"> ${esc(item.id.slice(0, 24))} · step ${number(item.step)}</label>`).join("");
   const rows = leagues.map((item) => `<tr><td>${esc(item.id.slice(0, 12))}<small>${date(item.created)}</small></td><td>${esc(item.status)}</td><td>${(item.evaluation_ids || []).length} match(es)</td><td>${item.status === "running" ? button("stop-league", "Stop league", "stop", "ghost", !writable(), `data-league-id="${item.id}"`) : ""}${item.error ? esc(item.error) : ""}</td></tr>`).join("");
   return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Checkpoint league</h2><p>Round-robin of frozen matches · one side-balanced match per pair · feeds Elo ratings</p></div><span class="pill muted-pill">${running ? "RUNNING" : "EXPLICIT START ONLY"}</span></div><div class="panel-body"><fieldset class="field"><legend>League checkpoints (2–6)</legend>${checks || "No valid checkpoints yet."}</fieldset><div class="form-grid"><label class="field">Games per pair (even)<input id="league-games" type="number" min="2" max="100" step="2" value="20"></label><label class="field">Parallel workers<input id="league-workers" type="number" min="1" max="8" value="2"></label></div><div class="config-actions">${button("start-league", "Start league", "trophy", "primary", !writable() || !idle() || valid.length < 2 || running)}</div><p class="subtle">Every match is a normal frozen evaluation recorded above; nothing is promoted or deleted. Stop ends the current match without a partial result.</p></div>${rows ? `<div class="table-wrap"><table><thead><tr><th>LEAGUE</th><th>STATUS</th><th>MATCHES</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}</section>`;
+}
+function retentionSection() {
+  const candidates = state.retention_candidates || [];
+  if (!candidates.length) return "";
+  const rows = candidates.map((item) => {
+    const target = `data-run-id="${item.run_id}" data-checkpoint-id="${item.id}"`;
+    return `<tr><td>${esc(item.id.slice(0, 24))}<small>${esc(item.run_name)}</small></td><td>${number(item.step)}</td><td>${bytes(item.reclaimable_bytes)}</td><td>${button("delete-checkpoint", "Delete", "delete", "ghost", !writable() || !idle(), target)}</td></tr>`;
+  }).join("");
+  const total = candidates.reduce((sum, item) => sum + item.reclaimable_bytes, 0);
+  return `<section class="panel" style="margin-top:20px"><div class="panel-header"><div><h2>Retention candidates</h2><p>Older checkpoints beyond the five newest per run · ${bytes(total)} reclaimable · protections unchanged</p></div><span class="pill muted-pill">SUGGESTIONS ONLY</span></div><div class="table-wrap"><table><thead><tr><th>CHECKPOINT</th><th>STEP</th><th>SIZE</th><th></th></tr></thead><tbody>${rows}</tbody></table></div><div class="panel-body"><p class="subtle">Nothing is deleted automatically. Each deletion is its own reviewed, confirmed proposal; the designated best and each run's last valid checkpoint never appear here.</p></div></section>`;
 }
 function configInput(
   label,
@@ -667,7 +678,7 @@ function benchmarkLive() {
   const rows = bench.results
     .map((item) => {
       const a = item.aggregate;
-      return `<tr><td>${esc(item.candidate.device)} · ${item.candidate.n_proc} env</td><td>${esc(item.status)}${item.status === "running" ? ` · ${number((item.progress || 0) * 100, 0)}% ${button("stop-evaluation", "Stop", "stop", "ghost", !writable(), `data-evaluation-id="${item.id}"`)}` : ""}</td><td>${a ? number(a.agent_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.simulation_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.ppo_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.episodes_per_minute, 1) : "—"}</td><td>${a ? number(a.agent_steps_per_second.cv, 2) : "—"}</td><td>${item.resources ? `${number(item.resources.cpu_percent_peak, 0)}% CPU · ${number(item.resources.memory_percent_peak, 0)}% RAM` : "—"}</td><td>${item.error ? esc(item.error) : ""}</td></tr>`;
+      return `<tr><td>${esc(item.candidate.device)} · ${item.candidate.n_proc} env</td><td>${esc(item.status)}${item.status === "running" ? ` · ${number((item.progress || 0) * 100, 0)}% ${button("stop-evaluation", "Stop", "stop", "ghost", !writable(), `data-evaluation-id="${item.id}"`)}` : ""}</td><td>${a ? number(a.agent_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.simulation_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.ppo_steps_per_second.median, 1) : "—"}</td><td>${a ? number(a.episodes_per_minute, 1) : "—"}</td><td>${a ? number(a.agent_steps_per_second.cv, 2) : "—"}</td><td>${item.resources ? `${number(item.resources.cpu_percent_peak, 0)}% CPU · ${number(item.resources.memory_percent_peak, 0)}% RAM${item.resources.initialization_seconds != null ? ` · init ${number(item.resources.initialization_seconds, 1)}s` : ""}` : "—"}</td><td>${item.error ? esc(item.error) : ""}</td></tr>`;
     })
     .join("");
   const rec = session.recommendation;
@@ -751,7 +762,14 @@ async function refresh() {
         api("snapshot"),
         api(`events?after=${cursor}&limit=200`),
       ]);
+      const previousStatuses = state ? Object.fromEntries(state.runs.map((run) => [run.id, run.status])) : {};
       state = snapshot;
+      for (const run of state.runs) {
+        const before = previousStatuses[run.id];
+        if (before && before !== run.status && ["completed", "failed", "interrupted"].includes(run.status)) {
+          toast(`Run ${run.name} ${run.status}.`, run.status !== "completed");
+        }
+      }
       events.push(...batch.events);
       events = events.slice(-1200);
       cursor = batch.cursor;

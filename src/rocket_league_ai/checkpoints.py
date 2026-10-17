@@ -168,3 +168,27 @@ class CheckpointStore:
         if config_hash is not None and item["config_hash"] != config_hash:
             raise AppError("Checkpoint configuration hash mismatch. Recover using its immutable original config.")
         return item
+
+
+def retention_candidates(models: list[dict], designated_best: dict | None,
+                         latest_valid: dict, *, keep_per_run: int = 5) -> list[dict]:
+    """Checkpoints that *could* be proposed for deletion. Never deletes.
+
+    Keeps the newest ``keep_per_run`` valid checkpoints per run and always
+    protects the designated best and each run's latest valid checkpoint
+    (mirroring the delete protections enforced by the orchestrator).
+    """
+    valid = [item for item in models if item["integrity"] == "valid"]
+    by_run: dict[str, list[dict]] = {}
+    for item in valid:
+        by_run.setdefault(item["run_id"], []).append(item)
+    candidates = []
+    for run_id, items in by_run.items():
+        ordered = sorted(items, key=lambda value: (value["step"], value["created"]), reverse=True)
+        for item in ordered[keep_per_run:]:
+            if designated_best and item["id"] == designated_best.get("checkpoint_id"):
+                continue
+            if latest_valid.get(run_id) == item["id"]:
+                continue
+            candidates.append({**item, "reclaimable_bytes": sum(f["bytes"] for f in item["files"].values())})
+    return candidates

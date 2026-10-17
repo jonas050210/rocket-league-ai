@@ -48,3 +48,23 @@ def test_snapshot_evaluations_are_light_but_api_keeps_detail(client, manager):
     full = client.get("/api/evaluations").json()
     assert full["evaluations"][0]["result"]["games_detail"] == [{"index": 0}]
     assert snapshot["next_experiment"] is not None
+
+
+def test_retention_candidates_keep_newest_and_protected():
+    from rocket_league_ai.checkpoints import retention_candidates
+
+    def item(step, run="r"):
+        return {"id": f"step-{step:012d}-abcdef012345", "run_id": run, "run_name": "run",
+                "step": step, "created": float(step), "integrity": "valid",
+                "files": {"a": {"bytes": 10}}}
+
+    models = [item(step) for step in (0, 100, 200, 300, 400, 500, 600, 700)]
+    candidates = retention_candidates(models, {"checkpoint_id": models[0]["id"]}, {"r": models[-1]["id"]}, keep_per_run=5)
+    kept = {item["step"] for item in models} - {item["step"] for item in candidates}
+    assert kept == {300, 400, 500, 600, 700}
+    assert all(item["reclaimable_bytes"] == 10 for item in candidates)
+
+
+def test_disk_insight_uses_measured_workspace_size():
+    titles = [item["title"] for item in recommendations([], SYSTEM, workspace_bytes=6 * 1024**3)]
+    assert "Workspace disk usage is growing" in titles

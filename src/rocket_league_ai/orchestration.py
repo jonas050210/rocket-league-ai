@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .benchmark import BenchmarkSpec, aggregate_iterations, combine_repeats, recommend
-from .checkpoints import CheckpointStore, file_hash
+from .checkpoints import CheckpointStore, file_hash, retention_candidates
 from .config import TrainingConfig, changes, digest
 from .domain import ACTIVE, TERMINAL, AppError, EvaluationResult, RunStatus, control_target
 from .evaluation import (
@@ -65,6 +65,7 @@ class Orchestrator:
             self.evaluation_stop = threading.Event()
             self.league_stop = threading.Event()
             self.evaluation_process: subprocess.Popen | None = None
+            self._workspace_bytes_cache: tuple[float, int] = (0.0, 0)
             self.token = self._load_token()
             self.system = SystemMonitor()
             self.watchdog = threading.Thread(target=self._watch, daemon=True, name="worker-supervisor")
@@ -124,7 +125,7 @@ class Orchestrator:
                     runs, system,
                     evaluations=self.store.evaluations(limit=10, light=True),
                     metric_history=[event["data"] for event in self.store.events_for_run(runs[0]["id"], "training_metrics")] if runs else [],
-                    benchmark=self._benchmark_snapshot(),
+                    benchmark=self._benchmark_snapshot(), workspace_bytes=self.workspace_bytes(),
                 ),
                 "training_packages": package_versions(),
                 "evaluation_available": all(version is not None for version in package_versions().values()),
@@ -132,6 +133,13 @@ class Orchestrator:
                 "benchmark": self._benchmark_snapshot(),
                 "evaluations": self.store.evaluations(light=True),
                 "evaluation_comparison": compare_evaluations(self.store.evaluations(light=True)),
+                "workspace_bytes": self.workspace_bytes(),
+                "retention_candidates": retention_candidates(models, self.store.setting("designated_best"), latest),
+                "recovery_candidates": [
+                    {"run_id": run["id"], "name": run["name"], "status": run["status"],
+                     "checkpoint_id": latest[run["id"]]}
+                    for run in runs if run["status"] in {"failed", "interrupted", "stopped"} and latest.get(run["id"])
+                ],
                 "leagues": self.store.leagues(),
                 "checkpoint_ratings": elo_ratings(self.store.evaluations(light=True)),
                 "experiment_journal": experiment_journal(runs, self.store.evaluations(light=True)),
@@ -328,6 +336,20 @@ class Orchestrator:
         return {"run_id": run["id"]}
 
     # -- Hardware benchmark (genuine bounded runs, never auto-applied) -------
+    def workspace_bytes(self) -> int:
+        now = time.monotonic()
+        if now - self._workspace_bytes_cache[0] < 60:
+            return self._workspace_bytes_cache[1]
+        total = 0
+        for path in self.root.rglob("*"):
+            try:
+                if path.is_file() and not path.is_symlink():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+        self._workspace_bytes_cache = (now, total)
+        return total
+
     def _benchmark_snapshot(self):
         sessions = self.store.benchmarks(limit=1)
         if not sessions:
@@ -399,7 +421,10 @@ class Orchestrator:
                 per_repeat = [aggregate_iterations(iterations, spec.warmup_iterations, spec.batch_size)
                               for iterations in repeats_iterations]
                 aggregate = combine_repeats(per_repeat)
+                init_samples = [item["initialization_seconds"] for item in resources
+                                if item.get("initialization_seconds") is not None]
                 merged = {
+                    "initialization_seconds": sorted(init_samples)[len(init_samples) // 2] if init_samples else None,
                     "cpu_percent_peak": max((item["cpu_percent_peak"] for item in resources), default=None),
                     "memory_percent_peak": max((item["memory_percent_peak"] for item in resources), default=None),
                     "gpu_percent_peak": max((item["gpu_percent_peak"] for item in resources if item.get("gpu_percent_peak") is not None), default=None),
@@ -436,10 +461,14 @@ class Orchestrator:
             launched = self._launch(config)
         run_id = launched["run_id"]
         peaks = {"cpu_percent_peak": 0.0, "memory_percent_peak": 0.0,
-                 "gpu_percent_peak": None, "gpu_memory_used_mib_peak": None, "gpu_peak_bytes": None}
-        deadline = time.monotonic() + spec.timeout_seconds
+                 "gpu_percent_peak": None, "gpu_memory_used_mib_peak": None, "gpu_peak_bytes": None,
+                 "initialization_seconds": None}
+        launched_at = time.monotonic()
+        deadline = launched_at + spec.timeout_seconds
         run = self.store.run(run_id)
         while run["status"] in ACTIVE and time.monotonic() < deadline and not self.benchmark_stop.is_set():
+            if peaks["initialization_seconds"] is None and (run.get("metrics") or {}).get("steps"):
+                peaks["initialization_seconds"] = time.monotonic() - launched_at
             sample = self.system.snapshot()
             peaks["cpu_percent_peak"] = max(peaks["cpu_percent_peak"], sample.get("cpu_percent") or 0)
             peaks["memory_percent_peak"] = max(peaks["memory_percent_peak"], sample.get("memory_percent") or 0)
