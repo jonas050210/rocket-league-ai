@@ -219,6 +219,8 @@ class Trainer:
             ("eval/goals_against", result["goals_against"]),
             ("eval/goal_diff", result["goal_diff"]),
             ("eval/games", result["games"]),
+            ("eval/touches", float(result["touches"])),
+            ("eval/draw_rate", result["draws"] / max(result["games"], 1)),
         ):
             self._metric(key, value)
         self._log(

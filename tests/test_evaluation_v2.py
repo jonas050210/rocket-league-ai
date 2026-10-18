@@ -86,4 +86,17 @@ def test_legacy_190_observation_policy_evaluates(models_dir):
         episode_seconds=5.0,
     )
     assert result["obs_version"] == 1
+    assert result["stochastic"] is False
     assert np.isfinite(result["win_rate"])
+
+    sampled = evaluate_policy(
+        policy,
+        mode="soccer-1v1",
+        opponent="idle",
+        games=1,
+        match_seconds=0.5,
+        episode_seconds=5.0,
+        stochastic=True,
+    )
+    assert sampled["stochastic"] is True
+    assert sampled["games"] == 1

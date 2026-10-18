@@ -101,6 +101,7 @@ Mit PPO-Update im selben Prozess (echte Trainingsläufe):
 
 | Lauf | Worker | Schritte/s |
 | --- | --- | --- |
+| learning-smoke (1v1 vs idle, 150k Schritte, 2 Worker) | 2 | 1 733–1 973 |
 | Phase-3-Smoke (1v1, Curriculum + Evaluation) | 1 | 921–1 105 |
 | Phase-3-Smoke (1v1, Selbstspiel, Snapshot je Iteration) | 1 | 693–823 |
 | smoke-1v1 (Phase 2) | 1 | 810 |
@@ -164,9 +165,20 @@ aufwendigere Kollisionen).
   unit-getestet.
 * **Alte Checkpoints:** Ein 190-dimensionaler v1-Checkpoint wurde nach der
   Obs-Änderung geladen und evaluiert (`test_legacy_v1_policy_is_still_evaluable`).
+* **Begrenzter Lernnachweis:** `configs/learning-smoke-1v1.json` lief
+  150 528 Schritte (2 Worker, ~99 s, ~1 900 Schritte/s). Mittlere
+  Episodenbelohnung 1,56 → 5,36, explained variance 0,22 → 0,79,
+  Value-Loss 0,242 → 0,125, Entropie 4,50 → 3,80. 5 von 294
+  Trainings-Episoden hatten ein Tor. Die deterministische Evaluation blieb
+  bei 0W/4D (0:0), stochastisch 2 Ballberührungen in 4 Spielen. Das ist ein
+  Optimierungs-, kein Spielstärkenachweis.
 * **Keine Spielstärke-Aussage:** Es gab keinen Langlauf und keinen
   mehrfach gesäten Vergleich v1 gegen v2. Kurzläufe belegen nur, dass die
   Pipeline funktioniert.
+* **CI:** `.github/workflows/verify.yml` installiert die CPU-Variante von
+  Torch, führt `ruff check src tests rlbot` und `pytest -q` unter Python 3.11
+  aus. Der Workflow wurde hier nicht auf GitHub ausgeführt; die Prüfung
+  erfolgt beim Pull Request.
 
 ## Nicht getestet
 

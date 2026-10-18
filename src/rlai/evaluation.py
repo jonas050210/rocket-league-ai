@@ -73,6 +73,7 @@ def evaluate_policy(
     device: str = "cpu",
     episode_seconds: float = 30.0,
     obs_version: int | None = None,
+    stochastic: bool = False,
 ) -> dict:
     spec = get_mode(mode)
     version = policy_obs_version(policy) if obs_version is None else int(obs_version)
@@ -97,7 +98,7 @@ def evaluate_policy(
         while ticks < target_ticks:
             agents = env.blue_agents
             actions, _, _ = policy.act(
-                {agent: obs[agent] for agent in agents}, deterministic=True
+                {agent: obs[agent] for agent in agents}, deterministic=not stochastic
             )
             result = env.step(actions)
             ticks += env.tick_skip
@@ -164,6 +165,7 @@ def evaluate_policy(
         "match_seconds": match_seconds,
         "device": device,
         "obs_version": version,
+        "stochastic": stochastic,
         "duration_s": time.perf_counter() - started,
         "details": {"games": results},
     }
@@ -179,6 +181,7 @@ def evaluate_model(
     match_seconds: float = 120.0,
     device: str = "cpu",
     episode_seconds: float = 30.0,
+    stochastic: bool = False,
 ) -> dict:
     policy = load_policy(model_path, device=device)
     result = evaluate_policy(
@@ -190,6 +193,7 @@ def evaluate_model(
         match_seconds=match_seconds,
         device=device,
         episode_seconds=episode_seconds,
+        stochastic=stochastic,
     )
     result["model"] = str(model_path)
     return result

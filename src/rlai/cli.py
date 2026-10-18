@@ -59,6 +59,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         seed=args.seed,
         match_seconds=args.match_seconds,
         device=args.device,
+        stochastic=args.stochastic,
     )
     store = Store(Path(args.store)) if args.store else _store()
     result["model_id"] = args.model_id
@@ -138,6 +139,11 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--seed", type=int, default=1000)
     evaluate.add_argument("--match-seconds", type=float, default=120.0)
     evaluate.add_argument("--device", default="cpu")
+    evaluate.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="sample actions instead of argmax (behaviour of the training policy)",
+    )
     evaluate.add_argument("--store", default=None)
     evaluate.set_defaults(func=cmd_evaluate)
 

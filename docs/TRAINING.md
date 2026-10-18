@@ -95,7 +95,8 @@ Der Trainer schreibt pro Iteration:
 | `losses/approx_kl`, `losses/clipfrac` | Update-Diagnose |
 | `losses/epochs_run`, `losses/early_stopped` | Early-Stop-Diagnose |
 | `charts/goals_for`, `charts/goals_against` | Tore pro Episode |
-| `eval/win_rate`, `eval/win_rate_low`, `eval/goal_diff` | periodische Evaluation mit 95-%-Wilson-Untergrenze |
+| `eval/win_rate`, `eval/win_rate_low`, `eval/win_rate_high`, `eval/goal_diff` | periodische Evaluation mit 95-%-Wilson-Intervall |
+| `eval/touches`, `eval/draw_rate` | Ballberührungen und Remis-Anteil der Evaluation |
 | `curriculum/stage`, `curriculum/window_win_rate` | aktuelle Stufe und Fenster-Siegquote |
 | `league/agent_elo`, `league/pool_size` | Elo des Lernenden, Poolgröße |
 | `time/sps` | Umgebungsschritte pro Sekunde |
@@ -105,6 +106,21 @@ Das Dashboard liest diese Werte über SQLite und SSE. Es gibt keine
 synthetischen Kurven; wenn keine Daten existieren, zeigt die Oberfläche
 „No data recorded yet“. Evaluationszeilen speichern zusätzlich das
 Wilson-Intervall im JSON-Feld und zeigen es in der Verlaufsansicht.
+
+### Deterministisch vs. stochastisch evaluieren
+
+Die Standard-Evaluation wählt `argmax` (deterministisch), weil der RLBot-Bot
+genau so spielt. Bei einem kaum trainierten Netz kann `argmax` dauerhaft
+dieselbe Aktion wählen – die Evaluation misst dann eine degenerierte
+Konstante, nicht das Verhalten der Trainings-Policy. Für Frühdiagnose gibt es
+deshalb zusätzlich:
+
+```bash
+python -m rlai.cli evaluate --model <pfad> --opponent idle --games 4 --match-seconds 20 --stochastic
+```
+
+`--stochastic` sampelt Aktionen gemäß der Policy. Beide Werte gehören getrennt
+berichtet; der deterministische Wert ist die Deployment-Metrik.
 
 ## Checkpoints und Resume
 
@@ -126,6 +142,27 @@ Wilson-Intervall im JSON-Feld und zeigen es in der Verlaufsansicht.
   Das Dashboard bietet denselben Pfad über die Run-Ansicht an. Modell,
   Optimizer, Schrittstand, Liga-Bilanz und Curriculum-Stufe werden
   wiederhergestellt; die Policy-Architektur muss exakt passen.
+
+## Begrenzter Lernnachweis (kein Langlauf)
+
+Ein bewusst kurzer Lauf (`configs/learning-smoke-1v1.json`, 2 Worker,
+1v1 gegen `idle`, 150 528 Schritte, 99 s, ~1 900 Schritte/s) zeigt, dass die
+Optimierung tatsächlich läuft:
+
+| Metrik | erste 10 Iterationen | letzte 10 Iterationen |
+| --- | --- | --- |
+| `charts/episodic_return` | 1,56 | 5,36 |
+| `losses/explained_variance` | 0,22 | 0,79 |
+| `losses/value` | 0,242 | 0,125 |
+| `losses/entropy` | 4,50 | 3,80 |
+
+Zusätzlich wurden 5 von 294 Trainings-Episoden mit mindestens einem Tor
+beendet (maximal 1 Tor). Die periodische Evaluation (4 Spiele à 20 s,
+deterministisch) blieb bei 0W 0D 4D, 0:0; stochastisch wurden 2
+Ballberührungen in 4 Spielen gemessen. Das belegt **Optimierung, keine
+Spielstärke**: Das Netz hängt nach 150k Schritten noch fast konstant an einer
+Aktion. Für verwertbares Spiel sind Millionen Schritte nötig; ein solcher
+Lauf wurde ohne explizite Freigabe nicht gestartet.
 
 ## Empfohlener Ablauf
 
