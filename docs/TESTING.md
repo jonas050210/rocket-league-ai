@@ -38,8 +38,9 @@ python -m pytest -q
   `/api/evaluations`, `/api/live/status` → HTTP 200 mit echten Daten.
 * `POST /api/runs` mit *soccer-1v1* → Prozess startet, trainiert 2 560
   Schritte, endet `completed`, Checkpoints und Metriken geschrieben.
-* Derselbe Pfad mit *heatseeker-2v2* und *soccer-3v3*, jeweils 2 Worker →
-  `completed` nach 3 072 Schritten.
+* Derselbe Pfad mit *soccer-2v2*, *heatseeker-2v2* und *soccer-3v3*, jeweils
+  2 Worker → `completed` nach 3 072 Schritten. Damit ist jeder der vier Modi
+  einmal durch den vollständigen Prozess gelaufen.
 * Pause → Status `paused`; Resume → `running`; Stop → `stopped` mit
   Nachricht „stopped by user“.
 * Evaluation über die API für 1v1-, 3v3- und Heatseeker-Checkpoints →
@@ -67,6 +68,7 @@ Mit PPO-Update im selben Prozess (echte Trainingsläufe):
 | smoke-1v1 | 1 | 810 |
 | smoke-controls (1v1) | 1 | 817 |
 | smoke-heatseeker-2v2 | 2 | 1 138 |
+| smoke-soccer-2v2 | 2 | 1 123 |
 | smoke-soccer-3v3 | 2 | 782 |
 
 Einordnung: Das sind Funktionsnachweise auf 2 vCPUs. Sie sagen nichts über
