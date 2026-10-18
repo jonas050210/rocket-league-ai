@@ -66,10 +66,11 @@ Alternativ über das Dashboard: *Live match* → Modell und Modus wählen →
 
 Zwei Vorstufen ohne Risiko:
 
-* **Run setup checks** (`GET /api/live/preflight`, CLI `rlai live --preflight`)
-  prüft Plattform, RLBot-Import, RLBotServer, Bot- und Launcher-Entrypoint,
-  vorhandenes Modell, Schreibrechte, den Match-Parser und – falls `psutil`
-  verfügbar ist – ob `RocketLeague.exe` läuft. Jeder Punkt hat `ok`,
+* **Run setup checks** (`GET /api/live/preflight?model_id=...`,
+  CLI `rlai live --preflight`) prüft Plattform, RLBot-Import, RLBotServer,
+  Bot- und Launcher-Entrypoint, das ausgewählte Modell (sonst stable/best),
+  Schreibrechte, den Match-Parser und – falls `psutil` verfügbar ist – ob
+  `RocketLeague.exe` läuft. Jeder Punkt hat `ok`,
   `required` und eine Begründung; `ok` bezieht sich nur auf Pflichtpunkte.
 * **Prepare files only** (`POST /api/live/launch` mit `dry_run = true`)
   schreibt alle Match-Dateien, startet aber nichts. Das funktioniert auch

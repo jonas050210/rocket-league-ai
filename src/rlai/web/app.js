@@ -990,7 +990,11 @@ views.live = async () => {
   };
   $("#live-checks-run")?.addEventListener("click", async () => {
     try {
-      renderChecks(await api("/api/live/preflight"));
+      const selected = $("#live-model")?.value;
+      const url = selected
+        ? `/api/live/preflight?model_id=${encodeURIComponent(selected)}`
+        : "/api/live/preflight";
+      renderChecks(await api(url));
     } catch (error) {
       toast(error.message, "error");
     }

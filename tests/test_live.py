@@ -83,6 +83,22 @@ def test_preflight_reports_every_check(data_root, monkeypatch):
     assert report["ok"] is False
 
 
+def test_preflight_accepts_a_selected_model(data_root, models_dir):
+    from rlai import checkpoints
+    from rlai.config import ensure_dirs
+    from rlai.live import preflight
+
+    model_id = checkpoints.list_models(models_dir)[0]["id"]
+    report = preflight(ensure_dirs(), model_id=model_id)
+    model_check = next(check for check in report["checks"] if check["name"] == "model")
+    assert model_check["ok"] is True
+    assert model_id in model_check["detail"]
+
+    report = preflight(ensure_dirs(), model_id="does-not-exist")
+    model_check = next(check for check in report["checks"] if check["name"] == "model")
+    assert model_check["ok"] is False
+
+
 def test_dry_run_writes_match_files(data_root, models_dir, monkeypatch):
     from rlai.config import ensure_dirs
     from rlai.live import launch_match

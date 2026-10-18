@@ -316,10 +316,10 @@ def create_app(store_path: Path | None = None) -> FastAPI:
         }
 
     @app.get("/api/live/preflight")
-    def live_preflight():
+    def live_preflight(model_id: str | None = None):
         from ..live import preflight
 
-        return preflight(paths)
+        return preflight(paths, model_id=model_id)
 
     @app.post("/api/live/launch", dependencies=[Depends(require_auth)])
     def live_launch(request: LiveLaunchRequest):
