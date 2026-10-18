@@ -13,12 +13,14 @@ FastAPI (src/rlai/api/app.py)
                  ▼
         Trainer (src/rlai/trainer.py)
         ├── PPO-Update (src/rlai/ppo.py)
+        ├── Gegnerauswahl (src/rlai/league.py, src/rlai/curriculum.py)
+        ├── Periodische Evaluation (src/rlai/evaluation.py)
         ├── Worker-Pool (src/rlai/workers.py, multiprocessing)
         │      └── MatchEnv (src/rlai/envs.py)
         │             ├── RLGym + RocketSim
-        │             ├── SoccerObsBuilder (src/rlai/obs.py)
+        │             ├── SoccerObsBuilder (src/rlai/obs.py, v1/v2)
         │             └── SoccerReward (src/rlai/rewards.py)
-        └── Checkpoints (src/rlai/checkpoints.py)
+        └── Checkpoints + best-Zeiger (src/rlai/checkpoints.py)
                  │
                  ├── Evaluation (src/rlai/evaluation.py)
                  └── RLBot-Bot (src/rlai/rlbot/*, rlbot/bot.py)
@@ -35,9 +37,15 @@ FastAPI (src/rlai/api/app.py)
 4. Das Dashboard liest Metriken per HTTP und abonniert `/api/events` für
    Live-Updates. Es gibt keinen zweiten Kanal und keine erfundenen Werte.
 5. Checkpoints werden atomar gespeichert. Promotion ist ein expliziter
-   Schreibvorgang auf `stable.json`.
+   Schreibvorgang auf `stable.json`; `best.json` hält nur die beste gemessene
+   Evaluation fest und deployt nichts.
 6. Evaluation lädt einen Checkpoint und spielt deterministische Serien gegen
-   `idle`, `random`, `chase` oder ein anderes Modell.
+   `idle`, `random`, `chase`, ein anderes Modell oder eine Pool-Kopie. Sie
+   meldet Siege, Tore, Ballberührungen und ein 95-%-Wilson-Intervall.
+7. Bei aktivem Curriculum wählt der Trainer die Gegnerstufe anhand
+   abgeschlossener Episoden; bei Selbstspiel sampelt der Pool nach
+   PFSP-Gewichten. Beides wird im Checkpoint gespeichert und beim Resume
+   fortgesetzt.
 
 ## Verzeichnisse
 
@@ -65,5 +73,6 @@ FastAPI (src/rlai/api/app.py)
 * Optionale Capability-Token (`RLAI_AUTH_TOKEN`) für alle schreibenden
   Endpunkte; Lesen bleibt lokal offen.
 * Checkpoints sind unveränderlich; der letzte Checkpoint und das stabile
-  Modell sind gegen Löschen geschützt.
+  Modell sind gegen Löschen geschützt. `best.json` ist ein Zeiger ohne
+  Lösch- oder Promotionswirkung.
 * Kein automatisches Starten von Training, kein automatisches Promoten.

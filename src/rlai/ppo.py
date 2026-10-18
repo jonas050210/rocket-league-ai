@@ -35,14 +35,31 @@ def compute_gae(
     last_value: np.ndarray,
     gamma: float,
     gae_lambda: float,
+    *,
+    truncated: np.ndarray | None = None,
+    bootstrap: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """GAE over a (T, K) rollout. ``dones`` marks episode ends."""
+    """GAE over a (T, K) rollout.
+
+    ``dones`` marks every episode end.  When ``truncated`` and ``bootstrap``
+    are given, a time-limit truncation keeps bootstrapping from the value of
+    the final state instead of treating it as a real termination.  Without
+    that correction short episodes systematically bias the value function
+    downwards: every 60 s timeout looks like a lost game.
+    """
     T = rewards.shape[0]
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_gae = np.zeros(rewards.shape[1], dtype=np.float32)
+    use_bootstrap = truncated is not None and bootstrap is not None
     for t in reversed(range(T)):
         next_value = last_value if t == T - 1 else values[t + 1]
-        nonterminal = 1.0 - dones[t]
+        if use_bootstrap:
+            is_truncated = truncated[t] > 0.5
+            next_value = np.where(is_truncated, bootstrap[t], next_value)
+            terminal = np.clip(dones[t] - truncated[t], 0.0, 1.0)
+        else:
+            terminal = dones[t]
+        nonterminal = 1.0 - terminal
         delta = rewards[t] + gamma * next_value * nonterminal - values[t]
         last_gae = delta + gamma * gae_lambda * nonterminal * last_gae
         advantages[t] = last_gae
@@ -58,6 +75,8 @@ def flatten_rollout(rollout: dict, last_values: np.ndarray, config: TrainingConf
         last_values,
         config.gamma,
         config.gae_lambda,
+        truncated=rollout.get("truncated"),
+        bootstrap=rollout.get("bootstrap"),
     )
     return Batch(
         obs=rollout["obs"].reshape(-1, rollout["obs"].shape[-1]),
@@ -97,11 +116,15 @@ def ppo_update(
         "losses/approx_kl": 0.0,
         "losses/clipfrac": 0.0,
         "losses/explained_variance": 0.0,
+        "losses/grad_norm": 0.0,
     }
     updates = 0
+    epochs_run = 0
+    early_stopped = False
 
     model.train()
     for _ in range(config.epochs):
+        epochs_run += 1
         indices = torch.randperm(n, device=device, generator=generator)
         for start in range(0, n, batch_size):
             idx = indices[start : start + batch_size]
@@ -110,6 +133,7 @@ def ppo_update(
             mb_old_logprobs = old_logprobs[idx]
             mb_advantages = advantages_t[idx]
             mb_returns = returns_t[idx]
+            mb_old_values = old_values_t[idx]
 
             logits, values = model(mb_obs)
             dist = torch.distributions.Categorical(logits=logits)
@@ -121,12 +145,20 @@ def ppo_update(
             surr2 = torch.clamp(ratio, 1 - config.clip_coef, 1 + config.clip_coef) * mb_advantages
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            value_loss = 0.5 * (values - mb_returns).pow(2).mean()
+            if config.clip_value > 0:
+                clipped = mb_old_values + torch.clamp(
+                    values - mb_old_values, -config.clip_value, config.clip_value
+                )
+                value_loss = 0.5 * torch.max(
+                    (values - mb_returns).pow(2), (clipped - mb_returns).pow(2)
+                ).mean()
+            else:
+                value_loss = 0.5 * (values - mb_returns).pow(2).mean()
             loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
             optimizer.step()
 
             with torch.no_grad():
@@ -140,12 +172,20 @@ def ppo_update(
             stats["losses/approx_kl"] += approx_kl
             stats["losses/clipfrac"] += clipfrac
             stats["losses/explained_variance"] += explained
+            stats["losses/grad_norm"] += float(grad_norm)
             updates += 1
+            if config.target_kl > 0 and approx_kl > config.target_kl:
+                early_stopped = True
+                break
+        if early_stopped:
+            break
 
     if updates:
         stats = {k: v / updates for k, v in stats.items()}
     stats["losses/learning_rate"] = float(optimizer.param_groups[0]["lr"])
     stats["losses/old_values_mean"] = float(old_values_t.mean().item())
+    stats["losses/epochs_run"] = float(epochs_run)
+    stats["losses/early_stopped"] = 1.0 if early_stopped else 0.0
     return stats
 
 

@@ -10,7 +10,8 @@ can log why the agent is being rewarded, not just the total.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+import math
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
@@ -29,7 +30,7 @@ _COMPONENTS = (
     "approach",
     "boost",
     "defense",
-    "demo",
+    "bump",
 )
 
 
@@ -43,7 +44,10 @@ class RewardWeights:
     approach: float = 0.03
     boost: float = 0.02
     defense: float = 0.15
-    demo: float = 0.3
+    # RLGym exposes car-to-car contact as ``bump_victim_id``; it does not
+    # identify the car that caused a demolition.  The component is therefore
+    # named and documented as a bump, not as a demo.
+    bump: float = 0.3
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -52,10 +56,16 @@ class RewardWeights:
     def from_dict(cls, data: dict[str, Any] | None) -> "RewardWeights":
         if not data:
             return cls()
-        unknown = set(data) - set(cls.__slots__)
+        # ``demo`` was the old (incorrect) name.  Accept it for configuration
+        # files written before the rename, but write ``bump`` from now on.
+        aliases = {"demo": "bump"}
+        if "demo" in data and "bump" in data:
+            raise ValueError("Use either 'bump' or the legacy 'demo', not both")
+        normalized = {aliases.get(key, key): value for key, value in data.items()}
+        unknown = set(normalized) - set(cls.__slots__)
         if unknown:
             raise ValueError(f"Unknown reward weights: {sorted(unknown)}")
-        values = {k: float(v) for k, v in data.items()}
+        values = {k: float(v) for k, v in normalized.items()}
         for key, value in values.items():
             if not np.isfinite(value) or value < 0:
                 raise ValueError(f"Reward weight {key} must be finite and >= 0")
@@ -67,6 +77,8 @@ class _AgentMemory:
     prev_ball_offset: np.ndarray | None = None
     prev_ball_vel: np.ndarray | None = None
     prev_boost: float = 0.0
+    prev_touches: int = 0
+    prev_bump_victim: object | None = None
 
 
 class SoccerReward(RewardFunction[AgentID, GameState, float]):
@@ -86,15 +98,18 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
             mem.prev_ball_offset = initial_state.ball.position - car.physics.position
             mem.prev_ball_vel = initial_state.ball.linear_velocity.copy()
             mem.prev_boost = float(car.boost_amount)
+            mem.prev_touches = int(car.ball_touches)
+            mem.prev_bump_victim = car.bump_victim_id
 
     def get_rewards(self, agents, state, is_terminated, is_truncated, shared_info):
         rewards: dict[AgentID, float] = {}
         stats = shared_info.setdefault("reward_stats", {key: 0.0 for key in _COMPONENTS})
         for agent in agents:
-            value, breakdown = self._reward(agent, state)
+            value, parts = self._reward(agent, state)
             rewards[agent] = value
-            for key, amount in breakdown.items():
-                stats[key] = stats.get(key, 0.0) + amount
+            for key, amount in zip(_COMPONENTS, parts):
+                if amount:
+                    stats[key] = stats.get(key, 0.0) + amount
         return rewards
 
     # -- core --------------------------------------------------------------
@@ -112,24 +127,41 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
             else np.asarray(ORANGE_GOAL_CENTER, dtype=np.float32)
         )
 
-    def _reward(self, agent: AgentID, state: GameState) -> tuple[float, dict[str, float]]:
+    def _reward(self, agent: AgentID, state: GameState) -> tuple[float, tuple[float, ...]]:
         car = state.cars[agent]
         team = car.team_num
         pos = car.physics.position
         ball = state.ball
         w = self.weights
         mem = self._memory.setdefault(agent, _AgentMemory())
-        breakdown = {key: 0.0 for key in _COMPONENTS}
+        goal_value = 0.0
+        concede = 0.0
+        touch = 0.0
+        progress = 0.0
+        alignment = 0.0
+        approach = 0.0
+        boost = 0.0
+        defense = 0.0
+        bump = 0.0
 
         if state.goal_scored:
             if state.scoring_team == team:
-                breakdown["goal"] += w.goal
+                goal_value = w.goal
             else:
-                breakdown["concede"] += -w.concede
+                concede = -w.concede
 
-        if car.ball_touches > 0:
-            speed_factor = min(float(np.linalg.norm(ball.linear_velocity)) / 2300.0, 1.5)
-            breakdown["touch"] += w.touch * (0.5 + speed_factor)
+        # Touch and bump rewards are *events*, not states.  The previous
+        # implementation paid the touch bonus on every tick after the first
+        # contact, which turned it into a constant offset.
+        touches = int(car.ball_touches)
+        if touches > mem.prev_touches:
+            velocity = ball.linear_velocity
+            speed = math.sqrt(
+                float(velocity[0]) ** 2 + float(velocity[1]) ** 2 + float(velocity[2]) ** 2
+            )
+            speed_factor = min(speed / 2300.0, 1.5)
+            touch = w.touch * (0.5 + speed_factor) * (touches - mem.prev_touches)
+        mem.prev_touches = touches
 
         goal = self._opponent_goal(team)
         offset = ball.position - pos
@@ -140,35 +172,76 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
         if not state.goal_scored:
             prev_offset = mem.prev_ball_offset
             if prev_offset is not None:
-                prev_dist = float(np.linalg.norm(prev_offset))
-                new_dist = float(np.linalg.norm(offset))
-                breakdown["progress"] += w.progress * (prev_dist - new_dist) / 1000.0
+                prev_dist = math.sqrt(
+                    float(prev_offset[0]) ** 2
+                    + float(prev_offset[1]) ** 2
+                    + float(prev_offset[2]) ** 2
+                )
+                new_dist = math.sqrt(
+                    float(offset[0]) ** 2 + float(offset[1]) ** 2 + float(offset[2]) ** 2
+                )
+                progress = w.progress * (prev_dist - new_dist) / 1000.0
 
-            dist_to_ball = float(np.linalg.norm(offset))
+            dist_to_ball = math.sqrt(
+                float(offset[0]) ** 2 + float(offset[1]) ** 2 + float(offset[2]) ** 2
+            )
             if dist_to_ball > 1e-3:
-                to_ball = offset / dist_to_ball
+                inv = 1.0 / dist_to_ball
+                to_ball_x = float(offset[0]) * inv
+                to_ball_y = float(offset[1]) * inv
+                to_ball_z = float(offset[2]) * inv
                 forward = car.physics.forward
-                alignment = float(np.dot(forward, to_ball))
-                breakdown["alignment"] += w.alignment * alignment
-                approach = float(np.dot(car.physics.linear_velocity, to_ball)) / 2300.0
-                breakdown["approach"] += w.approach * float(np.clip(approach, -1, 1))
+                alignment = w.alignment * (
+                    float(forward[0]) * to_ball_x
+                    + float(forward[1]) * to_ball_y
+                    + float(forward[2]) * to_ball_z
+                )
+                velocity = car.physics.linear_velocity
+                approach_speed = (
+                    float(velocity[0]) * to_ball_x
+                    + float(velocity[1]) * to_ball_y
+                    + float(velocity[2]) * to_ball_z
+                ) / 2300.0
+                approach = w.approach * max(-1.0, min(1.0, approach_speed))
 
                 own_goal = self._own_goal(team)
-                car_behind_ball = float(np.dot(ball.position - pos, goal - own_goal)) < 0
+                car_behind_ball = (
+                    (float(ball.position[0]) - float(pos[0])) * (goal[0] - own_goal[0])
+                    + (float(ball.position[1]) - float(pos[1])) * (goal[1] - own_goal[1])
+                    + (float(ball.position[2]) - float(pos[2])) * (goal[2] - own_goal[2])
+                ) < 0
                 if car_behind_ball:
-                    toward_own = float(np.dot(ball.linear_velocity, (own_goal - ball.position))) > 0
+                    to_own_x = float(own_goal[0]) - float(ball.position[0])
+                    to_own_y = float(own_goal[1]) - float(ball.position[1])
+                    toward_own = (
+                        float(ball.linear_velocity[0]) * to_own_x
+                        + float(ball.linear_velocity[1]) * to_own_y
+                    ) > 0
                     if toward_own:
-                        breakdown["defense"] += w.defense * min(
-                            float(np.linalg.norm(goal - ball.position)) / 6000.0, 0.2
+                        distance_to_goal = math.hypot(
+                            float(goal[0]) - float(ball.position[0]),
+                            float(goal[1]) - float(ball.position[1]),
                         )
+                        defense = w.defense * min(distance_to_goal / 6000.0, 0.2)
 
         boost_used = max(mem.prev_boost - float(car.boost_amount), 0.0)
-        breakdown["boost"] -= w.boost * boost_used / 100.0
+        boost = -w.boost * boost_used / 100.0
         mem.prev_boost = float(car.boost_amount)
         mem.prev_ball_offset = offset.copy()
 
-        if car.bump_victim_id is not None:
-            breakdown["demo"] += w.demo
+        if car.bump_victim_id is not None and car.bump_victim_id != mem.prev_bump_victim:
+            bump = w.bump
+        mem.prev_bump_victim = car.bump_victim_id
 
-        total = float(sum(breakdown.values()))
-        return total, breakdown
+        parts = (
+            goal_value,
+            concede,
+            touch,
+            progress,
+            alignment,
+            approach,
+            boost,
+            defense,
+            bump,
+        )
+        return float(sum(parts)), parts

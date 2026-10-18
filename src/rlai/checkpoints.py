@@ -22,6 +22,7 @@ CHECKPOINT_FORMAT = "rlai-checkpoint-v1"
 MANIFEST = "manifest.json"
 MODEL_FILE = "model.pt"
 STABLE_POINTER = "stable.json"
+BEST_POINTER = "best.json"
 
 
 def _utc_now() -> str:
@@ -127,9 +128,82 @@ def _stable_id(models_dir: str | Path) -> str | None:
     if not pointer.exists():
         return None
     try:
-        return str(json.loads(pointer.read_text(encoding="utf-8")).get("id"))
-    except (json.JSONDecodeError, OSError):
+        value = json.loads(pointer.read_text(encoding="utf-8")).get("id")
+    except (json.JSONDecodeError, OSError, AttributeError):
         return None
+    return str(value) if value else None
+
+
+def _pointer_id(models_dir: str | Path, name: str) -> str | None:
+    pointer = Path(models_dir) / name
+    if not pointer.exists():
+        return None
+    try:
+        value = json.loads(pointer.read_text(encoding="utf-8")).get("id")
+    except (json.JSONDecodeError, OSError, AttributeError):
+        return None
+    return str(value) if value else None
+
+
+def best_model(models_dir: str | Path) -> dict | None:
+    """The checkpoint with the best measured evaluation score.
+
+    This is deliberately separate from the stable pointer: a checkpoint can
+    be the best so far without being promoted for deployment.
+    """
+    model_id = _pointer_id(models_dir, BEST_POINTER)
+    if not model_id:
+        return None
+    try:
+        return get_model(models_dir, model_id)
+    except KeyError:
+        return None
+
+
+def best_record(models_dir: str | Path) -> dict:
+    """Raw best-pointer record (may be empty)."""
+    pointer = Path(models_dir) / BEST_POINTER
+    if not pointer.exists():
+        return {}
+    try:
+        data = json.loads(pointer.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def set_best(
+    models_dir: str | Path,
+    model_id: str,
+    score: float,
+    *,
+    metric: str = "win_rate",
+) -> dict:
+    """Record a better evaluation score.  Never lowers an existing best."""
+    models_dir = Path(models_dir)
+    get_model(models_dir, model_id)  # validate
+    pointer = models_dir / BEST_POINTER
+    previous = {}
+    if pointer.exists():
+        try:
+            previous = json.loads(pointer.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            previous = {}
+        if not isinstance(previous, dict):
+            previous = {}
+    if previous.get("score") is not None and float(score) <= float(previous["score"]):
+        return previous
+    record = {
+        "id": model_id,
+        "score": float(score),
+        "metric": metric,
+        "updated_at": _utc_now(),
+        "previous": previous.get("id"),
+    }
+    tmp = models_dir / (BEST_POINTER + ".tmp")
+    tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    os.replace(tmp, pointer)
+    return record
 
 
 def list_models(models_dir: str | Path) -> list[dict]:
@@ -137,6 +211,7 @@ def list_models(models_dir: str | Path) -> list[dict]:
     if not models_dir.exists():
         return []
     stable = _stable_id(models_dir)
+    best = _pointer_id(models_dir, BEST_POINTER)
     models: list[dict] = []
     for directory in models_dir.iterdir():
         if not directory.is_dir():
@@ -149,6 +224,7 @@ def list_models(models_dir: str | Path) -> list[dict]:
         except (json.JSONDecodeError, OSError):
             continue
         manifest["stable"] = manifest.get("id") == stable
+        manifest["best"] = manifest.get("id") == best
         models.append(manifest)
     models.sort(key=lambda m: (m.get("created_at", ""), m.get("step", 0)), reverse=True)
     return models
@@ -160,6 +236,7 @@ def get_model(models_dir: str | Path, model_id: str) -> dict:
         raise KeyError(f"unknown model {model_id!r}")
     manifest = read_manifest(directory)
     manifest["stable"] = _stable_id(models_dir) == model_id
+    manifest["best"] = _pointer_id(models_dir, BEST_POINTER) == model_id
     manifest["absolute_path"] = str(directory / MODEL_FILE)
     return manifest
 
@@ -171,6 +248,7 @@ def set_model_state(models_dir: str | Path, model_id: str, state: str) -> dict:
     manifest = get_model(models_dir, model_id)
     manifest.pop("absolute_path", None)
     manifest.pop("stable", None)
+    manifest.pop("best", None)
     manifest["state"] = state
     write_manifest(directory, manifest)
     return manifest
@@ -219,6 +297,14 @@ def delete_model(models_dir: str | Path, model_id: str) -> None:
     remaining = [m for m in list_models(models_dir) if m["id"] != model_id]
     if not remaining:
         raise ValueError("refusing to delete the last remaining checkpoint")
+    # A best pointer must never dangle.  Pruning already skips the best
+    # checkpoint; an explicit delete removes the pointer together with it.
+    if manifest.get("best"):
+        pointer = models_dir / BEST_POINTER
+        try:
+            pointer.unlink()
+        except OSError:
+            pass
     shutil.rmtree(checkpoint_dir(models_dir, model_id))
 
 
@@ -227,13 +313,15 @@ def prune_candidates(models_dir: str | Path, keep: int = 8, run_id: str | None =
 
     When ``run_id`` is given only checkpoints from that run are considered,
     so starting a new run can never delete another run's history.  Never
-    touches the stable model, the newest checkpoint, or the last remaining
+    touches the stable model, the best checkpoint, or the last remaining
     checkpoint.  Returns deleted ids.
     """
     models = [
         m
         for m in list_models(models_dir)
-        if not m.get("stable") and (run_id is None or m.get("run_id") == run_id)
+        if not m.get("stable")
+        and not m.get("best")
+        and (run_id is None or m.get("run_id") == run_id)
     ]
     if len(models) <= keep:
         return []

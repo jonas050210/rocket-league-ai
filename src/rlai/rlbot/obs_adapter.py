@@ -16,7 +16,7 @@ from rlgym.rocket_league.api.game_config import GameConfig
 from rlgym.rocket_league.math import euler_to_rotation
 
 from ..modes import ModeSpec, get_mode
-from ..obs import build_observation
+from ..obs import OBS_VERSION, build_observation
 
 
 def _vec(v: Any) -> np.ndarray:
@@ -135,6 +135,7 @@ def packet_to_observation(
     self_index: int,
     last_action: int | None,
     mode: str | ModeSpec = "soccer-1v1",
+    obs_version: int = OBS_VERSION,
 ) -> tuple[np.ndarray, dict]:
     spec = get_mode(mode) if isinstance(mode, str) else mode
     state, agent, team = packet_to_game_state(packet, self_index)
@@ -154,5 +155,6 @@ def packet_to_observation(
         last_action,
         time_remaining=max(0.0, min(time_remaining, 300.0)),
         score_diff=score_diff,
+        obs_version=obs_version,
     )
     return obs, {"agent": agent, "team": team, "state": state}

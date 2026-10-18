@@ -109,6 +109,32 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 
+_EVAL_DETAIL_KEYS = (
+    "win_rate",
+    "win_rate_ci95",
+    "win_rate_decisive",
+    "goal_diff",
+    "touches",
+    "obs_version",
+    "seed",
+    "match_seconds",
+)
+
+
+def _evaluation_details(result: dict) -> dict:
+    """Per-game rows plus the summary statistics the GUI needs.
+
+    The summary lives at the top level of an evaluation result, but the table
+    only has one JSON column.  Merging it into ``details`` keeps the schema
+    stable and makes the confidence interval visible in the dashboard.
+    """
+    details = dict(result.get("details") or {})
+    for key in _EVAL_DETAIL_KEYS:
+        if key in result and key not in details:
+            details[key] = result[key]
+    return details
+
+
 class Store:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -367,7 +393,7 @@ class Store:
                     result["goals_against"],
                     result.get("created_at", utc_now()),
                     result.get("duration_s"),
-                    json.dumps(result.get("details", {})),
+                    json.dumps(_evaluation_details(result)),
                 ),
             )
         return eval_id

@@ -64,3 +64,34 @@ def test_model_sync_and_scores(tmp_path):
     assert models[0]["id"] == "m-1"
     store.set_model_eval_score("m-1", 0.75)
     assert store.list_models()[0]["eval_score"] == 0.75
+
+
+def test_evaluation_details_keep_confidence_interval(tmp_path):
+    store = Store(tmp_path / "test.db")
+    eval_id = store.add_evaluation(
+        {
+            "id": "eval-1",
+            "model_id": "m-1",
+            "run_id": "r-1",
+            "mode": "soccer-1v1",
+            "opponent": "chase",
+            "games": 10,
+            "wins": 6,
+            "losses": 3,
+            "draws": 1,
+            "goals_for": 8,
+            "goals_against": 5,
+            "win_rate": 0.6,
+            "win_rate_ci95": [0.31, 0.83],
+            "win_rate_decisive": 0.667,
+            "goal_diff": 3,
+            "touches": 12,
+            "obs_version": 2,
+            "details": {"games": [{"game": 1}]},
+        }
+    )
+    item = store.list_evaluations()[0]
+    assert item["id"] == eval_id
+    assert item["details"]["win_rate_ci95"] == [0.31, 0.83]
+    assert item["details"]["win_rate"] == 0.6
+    assert item["details"]["games"] == [{"game": 1}]

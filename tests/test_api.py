@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -35,7 +37,15 @@ def test_modes_and_defaults(client):
     }
     defaults = client.get("/api/config/defaults").json()
     assert defaults["training"]["mode"] in {m["id"] for m in modes}
-    assert len(defaults["presets"]) >= 4
+    assert len(defaults["presets"]) >= 7
+    for preset in defaults["presets"]:
+        config = preset["config"]
+        assert config["obs_version"] in {1, 2}
+        assert config["total_steps"] >= config["rollout_steps"] * config["n_workers"]
+        assert 0 <= config["eval_interval"] <= 100_000
+    curriculum = next(p for p in defaults["presets"] if p["id"] == "1v1-curriculum")
+    assert curriculum["config"]["curriculum"] is True
+    assert curriculum["config"]["eval_interval"] > 0
 
 
 def test_validate_accepts_and_rejects(client):
@@ -47,6 +57,11 @@ def test_validate_accepts_and_rejects(client):
     assert client.post("/api/config/validate", json=config).status_code == 200
     bad = dict(config, mode="hoops")
     assert client.post("/api/config/validate", json=bad).status_code == 422
+    assert client.post("/api/config/validate", json=dict(config, obs_version=3)).status_code == 422
+    assert client.post("/api/config/validate", json=dict(config, eval_interval=-1)).status_code == 422
+    legacy = dict(config, obs_version=1, reward={**config["reward"], "demo": 0.4})
+    legacy["reward"].pop("bump", None)
+    assert client.post("/api/config/validate", json=legacy).status_code == 200
 
 
 def test_run_lifecycle(client, monkeypatch):
@@ -123,6 +138,22 @@ def test_live_status(client):
         response = client.post("/api/live/launch", json={"mode": "soccer-1v1"})
         assert response.status_code == 501
         assert "Windows" in response.json()["detail"]
+
+
+def test_live_preflight_and_dry_run(client, trained_model):
+    report = client.get("/api/live/preflight").json()
+    assert set(report) == {"ok", "platform", "checks"}
+    assert any(check["name"] == "model" for check in report["checks"])
+
+    response = client.post(
+        "/api/live/launch",
+        json={"mode": "soccer-1v1", "model_id": trained_model["id"], "dry_run": True},
+    )
+    assert response.status_code == 200, response.text
+    record = response.json()
+    assert record["dry_run"] is True and record["launched"] is False
+    assert record["model_id"] == trained_model["id"]
+    assert os.path.exists(record["config"])
 
 
 def test_auth_token(monkeypatch, data_root, models_dir):

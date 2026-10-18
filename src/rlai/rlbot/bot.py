@@ -24,6 +24,7 @@ from rlai.actions import controller_dict  # noqa: E402
 from rlai.checkpoints import resolve_model_path, stable_model  # noqa: E402
 from rlai.config import data_dir  # noqa: E402
 from rlai.modes import get_mode  # noqa: E402
+from rlai.obs import version_for_obs_size  # noqa: E402
 from rlai.policy import PolicyConfig, TorchPolicy  # noqa: E402
 from rlai.rlbot.obs_adapter import packet_to_observation  # noqa: E402
 
@@ -56,9 +57,11 @@ def decide_action(
     index: int,
     last_action: int,
     spec,
+    obs_version: int | None = None,
 ) -> tuple[int, dict]:
     """One deterministic policy step: packet -> observation -> action."""
-    obs, _ = packet_to_observation(packet, index, last_action, spec)
+    version = version_for_obs_size(policy.model.obs_size) if obs_version is None else obs_version
+    obs, _ = packet_to_observation(packet, index, last_action, spec, version)
     action, _, _ = policy.act(obs, deterministic=True)
     return int(action), controller_dict(int(action))
 
@@ -70,13 +73,15 @@ class RocketLeagueAIBot(Bot):
         self.tick_skip = int(os.environ.get("RLAI_TICK_SKIP", "8"))
         self.model_path = _resolve_model()
         self.policy = load_policy(self.model_path)
+        self.obs_version = version_for_obs_size(self.policy.model.obs_size)
         self.last_action = 0
         self.tick = 0
         self.decisions = 0
         self.logger.info(
-            "Rocket League AI ready | model=%s mode=%s tick_skip=%d team=%s index=%s",
+            "Rocket League AI ready | model=%s mode=%s obs_version=%d tick_skip=%d team=%s index=%s",
             self.model_path,
             self.mode,
+            self.obs_version,
             self.tick_skip,
             self.team,
             self.index,
@@ -88,7 +93,12 @@ class RocketLeagueAIBot(Bot):
             return flat.ControllerState()
         if self.tick % self.tick_skip == 0:
             self.last_action, _ = decide_action(
-                self.policy, packet, self.index, self.last_action, self.spec
+                self.policy,
+                packet,
+                self.index,
+                self.last_action,
+                self.spec,
+                self.obs_version,
             )
             self.decisions += 1
         self.tick += 1

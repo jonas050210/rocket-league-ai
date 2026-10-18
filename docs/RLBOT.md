@@ -6,7 +6,7 @@
 | --- | --- |
 | RLBot-Pakete installieren und importieren | **ja**, `rlbot 2.0.0b56`, `rlbot_flatbuffers 0.19.0` |
 | Bot-Entrypoint importiert | **ja** (`rlai.rlbot.bot`, `rlai.rlbot.run`) |
-| Beobachtung aus `GamePacket` = Trainingsbeobachtung | **ja**, Paritätstest mit synthetischem Paket (max. Abweichung < 1e-3) |
+| Beobachtung aus `GamePacket` = Trainingsbeobachtung | **ja**, Paritätstest mit synthetischem Paket, v1 und v2 in allen Modi (max. Abweichung ≤ 2,4e-7) |
 | Checkpoint laden und Inferenz ausführen | **ja** (Unit-Test) |
 | Aktion → `ControllerState` | **ja** (Mapping-Test aller 90 Aktionen) |
 | Bot-Prozess in RLBot / echtes Match | **nein** – Windows, Rocket League und RLBot fehlen in der Build-Umgebung |
@@ -21,13 +21,15 @@ Match-Lauf steht aus.
 ```
 rlbot/bot.py                 Entrypoint, den RLBot startet
   └─ rlai.rlbot.bot         Bot-Klasse, Modell laden, Entscheidungen
-       ├─ rlai.rlbot.obs_adapter   GamePacket → GameState → 190-dim Beobachtung
+       ├─ rlai.rlbot.obs_adapter   GamePacket → GameState → 198-dim (v2) bzw. 190-dim (v1) Beobachtung
        ├─ rlai.policy             TorchPolicy, deterministische Aktion
        └─ rlai.actions            Aktion → ControllerState
 ```
 
 Der Beobachtungsbau ist **derselbe Code** wie im Training. Es gibt keine
-zweite Feature-Implementierung, die auseinanderlaufen könnte.
+zweite Feature-Implementierung, die auseinanderlaufen könnte. Die
+Beobachtungsversion wird aus `policy.model.obs_size` abgeleitet und beim
+Start geloggt; ein 190er-Checkpoint bekommt automatisch das v1-Layout.
 
 ## Voraussetzungen
 
@@ -50,6 +52,16 @@ python -m rlai.rlbot.run --config data\live\<mode>-<timestamp>\match.toml
 Alternativ über das Dashboard: *Live match* → Modell und Modus wählen →
 *Launch match*. Der Server erzeugt den Match-Ordner, schreibt `match.toml`,
 `bot-N.toml` und `launch.json` und startet den RLBot-Prozess.
+
+Zwei Vorstufen ohne Risiko:
+
+* **Run setup checks** (`GET /api/live/preflight`) prüft Plattform, RLBot-Import,
+  Bot-Entrypoint, vorhandenes Modell, Schreibrechte und – falls `psutil`
+  verfügbar ist – ob `RocketLeague.exe` läuft. Nicht erforderliche Punkte
+  sind als optional markiert.
+* **Prepare files only** (`POST /api/live/launch` mit `dry_run = true`)
+  schreibt alle Match-Dateien, startet aber nichts. Das funktioniert auch
+  unter Linux und ist die beste Prüfung, bevor RLBot ins Spiel kommt.
 
 Erzeugte Dateien:
 

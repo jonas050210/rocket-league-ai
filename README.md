@@ -62,20 +62,22 @@ Heatseeker wird von RocketSim nativ unterstützt (`GameMode.HEATSEEKER`).
 Verifiziert wurde: Berührung setzt `heatseeker_target_dir` auf `+1` (blau → oranges
 Tor), Zieltempo steigt von 2900 auf 2985 uu/s, der Ball fliegt ins Tor und wird
 als Tor für Blau gewertet (`tests/test_heatseeker.py`). Die Beobachtung ist in
-allen Modi **identisch 190-dimensional**; ein Checkpoint kann daher als
-Initialisierung für größere Teams dienen.
+allen Modi **identisch aufgebaut** (Version 2: 198 Werte, Version 1: 190);
+ein Checkpoint kann daher als Initialisierung für größere Teams dienen.
 
 ## Beobachtung, Aktionen, Belohnung
 
-* Beobachtung: 190 Werte – eigener Zustand, Ball (relativ im Auto-Frame),
+* Beobachtung: 198 Werte (v2) – eigener Zustand, Ball (relativ im Auto-Frame),
   2 Teamkollegen- und 3 Gegner-Slots (gepadet), 34 Boost-Pads, Restzeit,
-  Score-Differenz und die letzten 90 Aktionen als One-Hot.
+  Score-Differenz, **8 Werte Feldrahmen** (eigene Position, Blickrichtung,
+  Ballposition, Torrichtung und -distanz) und die letzten 90 Aktionen als
+  One-Hot. Die alte 190er-Version bleibt für bestehende Checkpoints ladbar.
 * Aktionen: 90 diskrete Lookup-Table-Aktionen (Gas/Bremse, Lenken, Boost,
   Handbremse, Sprung/Flip, Luftsteuerung), identisch in Training, Evaluation
   und RLBot-Adapter.
 * Belohnung: Tore (+10) und Gegentore (−10) dominieren; Potenzial-Shaping für
-  Ballfortschritt und Ausrichtung, kleine Boni für Touch, Boost-Effizienz und
-  Verteidigung. Alle Gewichte sind pro Lauf konfigurierbar und werden geloggt.
+  Ballfortschritt und Ausrichtung, kleine Boni für Touch, Boost-Effizienz,
+  Verteidigung und Karosseriekontakt (Bump). Alle Gewichte sind pro Lauf konfigurierbar und werden geloggt.
   Beim Tor wird kein Distanz-Shaping angewendet, damit die Torprämie nicht
   teilweise aufgehoben wird.
 
@@ -87,8 +89,14 @@ Initialisierung für größere Teams dienen.
   sammelt Rollouts, trainiert zentral und schreibt Metriken in SQLite.
 * Checkpoints sind atomar und unveränderlich; der stabile Zeiger wird nur
   explizit gesetzt. Der letzte Checkpoint ist gegen Löschen geschützt.
-* Resume nach Unterbrechung lädt Modell, Optimizer und Schrittstand.
-* Selbstspiel nutzt eingefrorene Snapshots als Gegnerpool (optional).
+* Resume nach Unterbrechung lädt Modell, Optimizer, Schrittstand,
+  Gegnerpool-Bilanz und Curriculum-Stufe.
+* Selbstspiel nutzt einen begrenzten Pool eingefrorener Snapshots mit
+  Elo-/PFSP-Auswahl (optional); ein Curriculum kann Gegnerstufen anhand
+  gemessener Siegquoten weiterschalten.
+* Periodische Evaluation gegen feste Gegner schreibt Siegquote, Tore und
+  95-%-Wilson-Intervall; `best.json` dokumentiert die beste Messung, ohne
+  automatisch zu deployen.
 * Alle Kennzahlen im Dashboard kommen aus der Datenbank des laufenden Prozesses –
   keine erfundenen Werte.
 
@@ -99,7 +107,9 @@ Details: `docs/TRAINING.md`.
 Sieben Ansichten: Dashboard, Training, Monitoring, Models, Evaluation, Live match,
 Settings. Es gibt keine Dummy-Buttons: nicht verfügbare Aktionen sind deaktiviert
 und erklären sich, fehlende Abhängigkeiten werden als Diagnose angezeigt.
-Live-Matches sind außerhalb von Windows deaktiviert (Serverprüfung, kein Fake).
+Live-Matches sind außerhalb von Windows deaktiviert (Serverprüfung, kein Fake);
+Schaltflächen für Setup-Prüfung und reines Vorbereiten der Match-Dateien
+funktionieren auch dort und zeigen echte Ergebnisse.
 
 ## Tests
 
@@ -107,10 +117,12 @@ Live-Matches sind außerhalb von Windows deaktiviert (Serverprüfung, kein Fake)
 python -m pytest -q
 ```
 
-Ergebnis in dieser Umgebung: **76 passed** in ca. 4,6 s (2 vCPU, kein GPU, kein
-Spiel). Abgedeckt: Modi, Aktionen, Beobachtung/Parität, Belohnungen, PPO,
-Checkpoint-Schutz, Store, API, Evaluation, Heatseeker-Regeln. Nicht abgedeckt:
-echtes Rocket League, RLBot-Start, GPU-Pfad.
+Ergebnis in dieser Umgebung: **129 passed** in ca. 5,8 s (2 vCPU, keine GPU,
+kein Spiel). Abgedeckt: Modi, Aktionen, Beobachtung v1/v2 inkl. Parität,
+Belohnungs-Events, PPO inkl. Truncation-Bootstrap und Early Stop,
+Checkpoint-Schutz und best-Zeiger, Gegnerpool/Curriculum, Store, API,
+Evaluation inkl. Konfidenzintervall, Heatseeker-Regeln. Nicht abgedeckt:
+echtes Rocket League, RLBot-Start, GPU-Pfad, Spielstärke.
 
 ## Grenzen
 

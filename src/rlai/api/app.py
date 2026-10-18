@@ -53,6 +53,7 @@ class EvaluateRequest(BaseModel):
 class LiveLaunchRequest(BaseModel):
     model_id: str | None = None
     mode: str = "soccer-1v1"
+    dry_run: bool = False
 
 
 def create_app(store_path: Path | None = None) -> FastAPI:
@@ -310,12 +311,20 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             "note": "Rocket League must be running and RLBot v5 installed. Live matches cannot be verified inside this sandbox.",
         }
 
+    @app.get("/api/live/preflight")
+    def live_preflight():
+        from ..live import preflight
+
+        return preflight(paths)
+
     @app.post("/api/live/launch", dependencies=[Depends(require_auth)])
     def live_launch(request: LiveLaunchRequest):
         from ..live import LiveUnavailable, launch_match
 
         try:
-            return launch_match(paths, request.model_id, request.mode)
+            return launch_match(
+                paths, request.model_id, request.mode, dry_run=request.dry_run
+            )
         except LiveUnavailable as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
@@ -417,6 +426,10 @@ def _presets() -> list[dict]:
                     "episode_seconds": 15,
                     "n_workers": 4,
                     "rollout_steps": 512,
+                    "eval_interval": 10,
+                    "eval_opponent": "idle",
+                    "eval_games": 4,
+                    "eval_match_seconds": 20,
                 }
             ).to_dict(),
         },
@@ -431,6 +444,25 @@ def _presets() -> list[dict]:
                     "opponent": "chase",
                     "total_steps": 2_000_000,
                     "n_workers": 6,
+                    "eval_interval": 10,
+                    "eval_games": 6,
+                }
+            ).to_dict(),
+        },
+        {
+            "id": "1v1-curriculum",
+            "name": "1v1 curriculum",
+            "description": "Staged opponents (idle → chaser → mixed → self-play); promotion only on a measured win rate.",
+            "config": base.model_copy(
+                update={
+                    "run_name": "1v1 curriculum",
+                    "mode": "soccer-1v1",
+                    "opponent": "idle",
+                    "curriculum": True,
+                    "total_steps": 2_000_000,
+                    "n_workers": 6,
+                    "eval_interval": 10,
+                    "eval_games": 6,
                 }
             ).to_dict(),
         },
@@ -445,6 +477,7 @@ def _presets() -> list[dict]:
                     "self_play": True,
                     "total_steps": 10_000_000,
                     "n_workers": 8,
+                    "eval_interval": 20,
                 }
             ).to_dict(),
         },
@@ -459,6 +492,7 @@ def _presets() -> list[dict]:
                     "self_play": True,
                     "total_steps": 20_000_000,
                     "n_workers": 8,
+                    "eval_interval": 20,
                 }
             ).to_dict(),
         },
@@ -473,6 +507,7 @@ def _presets() -> list[dict]:
                     "self_play": True,
                     "total_steps": 30_000_000,
                     "n_workers": 8,
+                    "eval_interval": 20,
                 }
             ).to_dict(),
         },
@@ -487,6 +522,7 @@ def _presets() -> list[dict]:
                     "self_play": True,
                     "total_steps": 10_000_000,
                     "n_workers": 8,
+                    "eval_interval": 20,
                 }
             ).to_dict(),
         },

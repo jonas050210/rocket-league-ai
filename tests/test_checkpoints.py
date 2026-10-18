@@ -105,3 +105,64 @@ def test_torch_load_of_production_checkpoint(trained_model):
     with torch.no_grad():
         logits, values = model(torch.zeros(1, config.obs_size))
     assert logits.shape == (1, 90) and values.shape == (1,)
+
+
+def test_best_pointer_only_moves_up(tmp_path):
+    first = _save(tmp_path, 10)
+    second = _save(tmp_path, 20)
+    assert checkpoints.best_model(tmp_path) is None
+    assert checkpoints.best_record(tmp_path) == {}
+
+    record = checkpoints.set_best(tmp_path, first["id"], 0.4)
+    assert record["id"] == first["id"]
+    assert checkpoints.best_model(tmp_path)["id"] == first["id"]
+    assert checkpoints.best_record(tmp_path)["score"] == pytest.approx(0.4)
+
+    # a worse or equal score never replaces the pointer
+    assert checkpoints.set_best(tmp_path, second["id"], 0.39)["id"] == first["id"]
+    assert checkpoints.set_best(tmp_path, second["id"], 0.4)["id"] == first["id"]
+    assert checkpoints.best_model(tmp_path)["id"] == first["id"]
+
+    record = checkpoints.set_best(tmp_path, second["id"], 0.7, metric="win_rate")
+    assert record["previous"] == first["id"]
+    assert checkpoints.best_model(tmp_path)["id"] == second["id"]
+    # best is not the same thing as stable
+    assert checkpoints.best_model(tmp_path)["stable"] is False
+    assert checkpoints.stable_model(tmp_path) is None
+
+
+def test_best_flag_in_listing_and_unknown_id(tmp_path):
+    manifest = _save(tmp_path, 10)
+    checkpoints.set_best(tmp_path, manifest["id"], 0.5)
+    listed = checkpoints.list_models(tmp_path)
+    assert listed[0]["best"] is True
+    assert checkpoints.get_model(tmp_path, manifest["id"])["best"] is True
+    with pytest.raises(KeyError):
+        checkpoints.set_best(tmp_path, "does-not-exist", 0.9)
+
+
+def test_pruning_never_deletes_the_best(tmp_path):
+    first = _save(tmp_path, 10)
+    for step in (20, 30, 40):
+        _save(tmp_path, step)
+    checkpoints.set_best(tmp_path, first["id"], 0.8)
+    deleted = checkpoints.prune_candidates(tmp_path, keep=1)
+    assert first["id"] not in deleted
+    assert checkpoints.best_model(tmp_path)["id"] == first["id"]
+    assert first["id"] in {m["id"] for m in checkpoints.list_models(tmp_path)}
+
+
+def test_deleting_best_removes_the_pointer(tmp_path):
+    first = _save(tmp_path, 10)
+    _save(tmp_path, 20)
+    checkpoints.set_best(tmp_path, first["id"], 0.8)
+    checkpoints.delete_model(tmp_path, first["id"])
+    assert checkpoints.best_model(tmp_path) is None
+    assert checkpoints.best_record(tmp_path) == {}
+
+
+def test_corrupt_best_pointer_is_ignored(tmp_path):
+    _save(tmp_path, 10)
+    (tmp_path / checkpoints.BEST_POINTER).write_text("{not json", encoding="utf-8")
+    assert checkpoints.best_model(tmp_path) is None
+    assert checkpoints.best_record(tmp_path) == {}

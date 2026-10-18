@@ -27,7 +27,7 @@ from rlgym.rocket_league.sim.rocketsim_engine import RocketSimEngine
 from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMutator, MutatorSequence
 
 from .modes import ModeSpec
-from .obs import SoccerObsBuilder
+from .obs import OBS_VERSION, SoccerObsBuilder
 from .rewards import RewardWeights, SoccerReward
 
 GOAL_HALF_WIDTH = 892.755
@@ -101,13 +101,14 @@ def build_rlgym_env(
     episode_seconds: float | None = None,
     tick_skip: int = 8,
     rlbot_delay: bool = True,
+    obs_version: int = OBS_VERSION,
 ) -> RLGym:
     kickoff = ModeKickoffMutator() if spec.heatseeker else KickoffMutator()
     return RLGym(
         state_mutator=MutatorSequence(
             FixedTeamSizeMutator(spec.team_size, spec.team_size), kickoff
         ),
-        obs_builder=SoccerObsBuilder(spec),
+        obs_builder=SoccerObsBuilder(spec, obs_version=obs_version),
         action_parser=RepeatAction(LookupTableAction(), tick_skip),
         reward_fn=SoccerReward(spec, reward_weights),
         transition_engine=ModeRocketSimEngine(spec, rlbot_delay=rlbot_delay),
@@ -156,8 +157,10 @@ class MatchEnv:
         reward_weights: RewardWeights | None = None,
         episode_seconds: float | None = None,
         rlbot_delay: bool = True,
+        obs_version: int = OBS_VERSION,
     ):
         self.spec = spec
+        self.obs_version = int(obs_version)
         self.opponent = opponent
         self.seed = int(seed)
         self.tick_skip = tick_skip
@@ -170,6 +173,7 @@ class MatchEnv:
             episode_seconds=self.episode_seconds,
             tick_skip=tick_skip,
             rlbot_delay=rlbot_delay,
+            obs_version=self.obs_version,
         )
         self.episode_index = 0
         self.start_tick = 0
@@ -179,6 +183,8 @@ class MatchEnv:
         self.episode_goals_against = 0
         self.last_goal_team: int | None = None
         self._observations: dict[str, np.ndarray] = {}
+        self._touch_total = -1
+        self._touches: dict[str, int] = {}
 
     # -- helper properties -------------------------------------------------
     @property
@@ -206,10 +212,19 @@ class MatchEnv:
         self.episode_goals_for = 0
         self.episode_goals_against = 0
         self.last_goal_team = None
+        self._touch_total = -1
         self._observations = obs
         self.opponent.reset(self)
         self._sync_clock()
         return obs
+
+    def _touch_cache(self, state) -> dict[str, int]:
+        """Reuse the touch dict unless a ball touch actually happened."""
+        total = sum(int(state.cars[a].ball_touches) for a in state.cars)
+        if total != getattr(self, "_touch_total", -1):
+            self._touch_total = total
+            self._touches = {a: int(state.cars[a].ball_touches) for a in state.cars}
+        return self._touches
 
     def _sync_clock(self) -> None:
         elapsed = (self.env.state.tick_count - self.start_tick) / 120.0
@@ -260,7 +275,7 @@ class MatchEnv:
             score_orange=self.score_orange,
             goal_scored=goal,
             scoring_team=scoring_team,
-            touches={a: int(state.cars[a].ball_touches) for a in state.cars},
+            touches=self._touch_cache(state),
         )
         return StepResult(
             obs=obs,

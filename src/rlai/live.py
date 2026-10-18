@@ -115,20 +115,19 @@ overtime = "Unlimited"
     return path
 
 
-def launch_match(paths: dict[str, Path], model_id: str | None, mode: str) -> dict:
-    if platform.system() != "Windows":
-        raise LiveUnavailable(
-            "Live match launch requires Windows with Rocket League (Epic) and RLBot v5 installed. "
-            "This environment can only run the headless simulator. Use the documented Windows procedure."
-        )
-    try:
-        import rlbot  # noqa: F401
-    except Exception as exc:
-        raise LiveUnavailable(f"rlbot is not installed in this environment: {exc}") from exc
+def prepare_match(paths: dict[str, Path], model_id: str | None, mode: str) -> dict:
+    """Resolve a model and write all match files without launching anything.
+
+    Useful for a dry run on any OS and as the single source of truth for both
+    the GUI and the CLI.
+    """
     if mode not in mode_ids():
         raise LiveUnavailable(f"unsupported mode {mode!r}")
     if model_id:
-        manifest = checkpoints.get_model(paths["models"], model_id)
+        try:
+            manifest = checkpoints.get_model(paths["models"], model_id)
+        except KeyError as exc:
+            raise LiveUnavailable(str(exc)) from exc
     else:
         manifest = checkpoints.stable_model(paths["models"])
     if not manifest:
@@ -138,7 +137,86 @@ def launch_match(paths: dict[str, Path], model_id: str | None, mode: str) -> dic
     config = write_match_config(
         mode=mode, model_path=model_path, python=sys.executable, directory=directory
     )
-    log_path = directory / "launch.log"
+    return {
+        "mode": mode,
+        "model_id": manifest["id"],
+        "model": str(model_path),
+        "config": str(config),
+        "directory": str(directory),
+        "log": str(directory / "launch.log"),
+    }
+
+
+def preflight(paths: dict[str, Path]) -> dict:
+    """Environment checks for a reliable first live test on Windows."""
+    checks: list[dict] = []
+
+    def add(name: str, ok: bool, detail: str, required: bool = True) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail, "required": required})
+
+    is_windows = platform.system() == "Windows"
+    add("windows", is_windows, f"platform is {platform.system()}", required=True)
+    try:
+        import rlbot
+
+        add("rlbot", True, f"rlbot {getattr(rlbot, '__version__', 'unknown')} importable", True)
+    except Exception as exc:
+        add("rlbot", False, f"rlbot import failed: {exc}", True)
+    bot_file = project_root() / "rlbot" / "bot.py"
+    add("bot entrypoint", bot_file.exists(), str(bot_file), True)
+    stable = checkpoints.stable_model(paths["models"])
+    best = checkpoints.best_model(paths["models"])
+    add(
+        "model",
+        bool(stable or best),
+        f"stable={stable['id'] if stable else None} best={best['id'] if best else None}",
+        True,
+    )
+    try:
+        probe = paths["root"] / "live" / ".preflight"
+        probe.mkdir(parents=True, exist_ok=True)
+        (probe / "write.test").write_text("ok", encoding="utf-8")
+        (probe / "write.test").unlink()
+        add("data directory writable", True, str(paths["root"]), True)
+    except OSError as exc:
+        add("data directory writable", False, str(exc), True)
+    try:
+        import psutil
+
+        running = any(
+            proc.info.get("name", "") == "RocketLeague.exe"
+            for proc in psutil.process_iter(["name"])
+        )
+        add("game running", running, "RocketLeague.exe", False)
+    except Exception as exc:  # pragma: no cover - psutil is a dependency
+        add("game running", False, str(exc), False)
+    return {
+        "ok": all(check["ok"] for check in checks if check["required"]),
+        "platform": platform.system(),
+        "checks": checks,
+    }
+
+
+def launch_match(
+    paths: dict[str, Path], model_id: str | None, mode: str, *, dry_run: bool = False
+) -> dict:
+    if not dry_run and platform.system() != "Windows":
+        raise LiveUnavailable(
+            "Live match launch requires Windows with Rocket League (Epic) and RLBot v5 installed. "
+            "This environment can only run the headless simulator. Use the documented Windows procedure."
+        )
+    record = prepare_match(paths, model_id, mode)
+    if dry_run:
+        record["launched"] = False
+        record["dry_run"] = True
+        return record
+    try:
+        import rlbot  # noqa: F401
+    except Exception as exc:
+        raise LiveUnavailable(f"rlbot is not installed in this environment: {exc}") from exc
+    config = Path(record["config"])
+    model_path = Path(record["model"])
+    log_path = Path(record["log"])
     log_file = open(log_path, "ab")
     env = os.environ.copy()
     env["RLAI_MODEL"] = str(model_path)
@@ -154,12 +232,6 @@ def launch_match(paths: dict[str, Path], model_id: str | None, mode: str) -> dic
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     log_file.close()
-    record = {
-        "pid": process.pid,
-        "mode": mode,
-        "model_id": manifest["id"],
-        "config": str(config),
-        "log": str(log_path),
-    }
+    record.update({"pid": process.pid, "launched": True})
     _LIVE[str(process.pid)] = record
     return record

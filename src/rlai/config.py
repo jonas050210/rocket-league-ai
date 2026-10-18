@@ -9,7 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .modes import mode_ids
-from .obs import OBS_SIZE
+from .obs import OBS_SIZE_BY_VERSION, OBS_VERSION, obs_size
 from .rewards import RewardWeights
 
 
@@ -73,6 +73,8 @@ class TrainingConfig(BaseModel):
     epochs: int = Field(default=4, ge=1, le=30)
     minibatch_size: int = Field(default=1024, ge=64, le=65536)
     max_grad_norm: float = Field(default=0.5, gt=0, le=10)
+    clip_value: float = Field(default=0.2, ge=0, le=10)
+    target_kl: float = Field(default=0.05, ge=0, le=10)
     lr_anneal: bool = True
     device: str = "auto"
     opponent: str = "chase"
@@ -82,8 +84,24 @@ class TrainingConfig(BaseModel):
     keep_checkpoints: int = Field(default=8, ge=1, le=100)
     reward: RewardWeights = Field(default_factory=RewardWeights)
     policy: PolicySettings = Field(default_factory=PolicySettings)
+    obs_version: int = OBS_VERSION
     episodes_per_eval: int = Field(default=20, ge=1, le=1000)
     eval_opponent: str = "chase"
+    eval_interval: int = Field(default=0, ge=0, le=100000)
+    eval_games: int = Field(default=4, ge=1, le=100)
+    eval_match_seconds: float = Field(default=30.0, ge=5, le=600)
+    curriculum: bool = False
+
+    @field_validator("reward", mode="before")
+    @classmethod
+    def _reward_legacy_alias(cls, value):
+        # Keep old configuration files working after the demo -> bump rename.
+        if isinstance(value, dict) and "demo" in value:
+            value = dict(value)
+            if "bump" in value:
+                raise ValueError("reward must use either 'bump' or the legacy 'demo'")
+            value["bump"] = value.pop("demo")
+        return value
 
     @field_validator("mode")
     @classmethod
@@ -91,6 +109,13 @@ class TrainingConfig(BaseModel):
         if value not in mode_ids():
             raise ValueError(f"mode must be one of {mode_ids()}")
         return value
+
+    @field_validator("obs_version")
+    @classmethod
+    def _obs_version_valid(cls, value: int) -> int:
+        if int(value) not in OBS_SIZE_BY_VERSION:
+            raise ValueError(f"obs_version must be one of {sorted(OBS_SIZE_BY_VERSION)}")
+        return int(value)
 
     @field_validator("device")
     @classmethod
@@ -128,7 +153,7 @@ class TrainingConfig(BaseModel):
         from .policy import PolicyConfig
 
         return PolicyConfig(
-            obs_size=OBS_SIZE,
+            obs_size=obs_size(self.obs_version),
             hidden=tuple(self.hidden_tuple),
             activation=self.policy.activation,
         )
@@ -141,6 +166,10 @@ class TrainingConfig(BaseModel):
         data = self.model_dump()
         data["reward"] = self.reward.to_dict()
         return data
+
+    @property
+    def observation_size(self) -> int:
+        return obs_size(self.obs_version)
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)

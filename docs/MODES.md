@@ -1,7 +1,8 @@
 # Spielmodi
 
-Alle Modi teilen denselben Beobachtungsraum (190 Werte) und denselben
-Aktionsraum (90 diskrete Aktionen). Unterschiede sind reine Konfiguration:
+Alle Modi teilen denselben Aufbau des Beobachtungsraums (198 Werte in der
+aktuellen Version 2; die alte Version 1 mit 190 Werten bleibt ladbar) und
+denselben Aktionsraum (90 diskrete Aktionen). Unterschiede sind reine Konfiguration:
 Teamgröße, Arena-Modus, Kickoff-Zustand, Boost-Regeln und Gegner.
 
 ## Übersicht
@@ -13,21 +14,30 @@ Teamgröße, Arena-Modus, Kickoff-Zustand, Boost-Regeln und Gegner.
 | `soccer-3v3` | 3 | 6 | `GameMode.SOCCAR` | Beobachtung nutzt drei Slots pro Team |
 | `heatseeker-2v2` | 2 | 4 | `GameMode.HEATSEEKER` | Homing-Ball, Tempoplus, unendlich Boost |
 
-## Beobachtung (190 Dimensionen)
+## Beobachtung (Version 2, 198 Dimensionen)
 
 | Block | Werte | Inhalt |
 | --- | --- | --- |
-| Selbst | 10 | Boost, Bodenkontakt, Supersonic, Sprung/Flip-Status, Position, Geschwindigkeit |
-| Ball | 7 | relative Position und Geschwindigkeit im Auto-Frame |
+| Selbst | 10 | Boost, Bodenkontakt, Supersonic, Flip-Fähigkeit, Demo, Sprung/Flip-Status, Luftzeit, Handbremse |
+| Ball | 7 | relative Position und Geschwindigkeit im Auto-Frame, Balltempo |
 | Teamkollegen | 2 × 9 | relative Position/Geschwindigkeit, Boost, Bodenkontakt; fehlende Slots = 0 |
 | Gegner | 3 × 9 | wie Teamkollegen |
 | Boost-Pads | 34 | Cooldown-Zeiten der großen und kleinen Pads |
-| Global | 4 | Restzeit, Score-Differenz, Kickoff-Flag, Spielmodus-Flag |
+| Global | 4 | Restzeit, Score-Differenz, Heatseeker-Flag, Team-Flag |
+| Feldrahmen | 8 | eigene x/y-Position, Vorwärtsvektor x/y, Ball-x/y, Ausrichtung Vorwärts zu Ball→Gegnertor, Distanz zum Gegnertor |
 | letzte Aktion | 90 | One-Hot der zuletzt ausgeführten Aktion |
 
-Die Transformation in das Auto-Frame macht die Beobachtung unabhängig von
-Teamseite und Spawnrotation. Der RLBot-Adapter erzeugt denselben Vektor aus
-einem echten `GamePacket`; ein Paritätstest vergleicht beide Werte
+Die relative Transformation in das Auto-Frame macht die übrigen Blöcke
+unabhängig von Teamseite und Spawnrotation. Sie kann aber die feste Position
+der Tore nicht ausdrücken: Aus rein relativen Vektoren ist nicht ableitbar,
+wo das gegnerische Tor liegt. Genau diese Information ergänzt der
+Feldrahmen-Block. Deshalb ist Version 2 Standard; Version 1 (190 Werte, ohne
+Feldrahmen) wird weiter erzeugt, damit ältere Checkpoints ladbar und
+evaluierbar bleiben. Welche Version gilt, entscheidet die `obs_size` des
+Checkpoints, nicht eine globale Einstellung.
+
+Der RLBot-Adapter erzeugt denselben Vektor aus einem echten `GamePacket`;
+ein Paritätstest vergleicht beide Werte für Version 1 und 2 in allen Modi
 (`tests/test_rlbot_adapter.py`, maximale Abweichung < 1e-3).
 
 ## Aktionen (90)
@@ -55,7 +65,7 @@ Standardgewichte (pro Lauf änderbar):
 | Annäherung | 0.03 | Geschwindigkeit in Ballrichtung |
 | Boost | 0.02 | Strafe für verschwendeten Boost |
 | Verteidigung | 0.15 | Auto zwischen Ball und eigenem Tor, Ball bewegt sich zum eigenen Tor |
-| Demo | 0.3 | Gegner wurde demoliert |
+| Bump | 0.3 | Karosseriekontakt mit einem Gegner (RLGym meldet `bump_victim_id`); eine Demo-Erkennung ist nicht implementiert |
 
 Beim Tor wird das Potenzial-Shaping übersprungen, damit die 10 Punkte nicht
 durch die große Ballbewegung teilweise kompensiert werden. Jede Komponente

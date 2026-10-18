@@ -376,6 +376,7 @@ views.training = async () => {
         <div class="form-grid">
           <label class="field full"><span>Run name</span><input name="run_name" value="${esc(config.run_name)}" maxlength="80" required /></label>
           <label class="field"><span>Game mode</span><select name="mode">${modeOptions}</select></label>
+          <label class="field"><span>Observation layout</span><select name="obs_version">${[[2, "v2 · field frame (198)"], [1, "v1 · legacy (190)"]].map(([value, label]) => `<option value="${value}" ${Number(config.obs_version) === value ? "selected" : ""}>${label}</option>`).join("")}</select><small>v1 only for older checkpoints and comparisons.</small></label>
           <label class="field"><span>Device</span><select name="device">${["auto", "cpu", "cuda", "mps"].map((d) => `<option ${d === config.device ? "selected" : ""}>${d}</option>`).join("")}</select></label>
           <label class="field"><span>Environment workers</span><input name="n_workers" type="number" min="1" max="32" value="${config.n_workers}" /><small>One RocketSim arena per worker process.</small></label>
           <label class="field"><span>Total environment steps</span><input name="total_steps" type="number" min="2000" step="2000" value="${config.total_steps}" /><small>Budget across all workers.</small></label>
@@ -384,10 +385,15 @@ views.training = async () => {
           <label class="field"><span>Learning rate</span><input name="learning_rate" type="number" step="0.00001" min="0.000001" value="${config.learning_rate}" /></label>
           <label class="field"><span>Entropy coefficient</span><input name="entropy_coef" type="number" step="0.001" min="0" value="${config.entropy_coef}" /></label>
           <label class="field"><span>Gamma</span><input name="gamma" type="number" step="0.001" min="0.8" max="0.9999" value="${config.gamma}" /></label>
-          <label class="field"><span>Opponent</span><select name="opponent">${["chase", "random", "idle"].map((o) => `<option ${o === config.opponent ? "selected" : ""}>${o}</option>`).join("")}</select><small>Ignored when self-play is enabled.</small></label>
+          <label class="field"><span>Opponent</span><select name="opponent">${["chase", "random", "idle"].map((o) => `<option ${o === config.opponent ? "selected" : ""}>${o}</option>`).join("")}</select><small>Ignored when self-play or the curriculum selects the opponent.</small></label>
           <label class="field"><span>Checkpoint every N iterations</span><input name="checkpoint_interval" type="number" min="1" max="10000" value="${config.checkpoint_interval}" /></label>
           <label class="field"><span>Seed</span><input name="seed" type="number" value="${config.seed}" /><small>Controls kickoffs and action sampling.</small></label>
-          <label class="field full approval-check"><input type="checkbox" name="self_play" ${config.self_play ? "checked" : ""} /><span>Self-play with an opponent pool of frozen snapshots (recommended after the chaser baseline).</span></label>
+          <label class="field"><span>Evaluation every N iterations</span><input name="eval_interval" type="number" min="0" max="100000" value="${config.eval_interval}" /><small>0 disables periodic evaluation.</small></label>
+          <label class="field"><span>Evaluation games</span><input name="eval_games" type="number" min="1" max="100" value="${config.eval_games}" /><small>Fewer games mean a wider confidence interval.</small></label>
+          <label class="field"><span>Evaluation match seconds</span><input name="eval_match_seconds" type="number" min="5" max="600" value="${config.eval_match_seconds}" /></label>
+          <label class="field"><span>Evaluation opponent</span><select name="eval_opponent">${["chase", "random", "idle", "self"].map((o) => `<option ${o === config.eval_opponent ? "selected" : ""}>${o}</option>`).join("")}</select></label>
+          <label class="field full approval-check"><input type="checkbox" name="self_play" ${config.self_play ? "checked" : ""} /><span>Self-play with an opponent pool of frozen snapshots (PFSP-weighted Elo pool).</span></label>
+          <label class="field full approval-check"><input type="checkbox" name="curriculum" ${config.curriculum ? "checked" : ""} /><span>Curriculum: promote through measured stage targets (idle → chaser → mixed → self-play).</span></label>
         </div>
         <details class="advanced-config">
           <summary>PPO details</summary>
@@ -395,15 +401,20 @@ views.training = async () => {
             <label class="field"><span>Epochs per rollout</span><input name="epochs" type="number" min="1" max="30" value="${config.epochs}" /></label>
             <label class="field"><span>Minibatch size</span><input name="minibatch_size" type="number" min="64" max="65536" value="${config.minibatch_size}" /></label>
             <label class="field"><span>Clip coefficient</span><input name="clip_coef" type="number" step="0.01" min="0.01" max="1" value="${config.clip_coef}" /></label>
+            <label class="field"><span>Value clip</span><input name="clip_value" type="number" step="0.01" min="0" max="10" value="${config.clip_value}" /><small>0 disables value clipping.</small></label>
+            <label class="field"><span>Target KL</span><input name="target_kl" type="number" step="0.005" min="0" max="10" value="${config.target_kl}" /><small>Early-stop threshold; 0 disables it.</small></label>
             <label class="field"><span>GAE lambda</span><input name="gae_lambda" type="number" step="0.01" min="0.8" max="0.999" value="${config.gae_lambda}" /></label>
+            <label class="field"><span>Value coefficient</span><input name="value_coef" type="number" step="0.05" min="0" max="10" value="${config.value_coef}" /></label>
+            <label class="field"><span>Max gradient norm</span><input name="max_grad_norm" type="number" step="0.1" min="0.1" max="10" value="${config.max_grad_norm}" /></label>
             <label class="field"><span>Tick skip</span><input name="tick_skip" type="number" min="1" max="16" value="${config.tick_skip}" /><small>Simulator ticks per decision.</small></label>
+            <label class="field"><span>Pool snapshot every N iterations</span><input name="snapshot_interval" type="number" min="1" max="1000" value="${config.snapshot_interval}" /><small>Frozen copies for self-play.</small></label>
             <label class="field"><span>Keep checkpoints</span><input name="keep_checkpoints" type="number" min="1" max="100" value="${config.keep_checkpoints}" /></label>
           </div>
         </details>
         <details class="advanced-config">
           <summary>Reward weights</summary>
           <div class="form-grid" style="padding:12px 0 0">
-            ${["goal", "concede", "touch", "progress", "alignment", "approach", "boost", "defense"]
+            ${["goal", "concede", "touch", "progress", "alignment", "approach", "boost", "defense", "bump"]
               .map((key) => `<label class="field"><span>${key}</span><input name="reward_${key}" type="number" step="0.01" min="0" value="${config.reward[key] ?? 0}" /></label>`)
               .join("")}
           </div>
@@ -480,7 +491,18 @@ views.training = async () => {
       gae_lambda: Number(data.get("gae_lambda")),
       tick_skip: Number(data.get("tick_skip")),
       keep_checkpoints: Number(data.get("keep_checkpoints")),
+      obs_version: Number(data.get("obs_version")),
+      clip_value: Number(data.get("clip_value")),
+      target_kl: Number(data.get("target_kl")),
+      value_coef: Number(data.get("value_coef")),
+      max_grad_norm: Number(data.get("max_grad_norm")),
+      snapshot_interval: Number(data.get("snapshot_interval")),
+      eval_interval: Number(data.get("eval_interval")),
+      eval_games: Number(data.get("eval_games")),
+      eval_match_seconds: Number(data.get("eval_match_seconds")),
+      eval_opponent: data.get("eval_opponent"),
       self_play: data.get("self_play") === "on",
+      curriculum: data.get("curriculum") === "on",
       reward,
       ...(resumeFrom ? { resume_from: resumeFrom } : {}),
     };
@@ -747,7 +769,7 @@ views.models = async () => {
         <tbody>${models.map((model) => {
           const evaluation = evalByModel[model.id];
           return `<tr>
-            <td><strong>${esc(model.id)}</strong><small>${fmtNumber(model.size_bytes)} bytes${model.stable ? " · stable pointer" : ""}</small></td>
+            <td><strong>${esc(model.id)}</strong><small>${fmtNumber(model.size_bytes)} bytes${model.stable ? " · stable pointer" : ""}${model.best ? " · best measured" : ""}</small></td>
             <td>${modelState(model.state, model.stable)}</td>
             <td>${esc(model.mode || "—")}</td>
             <td class="table-strong">${fmtNumber(model.step)}</td>
@@ -845,7 +867,8 @@ views.evaluation = async () => {
   const best = {};
   evaluations.forEach((item) => {
     const key = item.model_id || "unknown";
-    if (!best[key] || item.wins > best[key].wins) best[key] = item;
+    const rate = item.wins / Math.max(item.games, 1);
+    if (!best[key] || rate > best[key].rate) best[key] = { ...item, rate };
   });
 
   $("#view").innerHTML = `
@@ -863,15 +886,18 @@ views.evaluation = async () => {
     <section class="panel" style="margin-bottom:18px">
       <div class="panel-header"><div><h2>History</h2><p>Latest first. Compare win rate and goal difference.</p></div></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Model</th><th>Mode</th><th>Opponent</th><th>Record</th><th>Win rate</th><th>Goals</th><th>When</th></tr></thead>
-        <tbody>${evaluations.map((item) => `<tr>
+        <thead><tr><th>Model</th><th>Mode</th><th>Opponent</th><th>Record</th><th>Win rate (95 % CI)</th><th>Goals</th><th>When</th></tr></thead>
+        <tbody>${evaluations.map((item) => {
+          const ci = item.details?.win_rate_ci95;
+          return `<tr>
           <td><strong>${esc(item.model_id || "—")}</strong><small>${fmtNumber(item.games)} games · seed ${item.seed ?? "—"}</small></td>
           <td>${esc(item.mode)}</td><td>${esc(item.opponent)}</td>
           <td class="table-strong">${item.wins}W · ${item.losses}L · ${item.draws}D</td>
-          <td>${pct(item.wins / Math.max(item.games, 1))}</td>
+          <td>${pct(item.wins / Math.max(item.games, 1))}<small>${ci ? `${pct(ci[0])} – ${pct(ci[1])}` : "no interval recorded"}</small></td>
           <td>${item.goals_for} : ${item.goals_against}</td>
           <td>${esc((item.created_at || "").replace("T", " ").slice(0, 19))}</td>
-        </tr>`).join("")}</tbody>
+        </tr>`;
+        }).join("")}</tbody>
       </table></div>
     </section>
 
@@ -881,7 +907,7 @@ views.evaluation = async () => {
         <thead><tr><th>Model</th><th>Mode</th><th>Opponent</th><th>Win rate</th><th>Goal diff</th><th>Games</th></tr></thead>
         <tbody>${Object.entries(best).map(([model, item]) => `<tr>
           <td><strong>${esc(model)}</strong></td><td>${esc(item.mode)}</td><td>${esc(item.opponent)}</td>
-          <td class="table-strong">${pct(item.wins / Math.max(item.games, 1))}</td>
+          <td class="table-strong">${pct(item.rate)}</td>
           <td>${item.goals_for - item.goals_against >= 0 ? "+" : ""}${item.goals_for - item.goals_against}</td>
           <td>${item.games}</td></tr>`).join("")}</tbody>
       </table></div>
@@ -912,12 +938,18 @@ views.live = async () => {
           <div class="metadata-row"><span>Stable model</span><strong>${esc(status.stable_model?.id || "none")}</strong></div>
           <div class="metadata-row"><span>Launch supported</span><strong>${status.launch_supported ? "yes" : "no"}</strong></div>
         </div>
-        ${status.launch_supported ? `
+        <div class="config-actions"><button class="button" id="live-checks-run">${icon("shield")} Run setup checks</button></div>
+        <div class="metadata-list" id="live-checks"><div class="metadata-row"><span>Checks</span><strong>not run yet</strong></div></div>
+        ${models.length ? `
         <div class="form-grid">
-          <label class="field"><span>Model</span><select id="live-model">${models.map((m) => `<option value="${esc(m.id)}" ${m.stable ? "selected" : ""}>${esc(m.id)}${m.stable ? " (stable)" : ""}</option>`).join("")}</select></label>
+          <label class="field"><span>Model</span><select id="live-model">${models.map((m) => `<option value="${esc(m.id)}" ${m.stable ? "selected" : ""}>${esc(m.id)}${m.stable ? " (stable)" : ""}${m.best ? " · best" : ""}</option>`).join("")}</select></label>
           <label class="field"><span>Mode</span><select id="live-mode">${modes.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("")}</select></label>
         </div>
-        <div class="config-actions"><button class="button primary" id="live-launch" ${models.length ? "" : "disabled"}>${icon("play")} Launch match</button></div>` : ""}
+        <div class="config-actions">
+          <button class="button primary" id="live-launch" ${status.launch_supported ? "" : "disabled"}>${icon("play")} Launch match</button>
+          <button class="button" id="live-prepare">${icon("file")} Prepare files only</button>
+        </div>
+        <p class="subtle">${status.launch_supported ? "Launch starts RLBot with the written match files." : "Launch is disabled in this environment: Windows and RLBot v5 are required. Preparing files still works and shows exactly what a launch would write."}</p>` : `<p class="subtle">No checkpoints exist yet. Train or copy a model into data/models first.</p>`}
       </section>
 
       <section class="panel">
@@ -948,6 +980,22 @@ views.live = async () => {
       </table></div>
     </section>`;
 
+  const renderChecks = (report) => {
+    const node = $("#live-checks");
+    if (!node) return;
+    node.innerHTML = report.checks.map((check) => `
+      <div class="metadata-row"><span>${esc(check.name)}${check.required ? "" : " (optional)"}</span>
+      <strong>${check.ok ? "ok" : "missing"} · ${esc(check.detail)}</strong></div>`).join("");
+    toast(report.ok ? "Required checks passed" : "Required checks failed — see details", report.ok ? "info" : "error");
+  };
+  $("#live-checks-run")?.addEventListener("click", async () => {
+    try {
+      renderChecks(await api("/api/live/preflight"));
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  });
+
   $("#live-launch")?.addEventListener("click", async () => {
     try {
       const result = await api("/api/live/launch", {
@@ -955,6 +1003,18 @@ views.live = async () => {
         body: JSON.stringify({ model_id: $("#live-model").value, mode: $("#live-mode").value }),
       });
       toast(`Match launched · pid ${result.pid} · log ${result.log}`);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  });
+
+  $("#live-prepare")?.addEventListener("click", async () => {
+    try {
+      const result = await api("/api/live/launch", {
+        method: "POST",
+        body: JSON.stringify({ model_id: $("#live-model").value, mode: $("#live-mode").value, dry_run: true }),
+      });
+      toast(`Files prepared · ${result.directory}`);
     } catch (error) {
       toast(error.message, "error");
     }

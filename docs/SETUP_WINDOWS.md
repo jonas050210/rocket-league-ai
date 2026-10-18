@@ -80,17 +80,23 @@ python -m rlai.cli evaluate --model data\models\<id>\model.pt `
   --mode soccer-1v1 --opponent idle --games 4 --match-seconds 30
 ```
 
-Die Ausgabe enthält W/L/D, Tore und Spieldetails. Dieselbe Auswertung ist im
-Dashboard unter *Models → Evaluate* möglich.
+Die Ausgabe enthält W/L/D, Tore, Ballberührungen und ein 95-%-Wilson-Intervall
+sowie Spieldetails. Dieselbe Auswertung ist im Dashboard unter *Models →
+Evaluate* möglich.
 
 ## 5. Live-Match (Epic + RLBot)
 
 1. Rocket League starten und im Hauptmenü bleiben.
 2. Im Dashboard ein Modell promoten (*Models → Promote*) oder unter
    *Live match* ein Modell wählen.
-3. *Launch match* klicken. Der Server schreibt
-   `data\live\<mode>-<timestamp>\match.toml` und startet RLBot.
-4. Beim ersten Mal prüft RLBot, ob der Bot-Prozess startet. Log:
+3. Zuerst *Run setup checks* klicken. Die Liste zeigt Plattform, RLBot-Import,
+   Bot-Entrypoint, Modell, Schreibrechte und optional, ob
+   `RocketLeague.exe` läuft. Fehlende Pflichtpunkte müssen behoben werden.
+4. Optional *Prepare files only*: schreibt
+   `data\live\<mode>-<timestamp>\match.toml`, `bot-N.toml` und
+   `launch.json`, startet aber nichts. Danach die Dateien prüfen.
+5. *Launch match* klicken. Der Server startet RLBot mit denselben Dateien.
+6. Beim ersten Mal prüft RLBot, ob der Bot-Prozess startet. Log:
    `data\live\...\launch.log`.
 
 Wenn der Start fehlschlägt:

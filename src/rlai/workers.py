@@ -32,6 +32,10 @@ def _empty_rollout() -> dict[str, np.ndarray]:
         "values": [],
         "rewards": [],
         "dones": [],
+        # time-limit truncations bootstrap from the value of the final state;
+        # true terminations (goals) bootstrap with zero.
+        "truncated": [],
+        "bootstrap": [],
     }
 
 
@@ -50,7 +54,9 @@ def collect_rollout(env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int)
         actions, logprobs, values = policy.act(obs, deterministic=False)
         result = env.step(actions)
         rewards = np.asarray([result.rewards.get(a, 0.0) for a in agents], dtype=np.float32)
-        done = bool(result.done or result.truncated)
+        terminated = bool(result.done)
+        truncated = bool(result.truncated) and not terminated
+        done = terminated or truncated
 
         rollout["obs"].append(np.stack([obs[a] for a in agents]).astype(np.float32))
         rollout["actions"].append(np.asarray([actions[a] for a in agents], dtype=np.int64))
@@ -58,6 +64,15 @@ def collect_rollout(env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int)
         rollout["values"].append(np.asarray([values[a] for a in agents], dtype=np.float32))
         rollout["rewards"].append(rewards)
         rollout["dones"].append(np.full(n_agents, float(done), dtype=np.float32))
+        rollout["truncated"].append(np.full(n_agents, float(truncated), dtype=np.float32))
+        if truncated:
+            final_obs = {a: result.obs[a] for a in agents}
+            _, _, final_values = policy.act(final_obs, deterministic=True)
+            rollout["bootstrap"].append(
+                np.asarray([final_values[a] for a in agents], dtype=np.float32)
+            )
+        else:
+            rollout["bootstrap"].append(np.zeros(n_agents, dtype=np.float32))
 
         episode_rewards += rewards
         if done:
@@ -95,6 +110,8 @@ def collect_rollout(env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int)
         "values": np.stack(rollout["values"]),
         "rewards": np.stack(rollout["rewards"]),
         "dones": np.stack(rollout["dones"]),
+        "truncated": np.stack(rollout["truncated"]),
+        "bootstrap": np.stack(rollout["bootstrap"]),
         "last_values": np.asarray([last_values[a] for a in agents], dtype=np.float32),
         "episodes": episodes,
         "steps": n_steps,
@@ -111,6 +128,7 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
         spec = get_mode(config.mode)
         weights = RewardWeights.from_dict(config.reward.to_dict())
         opponent_name = "chase" if config.self_play else config.opponent
+        active_opponent = opponent_name
         env = MatchEnv(
             spec,
             build_opponent(opponent_name, seed=seed, device="cpu"),
@@ -118,6 +136,7 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
             tick_skip=config.tick_skip,
             reward_weights=weights,
             episode_seconds=config.episode_seconds,
+            obs_version=config.obs_version,
         )
         policy_config = PolicyConfig.from_dict(config.policy_config().to_dict())
         policy = TorchPolicy.from_config(policy_config, device="cpu")
@@ -136,7 +155,20 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
                 opponent_policy.model.load_state_dict(message["opponent_state"])
                 opponent_policy.model.eval()
                 env.opponent = ModelOpponent(opponent_policy, name="self-play", deterministic=True)
-            rollout = collect_rollout(env, policy, int(message["n_steps"]), int(message["seed"]))
+                active_opponent = "self"
+            else:
+                requested = message.get("opponent") or active_opponent
+                if requested != active_opponent:
+                    env.opponent = build_opponent(requested, seed=seed, device="cpu")
+                    active_opponent = requested
+            # Every worker gets its own deterministic episode seed; otherwise
+            # all workers would replay the identical kickoff sequence.
+            rollout = collect_rollout(
+                env,
+                policy,
+                int(message["n_steps"]),
+                int(message["seed"]) + worker_index * 104_729,
+            )
             rollout["type"] = "rollout"
             rollout["worker"] = worker_index
             remote.send(rollout)
@@ -179,7 +211,14 @@ class WorkerPool:
             if message.get("type") != "ready":
                 raise RuntimeError(f"worker {index} failed to start: {message}")
 
-    def collect(self, state_dict, n_steps: int, seed: int, opponent_state=None) -> list[dict]:
+    def collect(
+        self,
+        state_dict,
+        n_steps: int,
+        seed: int,
+        opponent_state=None,
+        opponent: str | None = None,
+    ) -> list[dict]:
         for parent in self.parents:
             parent.send(
                 {
@@ -188,6 +227,7 @@ class WorkerPool:
                     "n_steps": int(n_steps),
                     "seed": int(seed),
                     "opponent_state": opponent_state,
+                    "opponent": opponent,
                 }
             )
         results = []

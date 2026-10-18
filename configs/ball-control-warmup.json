@@ -32,7 +32,7 @@
     "approach": 0.03,
     "boost": 0.02,
     "defense": 0.15,
-    "demo": 0.3
+    "bump": 0.3
   },
   "policy": {
     "hidden": [
@@ -42,5 +42,8 @@
     "activation": "tanh"
   },
   "episodes_per_eval": 20,
-  "eval_opponent": "chase"
+  "eval_opponent": "idle",
+  "eval_interval": 10,
+  "eval_games": 4,
+  "eval_match_seconds": 20
 }
