@@ -1,0 +1,129 @@
+/* ==========================================================================
+   ROCKET LEAGUE AI — DESIGN TOKENS
+   Direction: green / black / gray, restrained gradients, high legibility.
+   This file is framework-agnostic. It is the preserved design foundation of
+   the former control room, rebuilt as a documented token layer.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* --- Surfaces ---------------------------------------------------------- */
+  --bg: #050806;
+  --bg-deep: #030504;
+  --sidebar: #060a07;
+  --panel: #0a100c;
+  --panel-raised: #0e1611;
+  --surface-2: #0d1510;
+  --surface-3: #121c16;
+  --surface-4: #18251d;
+
+  --body-gradient:
+    radial-gradient(1100px 620px at 16% -12%, rgba(67, 214, 125, 0.11), transparent 62%),
+    radial-gradient(900px 520px at 88% 0%, rgba(120, 161, 137, 0.06), transparent 58%),
+    linear-gradient(180deg, #060a07 0%, #070c09 42%, #040604 100%);
+  --sidebar-gradient:
+    linear-gradient(180deg, rgba(11, 18, 13, 0.98) 0%, rgba(6, 10, 7, 0.99) 56%, #040704 100%);
+  --panel-gradient:
+    linear-gradient(158deg, rgba(19, 29, 22, 0.92) 0%, rgba(10, 16, 12, 0.98) 58%, #080c09 100%);
+  --panel-gradient-raised:
+    linear-gradient(155deg, rgba(24, 37, 29, 0.98) 0%, rgba(13, 21, 16, 0.99) 60%, #0a100c 100%);
+  --topbar-gradient:
+    linear-gradient(180deg, rgba(8, 13, 9, 0.94) 0%, rgba(8, 13, 9, 0.78) 100%);
+
+  /* --- Lines & borders --------------------------------------------------- */
+  --line: #223128;
+  --line-soft: #16211a;
+  --line-strong: #334a3b;
+  --line-accent: rgba(85, 227, 139, 0.34);
+
+  /* --- Text -------------------------------------------------------------- */
+  --text: #eef6f0;
+  --muted: #a8b9ad;
+  --faint: #85978b;
+  --ink: var(--text);
+
+  /* --- Accent / semantics ------------------------------------------------ */
+  --accent: #55e38b;
+  --accent-strong: #25cb6d;
+  --accent-soft: rgba(85, 227, 139, 0.12);
+  --accent-softer: rgba(85, 227, 139, 0.06);
+  --accent-dark: #0f2a1a;
+  --accent-ink: #04130a;
+  --accent-gradient:
+    linear-gradient(135deg, #a5f8c0 0%, #58e58e 42%, #1fbf67 100%);
+  --accent-gradient-hover:
+    linear-gradient(135deg, #b7faca 0%, #6bef9d 42%, #2bd074 100%);
+  --accent-gradient-dim:
+    linear-gradient(135deg, #2f8f55 0%, #1d6b3d 100%);
+
+  --green: var(--accent);
+  --success: #55e38b;
+  --success-soft: rgba(85, 227, 139, 0.12);
+  --warning: #e6b45e;
+  --warning-soft: rgba(230, 180, 94, 0.12);
+  --danger: #f07474;
+  --danger-soft: rgba(240, 116, 116, 0.12);
+  --info: #74c7e8;
+  --info-soft: rgba(116, 199, 232, 0.12);
+  --violet: #c39bf0;
+
+  --red: var(--danger);
+  --blue: var(--info);
+  --orange: var(--warning);
+
+  /* --- Charts ------------------------------------------------------------ */
+  --chart-1: #55e38b;
+  --chart-2: #74c7e8;
+  --chart-3: #e6b45e;
+  --chart-4: #c39bf0;
+  --chart-grid: #1d2a22;
+  --chart-fill-start: rgba(85, 227, 139, 0.22);
+  --chart-fill-end: rgba(85, 227, 139, 0);
+
+  /* --- Typography -------------------------------------------------------- */
+  --font-sans:
+    Inter, "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+    Arial, sans-serif;
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --fs-2xs: 10px;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 15px;
+  --fs-xl: 19px;
+  --fs-2xl: 23px;
+  --fs-3xl: 29px;
+  --tracking-wide: 1.4px;
+  --tracking-wider: 2px;
+
+  /* --- Geometry ---------------------------------------------------------- */
+  --radius-sm: 7px;
+  --radius: 11px;
+  --radius-lg: 14px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+
+  /* --- Effects ----------------------------------------------------------- */
+  --focus: #9af5ba;
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+  --shadow-panel: 0 18px 60px rgba(0, 0, 0, 0.34);
+  --shadow-dialog: 0 32px 120px rgba(0, 0, 0, 0.62);
+  --glow-accent: 0 0 18px rgba(85, 227, 139, 0.18);
+  --transition-fast: 140ms ease;
+  --transition-base: 220ms ease;
+
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
