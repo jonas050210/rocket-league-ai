@@ -1,0 +1,16 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Template; the GUI generates per-car copies with unique agent ids.
+[settings]
+name = "Rocket League AI"
+loadout_file = "loadout.toml"
+root_dir = ""
+run_command = "python bot.py"
+run_command_linux = "python3 bot.py"
+agent_id = "rlai/agent"
+logo_file = ""
+
+[details]
+description = "Policy trained with discrete-action PPO in RocketSim. Requires RLAI_MODEL."
+developer = "rocket-league-ai"
+language = "Python"
+tags = ["1v1", "teamplay", "heatseeker"]

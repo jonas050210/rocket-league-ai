@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Rocket League AI · Design system</title>
+    <link rel="icon" href="./mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./theme.css" />
+    <style>
+      /* Documentation-only helpers. Not part of the shipped theme. */
+      .ds-swatches {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 10px;
+        padding: 0 20px 18px;
+      }
+      .ds-swatch {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--surface-2);
+      }
+      .ds-swatch i {
+        display: block;
+        height: 46px;
+      }
+      .ds-swatch span {
+        display: flex;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 8px 10px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 10px;
+        font-style: normal;
+      }
+      .ds-swatch span b,
+      .ds-swatch span em {
+        font-style: normal;
+        font-weight: 500;
+      }
+      .ds-swatch span em {
+        color: var(--faint);
+      }
+      .ds-stack {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 0 20px 18px;
+      }
+      .ds-section {
+        margin-bottom: 20px;
+      }
+      .ds-specimen {
+        padding: 0 20px 18px;
+      }
+      .ds-specimen h1 {
+        margin-top: 0;
+      }
+      .ds-specimen p {
+        color: var(--muted);
+        font-size: var(--fs-sm);
+      }
+      .ds-token-table td:first-child {
+        color: var(--muted);
+        font-family: var(--mono);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="./index.html">
+          <img src="./mark.svg" alt="" width="36" height="36" />
+          <span>ROCKET<br />LEAGUE AI</span>
+        </a>
+
+        <div class="workspace-switch" aria-label="Workspace">
+          <span class="workspace-avatar">P1</span>
+          <span>
+            theme-preservation
+            <small>Phase 1 · no runtime</small>
+          </span>
+          <span class="local-dot" aria-hidden="true"></span>
+        </div>
+
+        <p class="nav-caption">DESIGN SYSTEM</p>
+        <nav aria-label="Design sections">
+          <a class="nav-item active" href="#top">
+            <svg class="icon"><use href="./icons.svg#icon-layers" /></svg>
+            <span class="nav-text">Tokens</span>
+          </a>
+          <a class="nav-item" href="#components">
+            <svg class="icon"><use href="./icons.svg#icon-dashboard" /></svg>
+            <span class="nav-text">Components</span>
+          </a>
+          <a class="nav-item" href="#shell">
+            <svg class="icon"><use href="./icons.svg#icon-monitoring" /></svg>
+            <span class="nav-text">Shell preview</span>
+          </a>
+          <a class="nav-item" href="#forms">
+            <svg class="icon"><use href="./icons.svg#icon-configuration" /></svg>
+            <span class="nav-text">Forms</span>
+          </a>
+          <a class="nav-item" href="#states">
+            <svg class="icon"><use href="./icons.svg#icon-shield" /></svg>
+            <span class="nav-text">States</span>
+          </a>
+          <a class="nav-item" href="#data">
+            <svg class="icon"><use href="./icons.svg#icon-models" /></svg>
+            <span class="nav-text">Data views</span>
+            <span class="nav-count">4</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="foundation-note">
+            <span class="tiny-label">Phase 1</span>
+            <strong>Theme only</strong>
+            <p>
+              Static design reference. No backend, no training, no live data.
+            </p>
+            <a class="text-button" href="./index.html#scope">
+              Scope note
+              <svg class="icon"><use href="./icons.svg#icon-arrow" /></svg>
+            </a>
+          </div>
+          <div class="version">
+            <span>THEME 0.1.0</span>
+            <span>GREEN / BLACK / GRAY</span>
+          </div>
+          <button class="help-link" type="button" aria-disabled="true">
+            <span>?</span>
+            <span>Static preview</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="workspace-main">
+        <div class="preview-banner">
+          <span>STATIC DESIGN REFERENCE</span>
+          <strong>Phase 1</strong>
+          <span>· preserved theme, rebuilt palette · not a running system</span>
+        </div>
+
+        <header class="topbar">
+          <div class="breadcrumb">
+            <span>Design</span>
+            <b>/</b>
+            <span>Preserved theme</span>
+          </div>
+          <div class="topbar-right">
+            <span class="connection online"><i></i> static preview</span>
+            <span class="topbar-divider"></span>
+            <button class="hotkey-pill" type="button" aria-disabled="true">
+              <kbd>⌘</kbd><kbd>K</kbd> Search
+            </button>
+            <span class="avatar">P1</span>
+          </div>
+        </header>
+
+        <main id="top">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">Phase 1 · preserved GUI theme</span>
+              <h1>Design system</h1>
+              <p>
+                The original layout language, icon set and component inventory,
+                rebuilt as a green / black / gray theme. Tokens and components
+                only — no product functionality is implied.
+              </p>
+            </div>
+            <div class="heading-actions">
+              <button class="button ghost" type="button" disabled>
+                <svg class="icon"><use href="./icons.svg#icon-lock" /></svg>
+                Read only
+              </button>
+              <a class="button primary" href="#components">
+                Components
+                <svg class="icon"><use href="./icons.svg#icon-arrow" /></svg>
+              </a>
+            </div>
+          </div>
+
+          <div class="callout success" id="scope">
+            <svg class="icon"><use href="./icons.svg#icon-info" /></svg>
+            <div class="callout-copy">
+              <strong>What this page is</strong>
+              <p>
+                A static HTML reference for the preserved theme. Values in the
+                data views below are placeholders, not measurements. Training,
+                simulation and RLBot integration are not implemented in this
+                phase.
+              </p>
+            </div>
+          </div>
+
+          <div class="stat-grid">
+            <div class="stat-card accent">
+              <div class="stat-label">
+                <span>Theme files</span>
+                <svg class="icon"><use href="./icons.svg#icon-layers" /></svg>
+              </div>
+              <div class="stat-value">6</div>
+              <div class="stat-foot"><span class="mini-dot"></span> tokens, theme, icons, mark, fonts, preview</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">
+                <span>Palette</span>
+                <svg class="icon"><use href="./icons.svg#icon-chart" /></svg>
+              </div>
+              <div class="stat-value">3<small>families</small></div>
+              <div class="stat-foot"><span class="up">green</span><span class="mini-dot"></span>black · gray</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">
+                <span>Breakpoints</span>
+                <svg class="icon"><use href="./icons.svg#icon-cpu" /></svg>
+              </div>
+              <div class="stat-value">4</div>
+              <div class="stat-foot">1650 · 1180 · 920 · 620</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">
+                <span>Runtime dependencies</span>
+                <svg class="icon"><use href="./icons.svg#icon-shield" /></svg>
+              </div>
+              <div class="stat-value">0</div>
+              <div class="stat-foot"><span class="mini-dot"></span> plain HTML + CSS, local assets only</div>
+            </div>
+          </div>
+
+          <div class="two-col">
+            <section class="panel ds-section">
+              <div class="panel-header">
+                <div>
+                  <h2>Typography</h2>
+                  <p>System font stack; tabular numerals for runtime values.</p>
+                </div>
+                <span class="pill muted-pill">system fonts</span>
+              </div>
+              <div class="ds-specimen">
+                <h1>Train, evaluate, repeat.</h1>
+                <h2>Panel heading</h2>
+                <h3>Sub-heading</h3>
+                <p>
+                  Body copy at 14&nbsp;px with 1.6 line height. Secondary copy
+                  uses <span class="muted">--muted</span>; metadata uses
+                  <span class="muted">--faint</span>.
+                </p>
+                <p class="subtle">
+                  Fine print: 12&nbsp;px. This is the smallest size used for
+                  content, never below 10&nbsp;px for labels.
+                </p>
+                <p class="mono">checkpoint-0000002500000000.zip · 2.41 GiB</p>
+              </div>
+            </section>
+
+            <section class="panel ds-section">
+              <div class="panel-header">
+                <div>
+                  <h2>Buttons</h2>
+                  <p>Primary, secondary, danger, ghost, text, icon.</p>
+                </div>
+              </div>
+              <div class="ds-stack">
+                <button class="button primary" type="button">
+                  <svg class="icon"><use href="./icons.svg#icon-play" /></svg>
+                  Start
+                </button>
+                <button class="button secondary" type="button">
+                  <svg class="icon"><use href="./icons.svg#icon-pause" /></svg>
+                  Pause
+                </button>
+                <button class="button danger" type="button">
+                  <svg class="icon"><use href="./icons.svg#icon-stop" /></svg>
+                  Stop
+                </button>
+                <button class="button ghost" type="button">Ghost</button>
+                <button class="button primary" type="button" disabled>Disabled</button>
+                <button class="text-button" type="button">
+                  Text action
+                  <svg class="icon"><use href="./icons.svg#icon-arrow" /></svg>
+                </button>
+                <button class="icon-button" type="button" aria-label="Refresh">
+                  <svg class="icon"><use href="./icons.svg#icon-refresh" /></svg>
+                </button>
+              </div>
+              <div class="panel-body">
+                <p class="subtle">
+                  Controls stay square-ish (8&nbsp;px radius) and never rely on
+                  color alone: icon + label + disabled state.
+                </p>
+              </div>
+            </section>
+          </div>
+
+          <section class="panel ds-section" id="components">
+            <div class="panel-header">
+              <div>
+                <h2>Palette</h2>
+                <p>Surfaces, lines, text and semantics — the complete token set.</p>
+              </div>
+              <a class="text-button" href="./tokens.css">
+                tokens.css
+                <svg class="icon"><use href="./icons.svg#icon-file" /></svg>
+              </a>
+            </div>
+            <div class="ds-swatches">
+              <div class="ds-swatch"><i style="background:#050806"></i><span><b>--bg</b><em>#050806</em></span></div>
+              <div class="ds-swatch"><i style="background:#0a100c"></i><span><b>--panel</b><em>#0a100c</em></span></div>
+              <div class="ds-swatch"><i style="background:#0e1611"></i><span><b>--panel-raised</b><em>#0e1611</em></span></div>
+              <div class="ds-swatch"><i style="background:#18251d"></i><span><b>--surface-4</b><em>#18251d</em></span></div>
+              <div class="ds-swatch"><i style="background:#223128"></i><span><b>--line</b><em>#223128</em></span></div>
+              <div class="ds-swatch"><i style="background:#55e38b"></i><span><b>--accent</b><em>#55e38b</em></span></div>
+              <div class="ds-swatch"><i style="background:#a5f8c0"></i><span><b>accent top</b><em>#a5f8c0</em></span></div>
+              <div class="ds-swatch"><i style="background:#1fbf67"></i><span><b>accent deep</b><em>#1fbf67</em></span></div>
+              <div class="ds-swatch"><i style="background:#e6b45e"></i><span><b>--warning</b><em>#e6b45e</em></span></div>
+              <div class="ds-swatch"><i style="background:#f07474"></i><span><b>--danger</b><em>#f07474</em></span></div>
+              <div class="ds-swatch"><i style="background:#74c7e8"></i><span><b>--info</b><em>#74c7e8</em></span></div>
+              <div class="ds-swatch"><i style="background:#eef6f0"></i><span><b>--text</b><em>#eef6f0</em></span></div>
+            </div>
+          </section>
+
+          <section class="panel ds-section" id="shell">
+            <div class="panel-header">
+              <div>
+                <h2>Shell &amp; data views</h2>
+                <p>Preserved control-room layout with the rebuilt palette.</p>
+              </div>
+              <span class="state-chip stable">static sample</span>
+            </div>
+            <div class="two-col" style="padding: 0 20px 18px; margin-bottom: 0">
+              <div class="panel" style="box-shadow: none">
+                <div class="panel-header">
+                  <div>
+                    <h2>Active run</h2>
+                    <p>Sample content — not a live training process.</p>
+                  </div>
+                  <span class="status-pill idle">idle</span>
+                </div>
+                <div class="run-stage">
+                  <div class="run-copy">
+                    <div class="run-title">
+                      <span class="run-id">run-0000 · sample</span>
+                    </div>
+                    <h2>No training run is active.</h2>
+                    <p>
+                      Controls are disabled in this static reference. Phase 2
+                      would connect them to the trainer.
+                    </p>
+                    <button class="button primary" type="button" disabled>
+                      <svg class="icon"><use href="./icons.svg#icon-play" /></svg>
+                      Start run
+                    </button>
+                  </div>
+                  <svg class="field-art" viewBox="0 0 320 200" fill="none" aria-hidden="true">
+                    <rect x="10" y="10" width="300" height="180" rx="4" stroke="currentColor" />
+                    <path d="M0 100h320M160 10v180" stroke="currentColor" opacity=".5" />
+                    <circle cx="160" cy="100" r="38" stroke="currentColor" opacity=".55" />
+                    <path d="M10 55h46v90H10M310 55h-46v90h46" stroke="currentColor" opacity=".7" />
+                  </svg>
+                </div>
+                <div class="run-footer">
+                  <span><svg class="icon"><use href="./icons.svg#icon-cpu" /></svg> <b>device</b> —</span>
+                  <span><svg class="icon"><use href="./icons.svg#icon-layers" /></svg> <b>steps</b> —</span>
+                  <span><svg class="icon"><use href="./icons.svg#icon-clock" /></svg> <b>elapsed</b> —</span>
+                </div>
+              </div>
+
+              <div class="panel" style="box-shadow: none">
+                <div class="panel-header">
+                  <div>
+                    <h2>Readiness</h2>
+                    <p>Preserved status-row pattern.</p>
+                  </div>
+                </div>
+                <div class="readiness-list">
+                  <div class="readiness-row">
+                    <span class="readiness-icon"><svg class="icon"><use href="./icons.svg#icon-check" /></svg></span>
+                    <div><strong>Repository state</strong><small>Theme files only</small></div>
+                    <span class="ready-tag">OK</span>
+                  </div>
+                  <div class="readiness-row">
+                    <span class="readiness-icon unknown"><svg class="icon"><use href="./icons.svg#icon-cpu" /></svg></span>
+                    <div><strong>GPU / CUDA</strong><small>Unverified in this phase</small></div>
+                    <span class="ready-tag muted">N/A</span>
+                  </div>
+                  <div class="readiness-row">
+                    <span class="readiness-icon unknown"><svg class="icon"><use href="./icons.svg#icon-shield" /></svg></span>
+                    <div><strong>RocketSim runtime</strong><small>Not installed</small></div>
+                    <span class="ready-tag muted">N/A</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div class="two-col" id="forms">
+            <section class="panel ds-section">
+              <div class="panel-header">
+                <div>
+                  <h2>Form controls</h2>
+                  <p>Inputs, selects, presets and validation states.</p>
+                </div>
+              </div>
+              <div class="form-grid">
+                <label class="field">
+                  <span>Checkpoint name</span>
+                  <input value="baseline-1v1" readonly />
+                  <small>Read-only in the static reference.</small>
+                </label>
+                <label class="field">
+                  <span>Device</span>
+                  <select disabled>
+                    <option>cpu</option>
+                  </select>
+                  <small>GPU is optional in the planned architecture.</small>
+                </label>
+                <label class="field full">
+                  <span>Notes</span>
+                  <textarea rows="2" readonly>Placeholder content only.</textarea>
+                </label>
+              </div>
+              <div class="preset-grid" style="padding: 0 20px 18px">
+                <button class="preset-card selected" type="button">
+                  <span class="preset-top"><strong>1v1 baseline</strong><span class="pill status-pill">planned</span></span>
+                  <p>First measurable milestone. Fixed opponent set.</p>
+                </button>
+                <button class="preset-card" type="button">
+                  <span class="preset-top"><strong>Variable players</strong><span class="pill muted-pill">later</span></span>
+                  <p>Interfaces designed for 2v2 / 3v3, not trained yet.</p>
+                </button>
+              </div>
+            </section>
+
+            <section class="panel ds-section" id="states">
+              <div class="panel-header">
+                <div>
+                  <h2>Status language</h2>
+                  <p>Color is always paired with a label.</p>
+                </div>
+              </div>
+              <div class="ds-stack">
+                <span class="status-pill running">running</span>
+                <span class="status-pill paused">paused</span>
+                <span class="status-pill idle">idle</span>
+                <span class="status-pill failed">failed</span>
+                <span class="state-chip stable">stable</span>
+                <span class="state-chip candidate">candidate</span>
+                <span class="state-chip untested">untested</span>
+                <span class="state-chip rejected">rejected</span>
+              </div>
+              <div class="panel-body">
+                <div class="callout warning">
+                  <svg class="icon"><use href="./icons.svg#icon-warning" /></svg>
+                  <div class="callout-copy">
+                    <strong>Warning callout</strong>
+                    <p>Amber for degraded or unverified state.</p>
+                  </div>
+                </div>
+                <div class="callout error">
+                  <svg class="icon"><use href="./icons.svg#icon-warning" /></svg>
+                  <div class="callout-copy">
+                    <strong>Error callout</strong>
+                    <p>Red for failed operations with an explicit reason.</p>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <section class="panel ds-section" id="data">
+            <div class="panel-header">
+              <div>
+                <h2>Tables &amp; logs</h2>
+                <p>Dense, scannable, tabular numerals. Placeholder rows.</p>
+              </div>
+              <span class="pill muted-pill">sample data</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Model</th>
+                    <th>State</th>
+                    <th>Steps</th>
+                    <th>Eval</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>—</strong><small>no checkpoints in this phase</small></td>
+                    <td><span class="state-chip untested">untested</span></td>
+                    <td class="table-strong">—</td>
+                    <td>—</td>
+                    <td><span class="muted">not evaluated</span></td>
+                  </tr>
+                  <tr>
+                    <td><strong>—</strong><small>example row</small></td>
+                    <td><span class="state-chip candidate">candidate</span></td>
+                    <td class="table-strong">—</td>
+                    <td>
+                      <span class="confidence">
+                        <span class="confidence-track"><i style="width: 0%"></i></span>
+                        —
+                      </span>
+                    </td>
+                    <td><span class="muted">placeholder only</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="log-toolbar" style="padding-top: 16px">
+              <div class="log-filters">
+                <button class="selected" type="button">All</button>
+                <button type="button">Info</button>
+                <button type="button">Warning</button>
+                <button type="button">Error</button>
+              </div>
+              <input class="log-search" placeholder="Filter log lines" readonly />
+            </div>
+            <div class="log-stream">
+              <div class="log-line"><span class="log-time">--:--:--</span><span class="log-level">info</span><span class="log-message">Static reference: log rendering only, no backend attached.</span></div>
+              <div class="log-line"><span class="log-time">--:--:--</span><span class="log-level">info</span><span class="log-message">Design tokens loaded from tokens.css.</span></div>
+              <div class="log-line"><span class="log-time">--:--:--</span><span class="log-level warning">warn</span><span class="log-message">Training and RLBot integration are not part of Phase 1.</span></div>
+            </div>
+            <div class="log-footer"><span>3 sample lines</span><span>static preview</span></div>
+          </section>
+
+          <section class="panel ds-section">
+            <div class="panel-header">
+              <div>
+                <h2>Empty states</h2>
+                <p>Honest placeholders instead of fabricated metrics.</p>
+              </div>
+            </div>
+            <div class="empty-state">
+              <span class="empty-symbol"><svg class="icon"><use href="./icons.svg#icon-models" /></svg></span>
+              <h2>No evaluation data yet</h2>
+              <p>
+                Nothing has been trained or evaluated. This view would stay
+                empty until a real run produces a checkpoint.
+              </p>
+              <button class="button secondary" type="button" disabled>Run evaluation</button>
+            </div>
+          </section>
+        </main>
+
+        <footer>
+          <span>Rocket League AI <b>·</b> preserved GUI theme</span>
+          <span>Phase 1 <b>·</b> static reference <b>·</b> no runtime</span>
+        </footer>
+      </div>
+    </div>
+  </body>
+</html>

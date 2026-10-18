@@ -1,52 +1,58 @@
-import os
+"""Shared fixtures. Every test uses an isolated data directory."""
+
+from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
-
-from rocket_league_ai.api import create_app
-from rocket_league_ai.checkpoints import REQUIRED
-from rocket_league_ai.config import TrainingConfig
-from rocket_league_ai.metadata import package_versions
-
-# Integration tests that launch the real worker/evaluator need the locked
-# training extra. Pure unit tests never skip: CI installs every extra, while a
-# control-plane-only checkout still verifies validation, storage and API logic.
-requires_training = pytest.mark.skipif(
-    any(version is None for version in package_versions().values()),
-    reason="training extra is not installed (uv sync --frozen --all-extras)",
-)
-
-# Protect test runner and spawned simulations from BLAS oversubscription before any NumPy import.
-for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ[key] = "1"
 
 
-@pytest.fixture
-def client(tmp_path):
-    application = create_app(tmp_path / "workspace", shutdown_timeout=5)
-    with TestClient(application) as client:
-        client.headers["Authorization"] = "Bearer " + application.state.manager.token
-        yield client
+@pytest.fixture()
+def data_root(tmp_path, monkeypatch):
+    root = tmp_path / "data"
+    monkeypatch.setenv("RLAI_DATA_DIR", str(root))
+    return root
 
 
-@pytest.fixture
-def manager(client):
-    return client.app.state.manager
+@pytest.fixture(scope="session")
+def trained_model(tmp_path_factory):
+    """A tiny but real checkpoint saved through the production code path."""
+    import torch
 
+    from rlai import checkpoints
+    from rlai.policy import PolicyConfig
 
-@pytest.fixture
-def small_config():
-    return TrainingConfig(
-        name="Isolated CPU lifecycle test", device="cpu", hidden_sizes=(32, 32),
-        total_timesteps=32768, timesteps_per_iteration=128, batch_size=128, buffer_size=384,
-        n_minibatches=2, checkpoint_every_iterations=2,
-        episode_timeout_seconds=1, no_touch_timeout_seconds=1,
+    root = tmp_path_factory.mktemp("models")
+    config = PolicyConfig(hidden=(32, 32))
+    model = config.build()
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.add_(torch.randn_like(parameter) * 0.01)
+    manifest = checkpoints.save_checkpoint(
+        root,
+        model_state=model.state_dict(),
+        policy_config=config.to_dict(),
+        step=128,
+        mode="soccer-1v1",
+        label="test",
     )
+    manifest["_models_dir"] = str(root)
+    return manifest
 
 
-def unit_checkpoint_writer(path):
-    """Byte fixtures for storage tests ONLY. Never passed to a training worker."""
-    for name in REQUIRED:
-        file = path / name
-        file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_bytes(b"unit-test-checkpoint-bytes")
+@pytest.fixture()
+def models_dir(trained_model, data_root):
+    import shutil
+
+    target = data_root / "models"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        Path(trained_model["_models_dir"]) / trained_model["id"],
+        target / trained_model["id"],
+    )
+    return target
+
+
+@pytest.fixture()
+def model_path(models_dir, trained_model):
+    return models_dir / trained_model["path"]

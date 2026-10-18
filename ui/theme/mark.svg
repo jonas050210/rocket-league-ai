@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-label="Rocket League AI mark">
+  <defs>
+    <linearGradient id="mark-green" x1="4" y1="2" x2="36" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#b6fbcb"/>
+      <stop offset=".45" stop-color="#5ce68f"/>
+      <stop offset="1" stop-color="#1aae59"/>
+    </linearGradient>
+    <linearGradient id="mark-shade" x1="20" y1="0" x2="20" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#000000" stop-opacity=".18"/>
+    </linearGradient>
+  </defs>
+  <rect width="40" height="40" rx="12" fill="url(#mark-green)"/>
+  <rect width="40" height="40" rx="12" fill="url(#mark-shade)"/>
+  <path d="M12 26 20 12h9l-8 14h-9Z" fill="#04130a"/>
+  <path d="m10 18 4-7h4l-4 7h-4Zm14 11 4-7h4l-4 7h-4Z" fill="#04130a" opacity=".48"/>
+</svg>

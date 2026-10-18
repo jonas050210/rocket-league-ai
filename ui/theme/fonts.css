@@ -1,0 +1,3 @@
+/* Local system font stack only. No remote fonts, CDNs, analytics or runtime
+   network dependencies. The original theme shipped no font binaries; the
+   Inter/Segoe UI/system stack in tokens.css is therefore preserved as-is. */

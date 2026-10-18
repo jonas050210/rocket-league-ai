@@ -1,0 +1,48 @@
+{
+  "run_name": "ball control",
+  "mode": "soccer-1v1",
+  "seed": 42,
+  "total_steps": 100000,
+  "rollout_steps": 512,
+  "n_workers": 4,
+  "tick_skip": 8,
+  "episode_seconds": 15,
+  "learning_rate": 0.0003,
+  "gamma": 0.995,
+  "gae_lambda": 0.95,
+  "clip_coef": 0.2,
+  "value_coef": 0.5,
+  "entropy_coef": 0.01,
+  "epochs": 4,
+  "minibatch_size": 1024,
+  "max_grad_norm": 0.5,
+  "lr_anneal": true,
+  "device": "auto",
+  "opponent": "idle",
+  "self_play": false,
+  "snapshot_interval": 5,
+  "checkpoint_interval": 10,
+  "keep_checkpoints": 8,
+  "reward": {
+    "goal": 10.0,
+    "concede": 10.0,
+    "touch": 0.35,
+    "progress": 0.9,
+    "alignment": 0.02,
+    "approach": 0.03,
+    "boost": 0.02,
+    "defense": 0.15,
+    "bump": 0.3
+  },
+  "policy": {
+    "hidden": [
+      256,
+      256
+    ],
+    "activation": "tanh"
+  },
+  "eval_opponent": "idle",
+  "eval_interval": 10,
+  "eval_games": 4,
+  "eval_match_seconds": 20
+}

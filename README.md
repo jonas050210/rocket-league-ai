@@ -1,58 +1,146 @@
 # Rocket League AI
 
-A local-first **desktop control room for headless RocketSim reinforcement learning**. Real RLGym Learn / PPO / PyTorch training, an independent backend, explicit user control, live monitoring and recoverable checkpoints.
+Lokale, reproduzierbare Trainings- und Deployment-Pipeline für Rocket-League-Bots:
+RocketSim-Simulation, diskretes PPO, vier Spielmodi, Web-Dashboard und ein
+RLBot-v5-Adapter. Alles läuft auf einem Rechner; GPU ist optional.
 
-**Phase 2 foundation + measured tooling — not a competitive agent.** Includes a genuine hardware benchmark (real bounded runs, fastest-stable recommendation), frozen-checkpoint evaluation against scripted baselines with confidence intervals, and a recorded-replay viewer. No 3D/live renderer or original-game automation is implemented. Missing metrics/results are labeled honestly; nothing starts training merely because you open the app.
+**Ehrlicher Status:** Training, Evaluation, Modellverwaltung und Dashboard sind
+implementiert und in dieser Umgebung **mit echten Simulationen getestet**.
+Ein Live-Match in Rocket League konnte hier **nicht** ausgeführt werden
+(Linux, kein Spiel installiert). Der RLBot-Adapter ist über Paritätstests und
+einen synthetischen `GamePacket` abgesichert, nicht über ein echtes Spiel.
+Details: `docs/TESTING.md`.
 
-## Start on Ubuntu / WSL 2
+## Was drin ist
 
-Use Ubuntu 24.04, Python 3.12 and uv 0.13.1. Install the native Qt/WSLg prerequisites in **[docs/SETUP.md](docs/SETUP.md)** first. Python 3.11 is also supported; native Windows Python is not the training/application platform.
+| Bereich | Zustand | Nachweis |
+| --- | --- | --- |
+| 1v1 / 2v2 / 3v3 / Heatseeker 2v2 | implementiert | `tests/test_env_modes.py`, `tests/test_heatseeker.py` |
+| PPO-Training, Checkpoints, Resume | implementiert | `tests/test_ppo.py`, Smoke-Runs über die API |
+| Parallele Worker (Multiprocessing) | implementiert | 2-Worker-Runs für 3v3 und Heatseeker |
+| Evaluation mit festen Seeds | implementiert | `tests/test_evaluation.py` |
+| Modell-Registry, Promotion, Schutzregeln | implementiert | `tests/test_checkpoints.py` |
+| Dashboard + Steuerung + Logs | implementiert | 7 Routen headless gerendert, API-Tests |
+| RLBot-v5-Adapter | implementiert, **nicht im Spiel verifiziert** | `tests/test_rlbot_adapter.py` |
+| Windows-/Epic-Anleitung | dokumentiert | `docs/SETUP_WINDOWS.md` |
 
-```bash
-uv sync --frozen --all-extras --python 3.12
-uv run --no-sync rocket-ai doctor --probe
-uv run --no-sync rocket-ai backend
-uv run --no-sync rocket-ai browser-url  # private capability URL; open in your browser
-```
-
-The Web Control Room connects to the **detached local backend**. Close/reopen the browser tab without stopping an active run. Start the 1-click Auto-Benchmark (`POST /api/benchmarks/auto`) to test 30 ascending hardware stages (20s per stage, up to 32 parallel environments and 16,384 batch steps) and automatically adopt the fastest stable configuration.
-
-## Seven views in the Web Control Room
-
-- **Dashboard:** real run/episode/reward/speed signals, host resources and readiness.
-- **Roadmap:** 5 progressive AI milestones (`1M`, `10M`, `50M`, `150M`, `500M` steps) with live progress bars, estimated time remaining based on your measured average `steps/s`, and 1-click **Start Training** buttons that always continue from the newest valid checkpoint.
-- **Training:** simplified setup with 5 curated **Presets**, **Max Steps**, and live **Estimated Duration (ca. Zeit)**. Clicking **Start Training** starts immediately without confirmation modals and automatically resumes from the newest valid checkpoint.
-- **Monitoring:** durable live logs, warnings/errors, worker heartbeat and backend health.
-- **Models:** verified checkpoint inventory/metadata, 1-click **RLBot Export** (`bot.cfg` + `agent.py`), frozen-checkpoint evaluation, Elo ratings, and league matches.
-- **Visualization:** recorded-replay viewer rendering genuine evaluation trajectories (top-down schematic, play/pause/scrub/follow-ball); **not** a live 3D renderer.
-- **Benchmark:** simplified 1-click **Start benchmark** / **Cancel benchmark** running a 30-stage × 20-second (~10 min) ascending hardware sweep (`n_proc` 1 → 32, `batch_size` 512 → 16,384, `episode_timeout_seconds` 15s → 90s) and automatically adopting the winning configuration for training.
-
-Checkpoints restore real learner/optimizer/buffer/GAE/RNG state at completed updates; simulator episodes reset. Recovery creates a new linked run and always requires confirmation. There is no automatic pruning or best-model promotion.
-
-## Verify
+## Schnellstart (Linux/macOS)
 
 ```bash
-uv run --no-sync ruff check src tests
-uv run --no-sync pytest -q -m 'not desktop'  # includes actual bounded CPU subprocess tests
-npm ci                                    # browser test tooling only; not needed at runtime
-npm test                                  # drives real training through the actual UI
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -U pip
+pip install -e ".[dev]"      # torch, RLGym, RocketSim, FastAPI, pytest
+python -m rlai.cli serve --port 8000
 ```
 
-Verified in the development sandbox: **112 Python tests pass**, with 30 explicit skips because the locked training extra (Torch/RocketSim) is not installed there. CI installs every extra and runs the full Python set plus the native Qt/Xvfb and Chromium lifecycle tests; native tests require a display/WSLg or Xvfb and explicit opt-in. Exact commands, warnings and hardware limits are in **[docs/VERIFICATION.md](docs/VERIFICATION.md)**. GPU/WSLg/long-duration certification on the target i7-12700F / RTX 4060 Ti 8 GB / 32 GB host is a separate gate; no throughput or win-rate claim is inferred from CPU/browser tests.
+Danach `http://localhost:8000` öffnen. Training startet **nie** automatisch –
+es muss im Tab *Training* explizit gestartet werden.
 
-## Project map
+Erster sinnvoller Lauf: Preset **1v1 vs chaser** oder eine kleine eigene
+Konfiguration. Ein Smoke-Test dauert wenige Sekunden:
 
-| Document | Purpose |
-|---|---|
-| **[PROJECT.md](PROJECT.md)** | Authoritative current state, constraints, contracts and defaults |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Implemented process/module/lifecycle/storage boundaries |
-| [ROADMAP.md](ROADMAP.md) | Evidence-led next gates; historical phase-number reconciliation |
-| [docs/SETUP.md](docs/SETUP.md) | WSL, native GUI, dependencies, launch and test commands |
-| [docs/TARGET_HOST.md](docs/TARGET_HOST.md) | Prepared (not executed) RTX 4060 Ti certification, benchmark sweeps, baseline and shaping-experiment procedures |
-| [docs/RECOVERY.md](docs/RECOVERY.md) | Failure diagnosis, explicit recovery, backup and security limits |
-| [docs/AUDIT.md](docs/AUDIT.md) | Audit performed before implementation; corrected assumptions |
-| [docs/UPSTREAM.md](docs/UPSTREAM.md) | Verified release defects and narrowly scoped adaptations |
-| [docs/VERIFICATION.md](docs/VERIFICATION.md) | Exact executed commands/results and remaining verification |
-| [RESEARCH.md](RESEARCH.md) | Preserved Phase 1 research with prominent Phase 2 corrections |
+```bash
+python -m rlai.cli train --config-file configs/smoke-1v1.json
+python -m rlai.cli evaluate --model data/models/<id>/model.pt --games 2 --match-seconds 20
+python -m rlai.cli benchmark --mode heatseeker-2v2 --workers 2 --seconds 2
+```
 
-The offline UI has no npm runtime dependency. Exact Python versions/hashes are in `uv.lock`; browser test dependencies are in `package-lock.json`. Keep generated models, logs, capabilities and test artifacts out of Git. Work is reviewed through feature-branch pull requests.
+Unter Windows: `powershell -ExecutionPolicy Bypass -File scripts/setup_windows.ps1`
+(siehe `docs/SETUP_WINDOWS.md`).
+
+## Spielmodi
+
+| ID | Autos | Regeln |
+| --- | --- | --- |
+| `soccer-1v1` | 2 | Standard-Soccar, ein Auto pro Team |
+| `soccer-2v2` | 4 | Standard-Soccar, geteilte Policy für beide blauen Autos |
+| `soccer-3v3` | 6 | Standard-Soccar, Beobachtung auf drei Slots pro Team gepaddet |
+| `heatseeker-2v2` | 4 | Homing-Ball, Tempoplus pro Touch, unendlich Boost |
+
+Heatseeker wird von RocketSim nativ unterstützt (`GameMode.HEATSEEKER`).
+Verifiziert wurde: Berührung setzt `heatseeker_target_dir` auf `+1` (blau → oranges
+Tor), Zieltempo steigt von 2900 auf 2985 uu/s, der Ball fliegt ins Tor und wird
+als Tor für Blau gewertet (`tests/test_heatseeker.py`). Die Beobachtung ist in
+allen Modi **identisch aufgebaut** (Version 2: 198 Werte, Version 1: 190);
+ein Checkpoint kann daher als Initialisierung für größere Teams dienen.
+
+## Beobachtung, Aktionen, Belohnung
+
+* Beobachtung: 198 Werte (v2) – eigener Zustand, Ball (relativ im Auto-Frame),
+  2 Teamkollegen- und 3 Gegner-Slots (gepadet), 34 Boost-Pads, Restzeit,
+  Score-Differenz, **8 Werte Feldrahmen** (eigene Position, Blickrichtung,
+  Ballposition, Torrichtung und -distanz) und die letzten 90 Aktionen als
+  One-Hot. Die alte 190er-Version bleibt für bestehende Checkpoints ladbar.
+* Aktionen: 90 diskrete Lookup-Table-Aktionen (Gas/Bremse, Lenken, Boost,
+  Handbremse, Sprung/Flip, Luftsteuerung), identisch in Training, Evaluation
+  und RLBot-Adapter.
+* Belohnung: Tore (+10) und Gegentore (−10) dominieren; Potenzial-Shaping für
+  Ballfortschritt und Ausrichtung, kleine Boni für Touch, Boost-Effizienz,
+  Verteidigung und Karosseriekontakt (Bump). Alle Gewichte sind pro Lauf konfigurierbar und werden geloggt.
+  Beim Tor wird kein Distanz-Shaping angewendet, damit die Torprämie nicht
+  teilweise aufgehoben wird.
+
+## Training
+
+* PPO mit GAE, Advantage-Normalisierung, Gradient-Clipping, LR-Annealing,
+  orthogonaler Initialisierung; Actor und Critic getrennt.
+* Jeder Worker ist ein eigener Prozess mit einer RocketSim-Arena; der Trainer
+  sammelt Rollouts, trainiert zentral und schreibt Metriken in SQLite.
+* Checkpoints sind atomar und unveränderlich; der stabile Zeiger wird nur
+  explizit gesetzt. Der letzte Checkpoint ist gegen Löschen geschützt.
+* Resume nach Unterbrechung lädt Modell, Optimizer, Schrittstand,
+  Gegnerpool-Bilanz und Curriculum-Stufe.
+* Selbstspiel nutzt einen begrenzten Pool eingefrorener Snapshots mit
+  Elo-/PFSP-Auswahl (optional); ein Curriculum kann Gegnerstufen anhand
+  gemessener Siegquoten weiterschalten.
+* Periodische Evaluation gegen feste Gegner schreibt Siegquote, Tore und
+  95-%-Wilson-Intervall; `best.json` dokumentiert die beste Messung, ohne
+  automatisch zu deployen.
+* Alle Kennzahlen im Dashboard kommen aus der Datenbank des laufenden Prozesses –
+  keine erfundenen Werte.
+
+Details: `docs/TRAINING.md`.
+
+## Web-Dashboard
+
+Sieben Ansichten: Dashboard, Training, Monitoring, Models, Evaluation, Live match,
+Settings. Es gibt keine Dummy-Buttons: nicht verfügbare Aktionen sind deaktiviert
+und erklären sich, fehlende Abhängigkeiten werden als Diagnose angezeigt.
+Live-Matches sind außerhalb von Windows deaktiviert (Serverprüfung, kein Fake);
+Schaltflächen für Setup-Prüfung und reines Vorbereiten der Match-Dateien
+funktionieren auch dort und zeigen echte Ergebnisse.
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+Ergebnis in dieser Umgebung: **152 passed** in ca. 8,4 s (2 vCPU, keine GPU,
+kein Spiel). Abgedeckt: Modi, Aktionen, Beobachtung v1/v2 inkl. Parität,
+Belohnungs-Events, PPO inkl. Truncation-Bootstrap und Early Stop,
+Checkpoint-Schutz und best-Zeiger, Gegnerpool/Curriculum, Resume-Restore,
+Store, API, CLI (Run-Registrierung, Live-Preflight/Dry-Run),
+Evaluation inkl. Konfidenzintervall, RLBot-Parser für alle generierten
+Match-Configs, Heatseeker-Regeln. Nicht abgedeckt: echtes Rocket League,
+RLBot-Start, GPU-Pfad, Spielstärke.
+
+## Grenzen
+
+* Kein Nachweis von Spielstärke gegenüber Nexto oder einem bestimmten Rang.
+  Die gezeigten Zahlen sind Smoke-Tests, keine trainierten Fähigkeiten.
+* Live-Deployment ist ungetestet, weil hier kein Windows/Spiel/RLBot-Lauf
+  möglich ist. Die Anleitung nennt exakte Schritte und bekannte Risiken.
+* 2 vCPU bedeutet: 3v3/Heatseeker mit 8 Workern sind auf dieser Maschine
+  langsamer als die Workerzahl suggeriert; das Dashboard zeigt die echte Rate.
+* `data/` ist Laufzeitverzeichnis und nicht versioniert.
+
+## Dokumentation
+
+* `docs/MODES.md` – Regeln, Beobachtung, Aktionen, Belohnung pro Modus
+* `docs/TRAINING.md` – PPO, Curriculum, Metriken, Resume, Selbstspiel
+* `docs/RLBOT.md` – v5-Adapter, Konfiguration, Grenzen
+* `docs/SETUP_WINDOWS.md` – Windows + Epic Schritt für Schritt
+* `docs/TESTING.md` – Testmatrix, Messwerte, was nicht lief
+* `docs/ARCHITECTURE.md` – Module und Datenfluss
