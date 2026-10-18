@@ -82,13 +82,30 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
 
 def cmd_live(args: argparse.Namespace) -> int:
-    from .live import LiveUnavailable, launch_match
+    from .live import LiveUnavailable, launch_match, list_matches, preflight
 
     paths = ensure_dirs()
+    if args.list:
+        print(json.dumps(list_matches(paths), indent=2))
+        return 0
+    if args.preflight:
+        report = preflight(paths)
+        print(json.dumps(report, indent=2))
+        return 0 if report["ok"] else 1
     try:
-        result = launch_match(paths, args.model_id, args.mode)
+        result = launch_match(
+            paths,
+            args.model_id,
+            args.mode,
+            human_team=args.human_team,
+            fill=args.fill,
+            human=not args.no_human,
+            dry_run=args.dry_run,
+            timeout=args.timeout,
+        )
     except LiveUnavailable as exc:
         print(f"live match unavailable: {exc}", file=sys.stderr)
+        print("run `rlai live --preflight` for a per-check report", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2))
     return 0
@@ -133,6 +150,44 @@ def build_parser() -> argparse.ArgumentParser:
     live = sub.add_parser("live", help="launch a live RLBot match (Windows)")
     live.add_argument("--mode", default="soccer-1v1")
     live.add_argument("--model-id", default=None)
+    live.add_argument(
+        "--human-team",
+        default="blue",
+        choices=["blue", "orange"],
+        help="team the human plays on (the policy always takes the other team)",
+    )
+    live.add_argument(
+        "--fill",
+        default="psyonix",
+        choices=["psyonix", "policy"],
+        help="who completes the human team in 2v2/3v3",
+    )
+    live.add_argument(
+        "--no-human",
+        action="store_true",
+        help="watch a policy-only match (both teams controlled by the checkpoint)",
+    )
+    live.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="launcher exits after N seconds (0 waits for the match to end)",
+    )
+    live.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="write and validate the match files without starting RLBot",
+    )
+    live.add_argument(
+        "--preflight",
+        action="store_true",
+        help="check and print every live prerequisite, then exit",
+    )
+    live.add_argument(
+        "--list",
+        action="store_true",
+        help="list recent live matches with launcher status and last log line",
+    )
     live.set_defaults(func=cmd_live)
     return parser
 

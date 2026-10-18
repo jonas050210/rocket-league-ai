@@ -19,20 +19,26 @@ python -m pytest -q
 | Belohnungen: Tor/Gegentor, Shaping ohne Tor, Touch als Event | `test_rewards.py` | bestanden |
 | PPO: GAE, Dones, Truncation-Bootstrap, Early Stop, ein Update | `test_ppo.py` | bestanden |
 | Beobachtung: v1/v2-Größen, Feldrahmen, Padding, Determinismus | `test_obs.py` | bestanden |
+| Beobachtung v2: Größen, Torrichtung, Padding, Determinismus | `test_obs_v2.py` | bestanden |
 | Checkpoints: atomar, Promotion, Löschschutz, best-Zeiger, Prune-Schutz | `test_checkpoints.py` | bestanden |
 | Gegnerpool: Kapazität, PFSP-Gewichte, Elo, Serialisierung | `test_league.py` | bestanden |
 | Curriculum: Aufstiegskriterien, Fenster, Resume-Zähler | `test_curriculum.py` | bestanden |
 | SQLite-Store: Runs, Metriken, Logs, Episoden, Evaluationsdetails (CI) | `test_store.py` | bestanden |
 | HTTP-API inkl. Auth, Statik, Preflight, Dry-Run, Presets | `test_api.py` | bestanden |
 | Evaluation: Ergebnis, Seed-Reproduzierbarkeit, Wilson-Intervall, v1-Checkpoints, best-Regel | `test_evaluation.py` | bestanden |
+| Evaluation v2: CI-Grenzen, Layout-Erkennung, v1-Checkpoint-Evaluation | `test_evaluation_v2.py` | bestanden |
+| Trainer: fehlende Run-Zeile, Resume-Restore, Architektur-Mismatch, best-Regel | `test_trainer.py` | bestanden |
+| CLI: Train-Run-Registrierung, `live --preflight/--dry-run/--list` | `test_cli.py` | bestanden |
 | RLBot-Parität: Packet → Beobachtung (1v1, 3v3, Heatseeker) | `test_rlbot_adapter.py` | bestanden |
 | Bot: Checkpoint laden, Inferenz, deterministische Aktionen, fehlendes Modell | `test_rlbot_bot.py` | bestanden |
 | JobManager: Steuerdateien, Subprozess-Umgebung | `test_jobs.py` | bestanden |
 | Alle ausgelieferten Konfigurationen laden und validieren | `test_modes.py` | bestanden |
-| Live-Match-TOML für alle vier Modi, Preflight, Dry-Run | `test_live.py` | bestanden |
+| Live-Match-TOML für alle vier Modi, Team-/Fill-Optionen, Preflight, Dry-Run | `test_live.py` | bestanden |
+| Generierte Match-Configs durch RLBot-Parser (alle Modi, beide Fill-Arten) | `test_live.py` | bestanden |
+| Launcher `--dry-run` mit RLBot-Parser, Rückgabecodes | `test_live.py`, `test_cli.py` | bestanden |
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
 
-**Gesamt: 129 passed, 0 failed, 0 skipped** (ca. 5,8 s), `ruff check src tests`
+**Gesamt: 152 passed, 0 failed, 0 skipped** (ca. 8,4 s), `ruff check src tests`
 sauber.
 
 ## Was zusätzlich manuell geprüft wurde
@@ -106,7 +112,7 @@ Einordnung: Das sind Funktionsnachweise auf 2 vCPUs. Sie sagen nichts über
 Lernqualität aus. Für 3v3 ist die Rate erwartbar niedriger (6 Autos,
 aufwendigere Kollisionen).
 
-## Phase-3-Nachweise (Funktion, nicht Spielstärke)
+## Phase-3/4-Nachweise (Funktion, nicht Spielstärke)
 
 * **Neuer Trainer end-to-end:** 2 560 Schritte, 1 Worker, `curriculum = true`,
   Evaluation alle 3 Iterationen, 2 Spiele à 5 s. Ergebnis: `completed`,
@@ -129,7 +135,30 @@ aufwendigere Kollisionen).
   Evaluations-API lädt den 190er-Checkpoint ohne manuelle Layout-Angabe.
 * **Live-Vorstufen:** `GET /api/live/preflight` und
   `POST /api/live/launch` mit `dry_run = true` sind getestet; der Dry-Run
-  schreibt `match.toml`, `bot-N.toml` und `launch.json` und startet nichts.
+  schreibt `match.toml`, `bot-N.toml` und `launch.json`, parst die Datei mit
+  `rlbot.config.load_match_config` und startet nichts.
+* **RLBot-Parser statt Vermutung:** Beim Roundtrip aller generierten
+  Match-Configs durch den echten RLBot-Parser schlug jede Nicht-Heatseeker-
+  Datei mit `ConfigParsingException: Invalid value 'Soccer'` fehl. RLBot v5
+  erwartet `Soccar` (Psyonix-Schreibweise). Der Fehler ist behoben, alle vier
+  Modi und beide Fill-Arten werden akzeptiert; `test_live.py` prüft den
+  Roundtrip und einen gezielt manipulierten `"Soccer"`-Fall.
+* **CLI-Live-Pfad:** `rlai live --preflight` meldet alle Prüfungen mit
+  Rückgabecode 1 außerhalb Windows, `--dry-run` schreibt und validiert die
+  Dateien, `--list` zeigt laufende/beendete Matches mit letzter Logzeile,
+  `--timeout` beendet den Launcher nach N Sekunden. `human_team`, `fill` und
+  `no_human` sind in CLI, API und Tests abgedeckt.
+* **Bot-Entrypoint:** `rlbot/bot.py` akzeptiert `--model`, `--mode`,
+  `--data-dir`, `--log-level`, schreibt `data/logs/bot.log` und gibt bei
+  fehlendem Checkpoint Code 2 zurück.
+* **Resume nach dem Trainer-Rewrite (manuell):** Lauf `smoke-1v1` bis
+  Schritt 2 048 (`completed`), dann `--resume-from` des finalen Checkpoints
+  bis 3 072. Log bestätigt `restored opponent-pool ratings from checkpoint`
+  und den dokumentierten Fallback auf den festen Gegner; Schrittstand,
+  Modell und Optimizer wurden geladen. Dabei fiel auf, dass ein per
+  `--run-id` ohne vorherigen API-Lauf gestarteter Prozess keine
+  `runs`-Zeile hatte; der Trainer legt sie jetzt selbst an
+  (`test_trainer.py`, `test_cli.py`).
 * **`best.json`:** Der Zeiger wird nur bei einem Sieg gesetzt; die 0:0-Läufe
   oben haben ihn daher nicht verändert. Die Regel ist als `is_best_candidate`
   unit-getestet.
@@ -144,7 +173,7 @@ aufwendigere Kollisionen).
 | Punkt | Grund |
 | --- | --- |
 | Bot in einem echten RLBot-Match | kein Windows, kein Rocket League, kein RLBot-Start |
-| Akzeptanz der generierten `match.toml` durch RLBot v5 | nur Schema-/Doku-Abgleich |
+| Akzeptanz der generierten `match.toml` durch RLBot v5 | **erledigt**: Parser-Roundtrip mit `rlbot.config.load_match_config`; ein echter Matchstart fehlt weiterhin |
 | GPU-Training | keine GPU vorhanden |
 | Langzeittraining / Spielstärke | bewusst nicht gestartet (Ressourcen, keine belastbare Basis) |
 | Parität mit echten GamePackets | nur synthetische Pakete aus Simulatorzuständen |

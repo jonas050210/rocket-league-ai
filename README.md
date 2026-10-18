@@ -117,12 +117,14 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 python -m pytest -q
 ```
 
-Ergebnis in dieser Umgebung: **129 passed** in ca. 5,8 s (2 vCPU, keine GPU,
+Ergebnis in dieser Umgebung: **152 passed** in ca. 8,4 s (2 vCPU, keine GPU,
 kein Spiel). Abgedeckt: Modi, Aktionen, Beobachtung v1/v2 inkl. Parität,
 Belohnungs-Events, PPO inkl. Truncation-Bootstrap und Early Stop,
-Checkpoint-Schutz und best-Zeiger, Gegnerpool/Curriculum, Store, API,
-Evaluation inkl. Konfidenzintervall, Heatseeker-Regeln. Nicht abgedeckt:
-echtes Rocket League, RLBot-Start, GPU-Pfad, Spielstärke.
+Checkpoint-Schutz und best-Zeiger, Gegnerpool/Curriculum, Resume-Restore,
+Store, API, CLI (Run-Registrierung, Live-Preflight/Dry-Run),
+Evaluation inkl. Konfidenzintervall, RLBot-Parser für alle generierten
+Match-Configs, Heatseeker-Regeln. Nicht abgedeckt: echtes Rocket League,
+RLBot-Start, GPU-Pfad, Spielstärke.
 
 ## Grenzen
 

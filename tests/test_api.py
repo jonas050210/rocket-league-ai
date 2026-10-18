@@ -142,8 +142,9 @@ def test_live_status(client):
 
 def test_live_preflight_and_dry_run(client, trained_model):
     report = client.get("/api/live/preflight").json()
-    assert set(report) == {"ok", "platform", "checks"}
-    assert any(check["name"] == "model" for check in report["checks"])
+    assert {"ok", "platform", "checks", "server"} == set(report)
+    names = {check["name"] for check in report["checks"]}
+    assert {"model", "match config parser", "rlbot server"} <= names
 
     response = client.post(
         "/api/live/launch",
@@ -153,7 +154,28 @@ def test_live_preflight_and_dry_run(client, trained_model):
     record = response.json()
     assert record["dry_run"] is True and record["launched"] is False
     assert record["model_id"] == trained_model["id"]
+    assert record["human_team"] == "blue" and record["fill"] == "psyonix"
     assert os.path.exists(record["config"])
+
+    response = client.post(
+        "/api/live/launch",
+        json={
+            "mode": "soccer-2v2",
+            "model_id": trained_model["id"],
+            "dry_run": True,
+            "human_team": "orange",
+            "fill": "policy",
+            "human": False,
+        },
+    )
+    assert response.status_code == 200, response.text
+    record = response.json()
+    assert record["human"] is False and record["human_team"] == "orange"
+    with open(record["config"], "rb") as handle:
+        import tomllib
+
+        parsed = tomllib.load(handle)
+    assert len(parsed["cars"]) == 4
 
 
 def test_auth_token(monkeypatch, data_root, models_dir):

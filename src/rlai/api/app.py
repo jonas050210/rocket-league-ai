@@ -53,6 +53,10 @@ class EvaluateRequest(BaseModel):
 class LiveLaunchRequest(BaseModel):
     model_id: str | None = None
     mode: str = "soccer-1v1"
+    human_team: str = "blue"
+    fill: str = "psyonix"
+    human: bool = True
+    timeout: float = 0.0
     dry_run: bool = False
 
 
@@ -323,7 +327,14 @@ def create_app(store_path: Path | None = None) -> FastAPI:
 
         try:
             return launch_match(
-                paths, request.model_id, request.mode, dry_run=request.dry_run
+                paths,
+                request.model_id,
+                request.mode,
+                human_team=request.human_team,
+                fill=request.fill,
+                human=request.human,
+                dry_run=request.dry_run,
+                timeout=request.timeout,
             )
         except LiveUnavailable as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc

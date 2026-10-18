@@ -214,6 +214,7 @@ class Trainer:
         for key, value in (
             ("eval/win_rate", result["win_rate"]),
             ("eval/win_rate_low", result["win_rate_ci95"][0]),
+            ("eval/win_rate_high", result["win_rate_ci95"][1]),
             ("eval/goals_for", result["goals_for"]),
             ("eval/goals_against", result["goals_against"]),
             ("eval/goal_diff", result["goal_diff"]),
@@ -254,6 +255,16 @@ class Trainer:
 
     # -- main loop -----------------------------------------------------------
     def run(self) -> dict:
+        # The CLI may hand us a fresh run id; JobManager normally creates the
+        # row beforehand, but the trainer must not depend on that.
+        if self.store.get_run(self.run_id) is None:
+            self.store.create_run(
+                self.config.run_name,
+                self.config.mode,
+                self.config.to_dict(),
+                self.config.total_steps,
+                run_id=self.run_id,
+            )
         self.store.update_run(
             self.run_id,
             status="starting",
@@ -411,7 +422,14 @@ class Trainer:
                 message=exit_message,
             )
             self._log("INFO", f"run {exit_status}: {exit_message}")
-        return {"status": exit_status, "step": self.step, "message": exit_message}
+        return {
+            "status": exit_status,
+            "step": self.step,
+            "message": exit_message,
+            "best_win_rate": (
+                None if self.run_best_score == float("-inf") else self.run_best_score
+            ),
+        }
 
     def _cpu_state(self) -> dict:
         return {k: v.detach().cpu() for k, v in self.model.state_dict().items()}

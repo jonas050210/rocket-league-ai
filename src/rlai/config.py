@@ -85,7 +85,6 @@ class TrainingConfig(BaseModel):
     reward: RewardWeights = Field(default_factory=RewardWeights)
     policy: PolicySettings = Field(default_factory=PolicySettings)
     obs_version: int = OBS_VERSION
-    episodes_per_eval: int = Field(default=20, ge=1, le=1000)
     eval_opponent: str = "chase"
     eval_interval: int = Field(default=0, ge=0, le=100000)
     eval_games: int = Field(default=4, ge=1, le=100)

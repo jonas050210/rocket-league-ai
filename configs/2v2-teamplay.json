@@ -41,7 +41,6 @@
     ],
     "activation": "tanh"
   },
-  "episodes_per_eval": 20,
   "eval_opponent": "chase",
   "eval_interval": 20,
   "eval_games": 4,

@@ -87,29 +87,62 @@ Evaluate* möglich.
 ## 5. Live-Match (Epic + RLBot)
 
 1. Rocket League starten und im Hauptmenü bleiben.
-2. Im Dashboard ein Modell promoten (*Models → Promote*) oder unter
-   *Live match* ein Modell wählen.
-3. Zuerst *Run setup checks* klicken. Die Liste zeigt Plattform, RLBot-Import,
-   Bot-Entrypoint, Modell, Schreibrechte und optional, ob
-   `RocketLeague.exe` läuft. Fehlende Pflichtpunkte müssen behoben werden.
-4. Optional *Prepare files only*: schreibt
-   `data\live\<mode>-<timestamp>\match.toml`, `bot-N.toml` und
-   `launch.json`, startet aber nichts. Danach die Dateien prüfen.
-5. *Launch match* klicken. Der Server startet RLBot mit denselben Dateien.
-6. Beim ersten Mal prüft RLBot, ob der Bot-Prozess startet. Log:
-   `data\live\...\launch.log`.
+2. Ein Modell promoten (*Models → Promote*) oder die Modell-ID notieren.
+3. Zuerst die Umgebung prüfen – in der CLI oder im Dashboard
+   (*Live match → Run setup checks*):
+
+```powershell
+python -m rlai.cli live --preflight
+```
+
+   Geprüft werden Windows, RLBot-Import, laufender/installierter
+   RLBotServer, Bot- und Launcher-Entrypoint, Modell, Schreibrechte,
+   Match-Parser und optional `RocketLeague.exe`. `--preflight` endet mit
+   Code 1, solange ein Pflichtpunkt fehlt.
+4. Dateien schreiben und von RLBot parsen lassen, ohne zu starten:
+
+```powershell
+python -m rlai.cli live --mode soccer-1v1 --model-id <id> --dry-run
+```
+
+   Das erzeugt `data\live\<mode>-<timestamp>\match.toml`, `bot-N.toml`
+   und `launch.json`; der Launcher wird mit `--dry-run` aufgerufen und
+   meldet `invalid match config`, falls RLBot die Datei ablehnt.
+5. Starten:
+
+```powershell
+python -m rlai.cli live --mode soccer-1v1 --model-id <id> --timeout 600
+```
+
+   Ohne `--timeout` wartet der Launcher auf das Matchende; mit Timeout
+   beendet er sich nach N Sekunden. Varianten:
+   `--human-team orange` (Mensch spielt Orange), `--fill policy` (Policy
+   füllt das Mensch-Team statt Psyonix-Bots), `--no-human` (beide Teams
+   Policy). Im Dashboard heißen dieselben Schritte *Prepare files only*
+   und *Launch match*.
+6. Status prüfen:
+
+```powershell
+python -m rlai.cli live --list
+```
+
+   Zeigt pro Match `alive`, `status` und die letzte Zeile aus
+   `data\live\...\launch.log`. Der Bot schreibt zusätzlich
+   `data\logs\bot.log`.
 
 Wenn der Start fehlschlägt:
 
 ```powershell
 # Bot isoliert testen
 $env:PYTHONPATH = "$PWD\src"
-$env:RLAI_MODEL = "$PWD\data\models\<id>\model.pt"
-python rlbot\bot.py
+python rlbot\bot.py --model "$PWD\data\models\<id>\model.pt" --mode soccer-1v1
 ```
 
-Der Bot sollte ohne Traceback starten und auf ein Paket warten. Fehler hier
-sind von RLBot-Startfehlern zu unterscheiden.
+Der Bot sollte ohne Traceback starten und auf ein Paket warten (er blockiert,
+bis ein RLBotServer ihn verbindet). Fehler hier sind von
+RLBot-Startfehlern zu unterscheiden. Meldet RLBot `Invalid value 'Soccer'`,
+ist eine alte `match.toml` im Spiel: neu erzeugen (`--dry-run`) – gültig ist
+`game_mode = "Soccar"`.
 
 ## 6. Tests und Diagnose
 
