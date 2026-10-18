@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -80,16 +81,31 @@ class TrainingConfig(BaseModel):
     opponent: str = "chase"
     self_play: bool = False
     snapshot_interval: int = Field(default=5, ge=1, le=1000)
+    #: store the frozen weights of the opponent pool inside checkpoints so a
+    #: resumed self-play run keeps its real opponents (about one policy size per
+    #: snapshot, at most ``OpponentPool.capacity`` of them).  Ratings are always
+    #: stored; turn this off only when checkpoint size matters more.
+    league_states: bool = True
     checkpoint_interval: int = Field(default=10, ge=1, le=10000)
     keep_checkpoints: int = Field(default=8, ge=1, le=100)
     reward: RewardWeights = Field(default_factory=RewardWeights)
     policy: PolicySettings = Field(default_factory=PolicySettings)
     obs_version: int = OBS_VERSION
     eval_opponent: str = "chase"
+    #: optional multi-opponent suite; when empty ``eval_opponent`` is used
+    eval_opponents: list[str] = Field(default_factory=list, max_length=8)
     eval_interval: int = Field(default=0, ge=0, le=100000)
     eval_games: int = Field(default=4, ge=1, le=100)
     eval_match_seconds: float = Field(default=30.0, ge=5, le=600)
+    #: which side(s) the policy plays during evaluation; both = side balanced
+    eval_sides: list[str] = Field(default_factory=lambda: ["blue"], min_length=1, max_length=2)
+    #: rewrite the observation of the non-trained side into the trained side
+    eval_mirror: bool = True
+    #: measure the policy before the first update so the report has a "before"
+    eval_before: bool = True
     curriculum: bool = False
+    #: let workers play on either side so the policy learns both
+    side_randomization: bool = False
 
     @field_validator("reward", mode="before")
     @classmethod
@@ -108,6 +124,48 @@ class TrainingConfig(BaseModel):
         if value not in mode_ids():
             raise ValueError(f"mode must be one of {mode_ids()}")
         return value
+
+    @field_validator("eval_opponent")
+    @classmethod
+    def _eval_opponent_valid(cls, value: str) -> str:
+        allowed = {"idle", "random", "chase", "self"}
+        key = str(value).strip()
+        if key not in allowed and not key.startswith("model:"):
+            raise ValueError(
+                f"eval_opponent must be one of {sorted(allowed)} or 'model:<checkpoint>', "
+                f"got {value!r}"
+            )
+        return key
+
+    @field_validator("eval_opponents")
+    @classmethod
+    def _eval_opponents_valid(cls, values: list[str]) -> list[str]:
+        allowed = {"idle", "random", "chase", "self"}
+        cleaned: list[str] = []
+        for value in values:
+            key = str(value).strip()
+            if key not in allowed and not key.startswith("model:"):
+                raise ValueError(
+                    f"eval_opponents entries must be one of {sorted(allowed)} or "
+                    f"'model:<checkpoint>', got {value!r}"
+                )
+            if key not in cleaned:
+                cleaned.append(key)
+        return cleaned
+
+    @field_validator("eval_sides")
+    @classmethod
+    def _eval_sides_valid(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for value in values:
+            key = str(value).strip().lower()
+            if key not in {"blue", "orange"}:
+                raise ValueError("eval_sides entries must be 'blue' or 'orange'")
+            if key not in cleaned:
+                cleaned.append(key)
+        if not cleaned:
+            raise ValueError("eval_sides must not be empty")
+        return cleaned
 
     @field_validator("obs_version")
     @classmethod
@@ -181,12 +239,111 @@ class TrainingConfig(BaseModel):
         return cls.model_validate(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+#: hosts that only the local machine can reach
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+#: below this length a capability token is reported as weak
+MIN_TOKEN_LENGTH = 12
+
+
 class AppSettings(BaseModel):
-    host: str = "0.0.0.0"
-    port: int = 8000
+    """How the API/GUI process is exposed.
+
+    Same treatment as :class:`TrainingConfig`: validated in one place, used by
+    the CLI *and* the FastAPI app, so the security defaults cannot drift apart.
+    The default binds to the loopback interface - exposing the training API to
+    the network is an explicit decision that also wants a token.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8000, ge=1, le=65535)
     auth_token: str | None = None
+    cors_origins: list[str] = Field(default_factory=list, max_length=16)
     allow_live_launch: bool = True
     rlbot_python: str | None = None
+
+    @field_validator("host")
+    @classmethod
+    def _host_valid(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("host must not be empty")
+        if any(character in text for character in " /\\?#"):
+            raise ValueError(
+                f"host must be an interface address or name, got {value!r} "
+                "(use 127.0.0.1 for local only, 0.0.0.0 for every interface)"
+            )
+        return text
+
+    @field_validator("auth_token")
+    @classmethod
+    def _token_valid(cls, value: str | None) -> str | None:
+        # A short token is a bad idea, but refusing to start would break setups
+        # that already work; it is reported as a warning instead (see
+        # ``weak_token``) so the choice stays with the operator.
+        if value is None:
+            return None
+        return str(value).strip() or None
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _origins_valid(cls, values: list[str]) -> list[str]:
+        cleaned = []
+        for value in values:
+            text = str(value or "").strip().rstrip("/")
+            if not text:
+                continue
+            if text == "*":
+                raise ValueError(
+                    "cors_origins must list explicit origins; '*' would let any website "
+                    "drive the training API from a visitor's browser"
+                )
+            if not text.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"cors origin {value!r} must start with http:// or https://"
+                )
+            cleaned.append(text)
+        return cleaned
+
+    @property
+    def is_public(self) -> bool:
+        """True when the socket is reachable from other machines."""
+        return self.host not in LOOPBACK_HOSTS
+
+    @property
+    def exposed_without_token(self) -> bool:
+        return self.is_public and not self.auth_token
+
+    @property
+    def weak_token(self) -> bool:
+        """True when a token is set but short enough to be guessable."""
+        return bool(self.auth_token) and len(self.auth_token or "") < MIN_TOKEN_LENGTH
+
+    @classmethod
+    def from_env(cls, **overrides: Any) -> "AppSettings":
+        """Build settings from the environment, then apply explicit overrides."""
+        import os
+
+        data: dict[str, Any] = {}
+        if os.environ.get("RLAI_HOST"):
+            data["host"] = os.environ["RLAI_HOST"]
+        if os.environ.get("RLAI_PORT"):
+            data["port"] = int(os.environ["RLAI_PORT"])
+        if os.environ.get("RLAI_AUTH_TOKEN"):
+            data["auth_token"] = os.environ["RLAI_AUTH_TOKEN"]
+        origins = os.environ.get("RLAI_CORS_ORIGINS", "").strip()
+        if origins:
+            data["cors_origins"] = [item.strip() for item in origins.split(",") if item.strip()]
+        data.update({key: value for key, value in overrides.items() if value is not None})
+        return cls.model_validate(data)
+
+    def export_env(self) -> dict[str, str]:
+        """Environment the worker processes and the GUI need to agree on."""
+        env: dict[str, str] = {}
+        if self.auth_token:
+            env["RLAI_AUTH_TOKEN"] = self.auth_token
+        if self.cors_origins:
+            env["RLAI_CORS_ORIGINS"] = ",".join(self.cors_origins)
+        return env
 
 
 DEFAULT_TRAINING = TrainingConfig()

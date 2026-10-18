@@ -46,6 +46,19 @@ def compute_gae(
     the final state instead of treating it as a real termination.  Without
     that correction short episodes systematically bias the value function
     downwards: every 60 s timeout looks like a lost game.
+
+    Two different masks are required at an episode boundary:
+
+    * ``terminal`` (goal / real end) decides whether the *value* of the next
+      state is bootstrapped.  A truncation is not terminal, so it bootstraps
+      from ``bootstrap[t]``.
+    * ``dones`` (any end, truncation included) decides whether the advantage
+      recursion may continue.  The step after an episode end is the first
+      step of a *different* episode, so its advantage must never leak back
+      across the boundary.  Using ``terminal`` here instead made every
+      timeout copy the next episode's advantage into the last decision of
+      the finished one, which corrupts credit assignment on essentially
+      every rollout (most Rocket League episodes end on the clock).
     """
     T = rewards.shape[0]
     advantages = np.zeros_like(rewards, dtype=np.float32)
@@ -59,9 +72,11 @@ def compute_gae(
             terminal = np.clip(dones[t] - truncated[t], 0.0, 1.0)
         else:
             terminal = dones[t]
-        nonterminal = 1.0 - terminal
-        delta = rewards[t] + gamma * next_value * nonterminal - values[t]
-        last_gae = delta + gamma * gae_lambda * nonterminal * last_gae
+        delta = rewards[t] + gamma * next_value * (1.0 - terminal) - values[t]
+        # ``dones`` (not ``terminal``) cuts the recursion: an episode boundary
+        # separates two independent trajectories.
+        episode_continues = 1.0 - np.clip(dones[t], 0.0, 1.0)
+        last_gae = delta + gamma * gae_lambda * episode_continues * last_gae
         advantages[t] = last_gae
     returns = advantages + values
     return advantages, returns

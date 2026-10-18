@@ -6,12 +6,15 @@ Browser (HTML/CSS/JS, ui/theme)
         ▼
 FastAPI (src/rlai/api/app.py)
         │
-        ├── SQLite-Store (Runs, Metriken, Logs, Modelle, Evaluationen)
+        ├── SQLite-Store (Runs, Metriken, Episoden, Logs, Modelle,
+        │                 Evaluationen, Reports, Settings)
         ├── JobManager (Subprozesse: train, evaluate, live)
         └── Hardware/Diagnose (psutil, torch, Import-Checks)
                  │
                  ▼
         Trainer (src/rlai/trainer.py)
+        ├── Resume-Plan (src/rlai/resume.py: Kandidaten, Validierung, Fallback)
+        ├── Report (src/rlai/report.py: Statistik nach jedem Lauf)
         ├── PPO-Update (src/rlai/ppo.py)
         ├── Gegnerauswahl (src/rlai/league.py, src/rlai/curriculum.py)
         ├── Periodische Evaluation (src/rlai/evaluation.py)
@@ -45,7 +48,16 @@ FastAPI (src/rlai/api/app.py)
 7. Bei aktivem Curriculum wählt der Trainer die Gegnerstufe anhand
    abgeschlossener Episoden; bei Selbstspiel sampelt der Pool nach
    PFSP-Gewichten. Beides wird im Checkpoint gespeichert und beim Resume
-   fortgesetzt.
+   fortgesetzt (inklusive RNG-Zuständen und, mit `league_states`, den
+   Gewichten der Pool-Snapshots).
+8. Vor einem Resume baut `resume.plan_resume` einen Plan: Kandidaten der
+   Lauf-Linie, Kompatibilitätsprüfung, Fallback bei defekten Checkpoints,
+   Ablehnung bei explizit angeforderten, unbrauchbaren Checkpoints. CLI
+   (`resume-plan`, `train --plan-only`) und API (`POST /api/resume/plan`)
+   zeigen denselben Plan, bevor etwas startet.
+9. Nach jedem Lauf – auch nach Stopp oder Fehler – schreibt der Trainer den
+   Report nach `data/runs/<id>/report.json` und in die Tabelle `reports`;
+   die GUI-Ansichten `#/reports` und `#/report?run=<id>` lesen ihn.
 
 ## Verzeichnisse
 
@@ -71,7 +83,26 @@ FastAPI (src/rlai/api/app.py)
 ## Sicherheit und Schutzregeln
 
 * Optionale Capability-Token (`RLAI_AUTH_TOKEN`) für alle schreibenden
-  Endpunkte; Lesen bleibt lokal offen.
+  Endpunkte; Lesen bleibt lokal offen. Der Vergleich läuft über
+  `hmac.compare_digest`. `EventSource` kann keine Header senden, deshalb
+  akzeptiert **nur** `/api/events` das Token als `?token=`; das Frontend
+  schickt es sonst als `x-rlai-token` und legt es im localStorage ab.
+* `serve --host` bindet standardmäßig an `127.0.0.1`; wer `0.0.0.0` ohne
+  Token nutzt, bekommt eine Warnung auf stderr. CORS ist standardmäßig aus
+  und wird über `RLAI_CORS_ORIGINS` (kommagetrennte Origin-Liste) explizit
+  freigeschaltet – das Dashboard wird vom selben Prozess ausgeliefert.
+* Checkpoints werden mit `torch.load(weights_only=True)` geladen
+  (`checkpoints.load_policy`, gemeinsam genutzt von Evaluation,
+  `ModelOpponent` und RLBot-Bot); `weights_only=False` ist ein ausdrücklicher
+  Opt-in für vertrauenswürdige Altdateien. Modellreferenzen aus HTTP-Anfragen
+  bleiben über `resolve_model_path` auf `data/models` beschränkt, Modell-IDs
+  werden gegen `^[A-Za-z0-9._-]+$` geprüft (auch beim Live-Start).
+* `JobManager` startet keinen zweiten Trainingslauf, solange einer aktiv ist
+  (API: 409), außer `allow_concurrent` wird bewusst gesetzt. Evaluationen
+  haben eine Obergrenze für simulierte Match-Sekunden pro Anfrage.
+* `WorkerPool` wartet nicht unbegrenzt: Start und Sammlung haben Timeouts,
+  ein toter Kindprozess wird mit Exit-Code gemeldet statt als Hängen, und
+  `close()` ist idempotent (terminate → kill).
 * Checkpoints sind unveränderlich; der letzte Checkpoint und das stabile
   Modell sind gegen Löschen geschützt. `best.json` ist ein Zeiger ohne
   Lösch- oder Promotionswirkung.

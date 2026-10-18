@@ -18,28 +18,68 @@ python -m pytest -q
 | Heatseeker: Homing, Tempoplus, Tor, unendlich Boost | `test_heatseeker.py` | bestanden |
 | Belohnungen: Tor/Gegentor, Shaping ohne Tor, Touch als Event | `test_rewards.py` | bestanden |
 | PPO: GAE, Dones, Truncation-Bootstrap, Early Stop, ein Update | `test_ppo.py` | bestanden |
+| GAE über Zeitlimits: Maske für Bootstrap **und** Rekursion getrennt, Oracle | `test_gae_truncation.py` | bestanden |
+| Beobachtungs-Spiegelung: 180° um z, Invarianzen, Boost-Pad-Reihenfolge | `test_obs_mirror.py` | bestanden |
+| Seitengleichgewicht: gespiegelte Trajektorien, 0 Aktionsabweichungen, Klassifikation | `test_side_balance.py` | bestanden |
+| Benchmark: parallele/sequenzielle Messung, Speed-up, Inferenz, Klemmen | `test_benchmark.py` | bestanden |
+| Resume-Pläne: Auswahl, Fallback, Ablehnungen, Config-Merge, Modi | `test_resume.py` | bestanden |
+| Echte Fortsetzung: unterbrochener Lauf, Restore, Report, Snapshot-Immutabilität | `test_continuation.py` | bestanden (slow) |
+| Report: nicht Gemessenes, Schritt-Zählung, Before/After-Paarung, Persistenz | `test_report.py` | bestanden |
+| GUI: alle Ansichten headless gerendert (jsdom), Plan-Vorschau, Token | `test_gui_smoke.py`, `tests/gui/smoke.mjs` | bestanden |
 | Beobachtung: v1/v2-Größen, Feldrahmen, Padding, Determinismus | `test_obs.py` | bestanden |
 | Beobachtung v2: Größen, Torrichtung, Padding, Determinismus | `test_obs_v2.py` | bestanden |
 | Checkpoints: atomar, Promotion, Löschschutz, best-Zeiger, Prune-Schutz | `test_checkpoints.py` | bestanden |
-| Gegnerpool: Kapazität, PFSP-Gewichte, Elo, Serialisierung | `test_league.py` | bestanden |
+| Gegnerpool: Kapazität, PFSP-Gewichte, Elo, Serialisierung,unveränderliche und serialisierte Gewichte | `test_league.py` | bestanden |
 | Curriculum: Aufstiegskriterien, Fenster, Resume-Zähler | `test_curriculum.py` | bestanden |
 | SQLite-Store: Runs, Metriken, Logs, Episoden, Evaluationsdetails (CI) | `test_store.py` | bestanden |
-| HTTP-API inkl. Auth, Statik, Preflight, Dry-Run, Presets | `test_api.py` | bestanden |
+| HTTP-API inkl. Auth (Header/Bearer/SSE-Token), CORS opt-in, 409 bei parallelem Lauf, Resume-Vorschau, Checkpoint-Validierung, Reports, Suite, Budget-Grenzen, Pfad-Ablehnung, Statik, Preflight, Dry-Run, Presets | `test_api.py` | bestanden |
 | Evaluation: Ergebnis, Seed-Reproduzierbarkeit, Wilson-Intervall, v1-Checkpoints, best-Regel | `test_evaluation.py` | bestanden |
-| Evaluation v2: CI-Grenzen, Layout-Erkennung, v1-Checkpoint-Evaluation | `test_evaluation_v2.py` | bestanden |
-| Trainer: fehlende Run-Zeile, Resume-Restore, Architektur-Mismatch, best-Regel | `test_trainer.py` | bestanden |
-| CLI: Train-Run-Registrierung, `live --preflight/--dry-run/--list` | `test_cli.py` | bestanden |
+| Evaluation v2: CI-Grenzen, Layout-Erkennung, v1-Checkpoint-Evaluation, Suiten, Seiten | `test_evaluation_v2.py` | bestanden |
+| Trainer: fehlende Run-Zeile, Resume-Restore, Architektur-Mismatch, best-Regel, Pool-Gewichte im Checkpoint | `test_trainer.py` | bestanden |
+| CLI: Train-Run-Registrierung, `--plan-only`, `resume-plan`, `report`, Suite-Evaluation, `live --preflight/--dry-run/--list` | `test_cli.py` | bestanden |
 | RLBot-Parität: Packet → Beobachtung (1v1, 3v3, Heatseeker) | `test_rlbot_adapter.py` | bestanden |
-| Bot: Checkpoint laden, Inferenz, deterministische Aktionen, fehlendes Modell | `test_rlbot_bot.py` | bestanden |
+| Bot: sicheres Laden (Pickle-Ablehnung), Inferenz, deterministische Aktionen, Spiegelung je Team, Fehlerrobustheit, `initialize`, fehlendes/externes Modell | `test_rlbot_bot.py` | bestanden |
 | JobManager: Steuerdateien, Subprozess-Umgebung | `test_jobs.py` | bestanden |
 | Alle ausgelieferten Konfigurationen laden und validieren | `test_modes.py` | bestanden |
 | Live-Match-TOML für alle vier Modi, Team-/Fill-Optionen, Preflight, Dry-Run | `test_live.py` | bestanden |
 | Generierte Match-Configs durch RLBot-Parser (alle Modi, beide Fill-Arten) | `test_live.py` | bestanden |
 | Launcher `--dry-run` mit RLBot-Parser, Rückgabecodes | `test_live.py`, `test_cli.py` | bestanden |
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
+| Exposure-Settings: Loopback-Standard, Host-/Port-/CORS-Validierung, Token-Warnung, `serve` | `test_app_settings.py` | bestanden |
 
-**Gesamt: 153 passed, 0 failed, 0 skipped** (ca. 8,3 s), `ruff check src tests`
-sauber.
+**Gesamt: 277 passed, 0 failed, 0 skipped** (ca. 34 s, 2 vCPU), `ruff check src
+tests rlbot` sauber. Die einzigen verbleibenden Warnungen stammen aus
+`starlette`/`anyio` (Drittanbieter), nicht aus diesem Projekt.
+
+Der GUI-Test braucht node und jsdom; fehlen sie, wird er übersprungen statt zu
+fehlschlagen:
+
+```bash
+cd tests/gui && npm install && npm test     # einmalig bzw. direkt
+python -m pytest tests/test_gui_smoke.py -q # läuft automatisch mit
+```
+
+## Gemessene Fortsetzung über die CLI (diese Umgebung)
+
+Zwei reale Läufe mit RocketSim-Workern (`RLAI_DATA_DIR=/tmp/rlai-t4`,
+`hidden=[16]`, 1 Worker, 5-s-Episoden, Suite `idle,chase` auf beiden Seiten):
+
+| Lauf | Modus | Schritte | Dauer | Schritte/s (Wandzeit) | Schritte/s (Iteration) |
+| --- | --- | --- | --- | --- | --- |
+| `run-a` | `fresh` | 0 → 2 048 | 5,73 s | 358 | ~1 100 |
+| `run-b` | `continue` aus `run-a` | 2 048 → 4 096 | 5,78 s | 354 | ~1 177 |
+
+`run-b` meldet `resume_mode=continue`, `parent_run=run-a`, `start_step=2048`,
+führt die Iterationszählung bei 9 fort und stellt Optimizer, RNG und
+Gegnerpool wieder her. `rlai resume-plan` nennt vorab Kandidat, Elternlauf,
+`restored_step`, was wiederhergestellt wird und was fehlt. Der Report von
+`run-b` enthält 2 Before/After-Paare (`chase` als Stärkegegner in der
+Kopfzeile, `idle` als Diagnose), jeweils mit `same_seed: false`, weil der
+Trainer pro Phase einen neuen Kickoff-Seed ableitet; die Protokolle sind
+identisch (Modus, 2 Spiele, 5 s, Seiten `blue+orange`, gespiegelt, obs v2).
+Zeitanteile pro Iteration: Collect 0,214 s (davon Simulation 0,111 s,
+Inferenz 0,097 s), Update 0,004 s, Checkpoint 0,013 s, Evaluation 0,653 s
+pro Serie – die Evaluation dominiert bei kurzen Serien, nicht das Lernen.
 
 ## Was zusätzlich manuell geprüft wurde
 

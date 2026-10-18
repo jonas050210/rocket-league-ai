@@ -15,7 +15,7 @@ from typing import Protocol
 import numpy as np
 
 from .actions import ACTION_TABLE, ACTION_COUNT
-from .policy import PolicyConfig, TorchPolicy
+from .policy import TorchPolicy
 
 
 class Opponent(Protocol):
@@ -107,15 +107,34 @@ class ModelOpponent:
         self.deterministic = deterministic
 
     @classmethod
-    def from_checkpoint(cls, path: str | Path, device: str = "cpu", name: str | None = None):
-        import torch
+    def from_checkpoint(
+        cls,
+        reference: str | Path,
+        device: str = "cpu",
+        name: str | None = None,
+        *,
+        weights_only: bool = True,
+        allow_outside: bool = True,
+    ) -> "ModelOpponent":
+        """Build a frozen opponent from a checkpoint path or a model id.
 
-        payload = torch.load(Path(path), map_location=device, weights_only=False)
-        config = PolicyConfig.from_dict(payload.get("policy_config"))
-        policy = TorchPolicy.from_config(config, device=device)
-        policy.model.load_state_dict(payload["model"])
-        policy.model.eval()
-        return cls(policy, name=name or Path(path).parent.name, deterministic=True)
+        Loading goes through :func:`rlai.checkpoints.load_checkpoint` with
+        ``weights_only=True`` so a hostile file cannot execute code via pickle
+        (every checkpoint this project writes loads safely).  A model id is
+        resolved inside the data models directory unless it names an existing
+        file, so an id that arrives over HTTP cannot point at an arbitrary path.
+        """
+        from .checkpoints import load_policy, resolve_model_path
+
+        path = Path(str(reference).strip())
+        if not path.exists():
+            from .config import ensure_dirs
+
+            path = resolve_model_path(
+                ensure_dirs()["models"], str(reference), allow_outside=allow_outside
+            )
+        policy = load_policy(path, device=device, weights_only=weights_only)
+        return cls(policy, name=name or path.parent.name, deterministic=True)
 
     def reset(self, env) -> None:
         pass

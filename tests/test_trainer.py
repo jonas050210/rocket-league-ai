@@ -132,3 +132,65 @@ def test_resume_rejects_a_different_architecture(data_root):
         trainer._load_resume()
     # the loaded tensors are untouched by the failed resume
     assert all(torch.isfinite(p).all() for p in trainer.model.parameters())
+
+
+def _trainer(config: TrainingConfig, store: Store, name: str) -> Trainer:
+    run_id = store.create_run(name, config.mode, config.to_dict(), config.total_steps)
+    return Trainer(config, run_id, store)
+
+
+def test_self_play_checkpoint_keeps_a_playable_pool(data_root):
+    """A resumed self-play run must face its real former selves, not only ratings."""
+    config = _config().model_copy(update={"self_play": True, "snapshot_interval": 1})
+    store = Store(data_root / "rlai.sqlite3")
+    parent = _trainer(config, store, "parent")
+    parent.step = 512
+    parent.iteration = 2
+    parent.league.add("snapshot-a", 256, parent._snapshot_state())
+    parent.league.add("snapshot-b", 512, parent._snapshot_state())
+    parent.league.record("snapshot-b", wins=3, losses=1, draws=0)
+    elo_before = parent.league.agent_elo
+    manifest = parent._save(label="test", force=True)
+    assert manifest is not None
+
+    payload = checkpoints.load_checkpoint(data_root / "models" / manifest["path"])
+    league_data = payload["extra"]["league"]
+    assert league_data["states_included"] is True
+    assert all(entry["has_state"] for entry in league_data["entries"])
+
+    child = _trainer(config, store, "child")
+    child.resume_from = str(data_root / "models" / manifest["path"])
+    child._load_resume()
+    assert child.step == 512
+    assert len(child.league) == 2
+    assert child.league.usable == 2, "restored snapshots must be playable"
+    assert child.league.agent_elo == pytest.approx(elo_before)
+    entry = child.league.sample(child.rng)
+    assert entry.id in {"snapshot-a", "snapshot-b"}
+    # the restored weights are the ones the parent froze, and they are copies
+    original = parent.league.entries[-1].state
+    restored = child.league.entries[-1].state
+    assert torch.equal(next(iter(original.values())), next(iter(restored.values())))
+    assert next(iter(original.values())).data_ptr() != next(iter(restored.values())).data_ptr()
+
+
+def test_league_states_can_be_turned_off(data_root):
+    config = _config().model_copy(
+        update={"self_play": True, "snapshot_interval": 1, "league_states": False}
+    )
+    store = Store(data_root / "rlai.sqlite3")
+    parent = _trainer(config, store, "parent")
+    parent.step = 256
+    parent.league.add("snapshot-a", 256, parent._snapshot_state())
+    manifest = parent._save(label="test", force=True)
+    payload = checkpoints.load_checkpoint(data_root / "models" / manifest["path"])
+    assert payload["extra"]["league"]["states_included"] is False
+
+    child = _trainer(config, store, "child")
+    child.resume_from = str(data_root / "models" / manifest["path"])
+    child._load_resume()
+    assert len(child.league) == 1 and child.league.usable == 0
+    assert any(
+        "ratings but no weights" in record["message"]
+        for record in store.tail_logs(child.run_id, 0, 100)
+    )

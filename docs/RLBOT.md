@@ -132,10 +132,40 @@ Offline-Spiele, kein Tool für Online-Ranked.
 
 | Variable | Pflicht | Bedeutung |
 | --- | --- | --- |
-| `RLAI_MODEL` | nein | Pfad oder Modell-ID; ohne Wert wird das stabile Modell geladen |
+| `RLAI_MODEL` | nein | Pfad oder Modell-ID; ohne Wert wird das stabile Modell geladen. Referenzen müssen in `data/models` auflösbar sein |
 | `RLAI_MODE` | nein | Modus-ID, Standard `soccer-1v1` |
-| `RLAI_TICK_SKIP` | nein | Entscheidungsintervall, Standard 8 |
+| `RLAI_TICK_SKIP` | nein | Entscheidungsintervall, Standard 8 (Minimum 1) |
 | `RLAI_DATA_DIR` | nein | Datenverzeichnis, Standard `<repo>/data` |
+| `RLAI_TRAINED_SIDE` | nein | Seite, auf der der Checkpoint trainiert hat (`blue`, Standard, oder `orange`) |
+| `RLAI_MIRROR` | nein | `1` (Standard): Beobachtung drehen, wenn der Bot auf der anderen Seite spielt; `0` schaltet das ab |
+| `RLAI_DETERMINISTIC` | nein | `1` (Standard): Argmax-Aktion; `0` sampelt wie im Training |
+
+### Seiten und Spiegelung
+
+RLBot weist dem Bot eine Team-Nummer zu. Ein Checkpoint, der nur auf Blau
+trainiert wurde, sieht auf Orange dieselbe Situation in einem gedrehten
+Rahmen. Der Bot dreht die Beobachtung deshalb um 180° um die Hochachse
+(`rlai.obs.mirror_observation`), genau wie die seitengeglichene Evaluation –
+und zwar **nur** die Beobachtung: Die 90 Aktionen sind autorelativ
+(Gas, Lenken, Boost, Sprung, Luftsteuerung) und bleiben unverändert.
+`tests/test_side_balance.py` misst das gegen die Simulation: über 60 Schritte
+0 abweichende Aktionen, maximale Beobachtungsdifferenz 1.57e-5, Auto 0.03 uu,
+Ball 0.0 uu. `tests/test_rlbot_bot.py` prüft, dass der Bot auf Orange die
+gedrehte und auf Blau die rohe Beobachtung an die Policy gibt.
+
+### Laden und Robustheit
+
+* Der Bot lädt über `rlai.checkpoints.load_policy` mit
+  `weights_only=True`: eine Datei, die beliebigen Code per Pickle ausführen
+  würde, wird abgelehnt statt geladen.
+* Beim Start wird der Checkpoint validiert (`validate_checkpoint`): Format,
+  endliche Gewichte, Beobachtungsgröße. Passt der trainierte Modus nicht zu
+  `RLAI_MODE`, wird gewarnt (nicht gestartet wird trotzdem, weil das
+  Beobachtungslayout identisch ist).
+* Schlägt eine einzelne Entscheidung fehl (z. B. unvollständiges Paket),
+  wiederholt der Bot die letzte Aktion und loggt den Fehler, statt den
+  Prozess zu beenden. Außerhalb der aktiven Spielphase wird ein neutraler
+  `ControllerState` zurückgegeben.
 
 ## Match-Konfiguration
 
