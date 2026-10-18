@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rocket-league-ai"
+version = "0.1.0"
+description = "Local-first Rocket League reinforcement learning: training, evaluation and RLBot deployment"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "numpy==1.26.4",
+  "torch==2.9.1",
+  "rlgym-rocket-league[sim]==2.0.1",
+  "rlbot==2.0.0b56",
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.34.0",
+  "pydantic==2.10.4",
+  "psutil==7.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4", "httpx==0.28.1"]
+
+[project.scripts]
+rlai = "rlai.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+  "slow: tests that run a full match series",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

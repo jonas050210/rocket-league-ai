@@ -1,0 +1,77 @@
+"""Model loading and action mapping used by the deployed bot."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from rlai.actions import ACTION_COUNT, controller_dict
+from rlbot import flat
+
+from rlai.envs import MatchEnv
+from rlai.modes import get_mode
+from rlai.opponents import IdleOpponent
+from rlai.rlbot.bot import RocketLeagueAIBot, decide_action, load_policy
+from tests.packet_utils import packet_from_env
+
+
+def test_load_policy_from_checkpoint(model_path):
+    policy = load_policy(model_path, device="cpu")
+    obs = np.zeros(190, dtype=np.float32)
+    action, logprob, value = policy.act(obs, deterministic=True)
+    assert 0 <= action < ACTION_COUNT
+    assert np.isfinite(logprob) and np.isfinite(value)
+    payload = controller_dict(action)
+    assert set(payload) == {
+        "throttle",
+        "steer",
+        "pitch",
+        "yaw",
+        "roll",
+        "jump",
+        "boost",
+        "handbrake",
+    }
+
+
+def test_bot_action_loop_is_deterministic(model_path):
+    policy = load_policy(model_path, device="cpu")
+    obs = np.linspace(-1, 1, 190, dtype=np.float32)
+    first = policy.act(obs, deterministic=True)[0]
+    for _ in range(5):
+        assert policy.act(obs, deterministic=True)[0] == first
+
+
+def test_bot_decision_and_controller_output(model_path):
+    spec = get_mode("soccer-1v1")
+    env = MatchEnv(spec, IdleOpponent(), seed=5, episode_seconds=10)
+    env.reset()
+    packet = packet_from_env(env)
+
+    policy = load_policy(model_path, device="cpu")
+    action, payload = decide_action(policy, packet, 0, 0, spec)
+    assert 0 <= action < ACTION_COUNT
+    assert set(payload) == {
+        "throttle",
+        "steer",
+        "pitch",
+        "yaw",
+        "roll",
+        "jump",
+        "boost",
+        "handbrake",
+    }
+
+    bot = object.__new__(RocketLeagueAIBot)
+    bot.policy = policy
+    bot.spec = spec
+    bot.index = 0
+    bot.tick = 0
+    bot.tick_skip = 1
+    bot.last_action = 0
+    bot.decisions = 0
+    output = bot.get_output(packet)
+    assert isinstance(output, flat.ControllerState)
+    assert output.throttle == pytest.approx(payload["throttle"])
+    assert bool(output.jump) == payload["jump"]
+    assert bot.decisions == 1

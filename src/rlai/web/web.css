@@ -1,0 +1,260 @@
+/* App-specific glue only; all visual language comes from ui/theme/theme.css. */
+#nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 12px;
+}
+
+.sidebar .nav-caption {
+  margin-top: 4px;
+}
+
+.sidebar-bottom {
+  margin-top: auto;
+}
+
+.sidebar-bottom .foundation-note {
+  margin-bottom: 12px;
+}
+
+.sidebar-bottom .foundation-note p {
+  margin-bottom: 6px;
+}
+
+.sidebar-bottom .text-button {
+  font-size: var(--fs-2xs);
+}
+
+/* Charts: the svg fills the card, the legend is pinned to its bottom edge. */
+.chart {
+  padding-bottom: 30px;
+}
+
+.chart > svg {
+  height: calc(100% - 30px);
+}
+
+.chart > .chart-legend {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart > .chart-legend span:last-child {
+  margin-left: auto;
+}
+
+/* The dashboard uses an empty state inside a panel body rather than a card. */
+.panel .empty-state {
+  padding: 26px 20px 34px;
+}
+
+.two-col > .panel,
+.two-col > section {
+  min-width: 0;
+}
+
+/* Logs */
+.log-stream {
+  max-height: 340px;
+  overflow: auto;
+}
+
+.log-line .log-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.log-level.warning {
+  color: var(--warning);
+}
+
+.log-level.error {
+  color: var(--danger);
+}
+
+/* Tables inside forms and panels sit flush. */
+.panel > .table-wrap {
+  border-top: 1px solid var(--line-soft);
+}
+
+.panel-header + .table-wrap {
+  border-top: 0;
+}
+
+/* Resource meters */
+.resource-item {
+  margin-bottom: 16px;
+}
+
+.resource-item:last-child {
+  margin-bottom: 0;
+}
+
+.resource-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+
+.meter-track {
+  height: 6px;
+}
+
+.meter-fill {
+  transition: width 600ms ease;
+}
+
+/* Form details */
+.advanced-config {
+  border-top: 1px solid var(--line-soft);
+  margin-top: 6px;
+  padding-top: 14px;
+}
+
+.advanced-config summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.advanced-config[open] summary {
+  margin-bottom: 4px;
+}
+
+.field.approval-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-direction: row;
+}
+
+.field.approval-check input {
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  flex: none;
+}
+
+.field.approval-check span {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.preset-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.preset-card p {
+  margin-bottom: 0;
+}
+
+.preset-top {
+  gap: 10px;
+}
+
+/* Toasts must not leave a gap when hidden. */
+#toast[hidden] {
+  display: none;
+}
+
+/* Dialog */
+dialog {
+  color: var(--text);
+}
+
+dialog::backdrop {
+  background: rgba(2, 5, 3, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+}
+
+/* Small screens: let the sidebar scroll instead of clipping nav items. */
+@media (max-width: 920px) {
+  .sidebar {
+    overflow-y: auto;
+  }
+
+  .sidebar-bottom {
+    margin-top: 24px;
+  }
+
+  .table-wrap {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Dense registry tables: keep action buttons inside the panel. */
+table.compact th,
+table.compact td {
+  padding-inline: 13px;
+}
+
+table.compact td.actions {
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+table.compact td small {
+  white-space: normal;
+}
+
+/* Compact run list used in the training sidebar. */
+.run-list {
+  padding: 4px 20px 14px;
+}
+
+.run-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.run-row:last-child {
+  border-bottom: 0;
+}
+
+.run-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.run-main strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-main small {
+  color: var(--faint);
+  font-size: var(--fs-2xs);
+}
+
+.run-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.run-actions .button {
+  padding: 5px 7px;
+}
+
+.run-actions .button .icon {
+  width: 13px;
+  height: 13px;
+}

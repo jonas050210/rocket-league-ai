@@ -1,0 +1,46 @@
+{
+  "run_name": "1v1 self-play",
+  "mode": "soccer-1v1",
+  "seed": 42,
+  "total_steps": 10000000,
+  "rollout_steps": 512,
+  "n_workers": 8,
+  "tick_skip": 8,
+  "episode_seconds": 60.0,
+  "learning_rate": 0.0003,
+  "gamma": 0.995,
+  "gae_lambda": 0.95,
+  "clip_coef": 0.2,
+  "value_coef": 0.5,
+  "entropy_coef": 0.01,
+  "epochs": 4,
+  "minibatch_size": 1024,
+  "max_grad_norm": 0.5,
+  "lr_anneal": true,
+  "device": "auto",
+  "opponent": "chase",
+  "self_play": true,
+  "snapshot_interval": 10,
+  "checkpoint_interval": 50,
+  "keep_checkpoints": 8,
+  "reward": {
+    "goal": 10.0,
+    "concede": 10.0,
+    "touch": 0.35,
+    "progress": 0.9,
+    "alignment": 0.02,
+    "approach": 0.03,
+    "boost": 0.02,
+    "defense": 0.15,
+    "demo": 0.3
+  },
+  "policy": {
+    "hidden": [
+      256,
+      256
+    ],
+    "activation": "tanh"
+  },
+  "episodes_per_eval": 20,
+  "eval_opponent": "chase"
+}
