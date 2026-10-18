@@ -373,8 +373,13 @@ def list_matches(paths: dict[str, Path], limit: int = 20) -> list[dict]:
     return matches
 
 
-def preflight(paths: dict[str, Path]) -> dict:
-    """Environment checks for a reliable first live test on Windows."""
+def preflight(paths: dict[str, Path], model_id: str | None = None) -> dict:
+    """Environment checks for a reliable first live test on Windows.
+
+    ``model_id`` validates the checkpoint the user actually selected; without
+    it the check requires a stable or best pointer because the launcher then
+    has no explicit model.
+    """
     checks: list[dict] = []
 
     def add(name: str, ok: bool, detail: str, required: bool = True) -> None:
@@ -415,17 +420,32 @@ def preflight(paths: dict[str, Path]) -> dict:
     models = checkpoints.list_models(paths["models"])
     stable = checkpoints.stable_model(paths["models"])
     best = checkpoints.best_model(paths["models"])
-    launchable = bool(stable or best)
-    add(
-        "model",
-        launchable,
-        (
-            f"{len(models)} checkpoint(s); stable="
-            f"{stable['id'] if stable else None} best={best['id'] if best else None}"
-            + ("" if launchable else "; promote one or pass --model-id")
-        ),
-        True,
-    )
+    if model_id:
+        try:
+            selected = checkpoints.get_model(paths["models"], model_id)
+        except KeyError as exc:
+            add("model", False, f"selected model unavailable: {exc}", True)
+        else:
+            exists = (paths["models"] / selected["path"]).exists()
+            add(
+                "model",
+                exists,
+                f"selected {selected['id']} ({selected['path']})"
+                + ("" if exists else " is missing on disk"),
+                True,
+            )
+    else:
+        launchable = bool(stable or best)
+        add(
+            "model",
+            launchable,
+            (
+                f"{len(models)} checkpoint(s); stable="
+                f"{stable['id'] if stable else None} best={best['id'] if best else None}"
+                + ("" if launchable else "; select a model or promote one")
+            ),
+            True,
+        )
     try:
         probe = paths["root"] / "live" / ".preflight"
         probe.mkdir(parents=True, exist_ok=True)

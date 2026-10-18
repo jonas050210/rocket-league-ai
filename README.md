@@ -117,7 +117,7 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 python -m pytest -q
 ```
 
-Ergebnis in dieser Umgebung: **152 passed** in ca. 8,4 s (2 vCPU, keine GPU,
+Ergebnis in dieser Umgebung: **153 passed** in ca. 8,3 s (2 vCPU, keine GPU,
 kein Spiel). Abgedeckt: Modi, Aktionen, Beobachtung v1/v2 inkl. Parität,
 Belohnungs-Events, PPO inkl. Truncation-Bootstrap und Early Stop,
 Checkpoint-Schutz und best-Zeiger, Gegnerpool/Curriculum, Resume-Restore,

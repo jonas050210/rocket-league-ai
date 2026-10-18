@@ -38,7 +38,7 @@ python -m pytest -q
 | Launcher `--dry-run` mit RLBot-Parser, Rückgabecodes | `test_live.py`, `test_cli.py` | bestanden |
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
 
-**Gesamt: 152 passed, 0 failed, 0 skipped** (ca. 8,4 s), `ruff check src tests`
+**Gesamt: 153 passed, 0 failed, 0 skipped** (ca. 8,3 s), `ruff check src tests`
 sauber.
 
 ## Was zusätzlich manuell geprüft wurde

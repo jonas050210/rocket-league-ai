@@ -145,6 +145,11 @@ def test_live_preflight_and_dry_run(client, trained_model):
     assert {"ok", "platform", "checks", "server"} == set(report)
     names = {check["name"] for check in report["checks"]}
     assert {"model", "match config parser", "rlbot server"} <= names
+    selected = client.get(
+        f"/api/live/preflight?model_id={trained_model['id']}"
+    ).json()
+    model_check = next(c for c in selected["checks"] if c["name"] == "model")
+    assert model_check["ok"] is True
 
     response = client.post(
         "/api/live/launch",
