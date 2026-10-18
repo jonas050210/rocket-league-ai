@@ -107,7 +107,7 @@ Live-Matches sind außerhalb von Windows deaktiviert (Serverprüfung, kein Fake)
 python -m pytest -q
 ```
 
-Ergebnis in dieser Umgebung: **75 passed** in ca. 4,5 s (2 vCPU, kein GPU, kein
+Ergebnis in dieser Umgebung: **76 passed** in ca. 4,6 s (2 vCPU, kein GPU, kein
 Spiel). Abgedeckt: Modi, Aktionen, Beobachtung/Parität, Belohnungen, PPO,
 Checkpoint-Schutz, Store, API, Evaluation, Heatseeker-Regeln. Nicht abgedeckt:
 echtes Rocket League, RLBot-Start, GPU-Pfad.

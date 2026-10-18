@@ -93,3 +93,25 @@ Trainingskurve allein.
 * Auf CPU ist 3v3 mit 8 Workern langsam; das Dashboard zeigt die gemessene
   Rate. GPU beschleunigt nur den PPO-Update-Schritt, nicht die Simulation.
 * Langfristiges Training wurde hier nicht durchgeführt (Ressourcenlimit).
+
+## Designentscheidungen (evidenzbasiert)
+
+* **MLP statt Attention.** Die Beobachtung ist ein fester 190-Vektor, die
+  Entscheidungsrate liegt bei 15 Hz. Ein Aufmerksamkeitsmodell über sechs
+  Auto-Slots würde Parameter und Latenz erhöhen, ohne dass ein Engpass
+  nachgewiesen ist. Wenn 3v3-Evaluationen zeigen, dass die feste Slot-Reihenfolge
+  limitiert, ist der Obs-Builder die Stelle für eine Aufmerksamkeitsvariante.
+* **Zentrales PPO statt verteiltem Trainer.** Der gemessene Durchsatz liegt bei
+  6 261 Umgebungsschritten/s (1v1, 2 Worker) bzw. 1 899 (3v3, 2 Worker) auf
+  2 vCPU. Das Netz hat ~250k Parameter; ein verteilter Parameter-Server würde
+  mehr Ausfallmodi als Geschwindigkeit bringen.
+* **Frame-Skip 8.** Entspricht 66,7 ms Entscheidungen und damit dem
+  RLBot-Tick-Muster; der Wechsel auf 4 oder 16 ist konfigurierbar.
+* **Selbstspiel optional.** Der Chaser ist ein reproduzierbarer, billiger
+  Baseline-Gegner. Selbstspiel startet erst danach, weil ein eingefrorener
+  Anfänger-Pool sonst nur Anfängerfehler verstärkt. Ein Liga-/PFSP-System ist
+  bewusst nicht eingebaut: Für seinen Nutzen gibt es in diesem Projekt noch
+  keine Messung.
+* **Checkpoints statt "bestes Modell automatisch".** Automatische Promotion
+  würde bei verrauschten Kurzläufen schlechte Modelle stabil setzen; die
+  Entscheidung bleibt explizit und wird durch eine Evaluation gestützt.

@@ -75,3 +75,11 @@ def test_bot_decision_and_controller_output(model_path):
     assert output.throttle == pytest.approx(payload["throttle"])
     assert bool(output.jump) == payload["jump"]
     assert bot.decisions == 1
+
+
+def test_missing_model_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setenv("RLAI_DATA_DIR", str(tmp_path))
+    from rlai.rlbot.bot import _resolve_model
+
+    with pytest.raises(FileNotFoundError, match="No model configured"):
+        _resolve_model()

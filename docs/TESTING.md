@@ -23,13 +23,13 @@ python -m pytest -q
 | HTTP-API inkl. Auth und Statik | `test_api.py` | bestanden |
 | Evaluation: vollständiges Ergebnis, Seed-Reproduzierbarkeit | `test_evaluation.py` | bestanden |
 | RLBot-Parität: Packet → Beobachtung (1v1, 3v3, Heatseeker) | `test_rlbot_adapter.py` | bestanden |
-| Bot: Checkpoint laden, Inferenz, deterministische Aktionen | `test_rlbot_bot.py` | bestanden |
+| Bot: Checkpoint laden, Inferenz, deterministische Aktionen, fehlendes Modell | `test_rlbot_bot.py` | bestanden |
 | JobManager: Steuerdateien, Subprozess-Umgebung | `test_jobs.py` | bestanden |
 | Alle ausgelieferten Konfigurationen laden und validieren | `test_modes.py` | bestanden |
 | Live-Match-TOML für alle vier Modi | `test_live.py` | bestanden |
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
 
-**Gesamt: 75 passed, 0 failed, 0 skipped** (ca. 4,5 s).
+**Gesamt: 76 passed, 0 failed, 0 skipped** (ca. 4,6 s).
 
 ## Was zusätzlich manuell geprüft wurde
 
