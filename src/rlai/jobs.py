@@ -69,9 +69,33 @@ class JobManager:
                     self.store.log(run["id"], "WARNING", "run marked interrupted after restart")
 
     # -- training ----------------------------------------------------------
+    def active_jobs(self) -> list[str]:
+        """Ids of jobs whose process is still alive."""
+        with self._lock:
+            items = list(self.processes.items())
+        return [job_id for job_id, process in items if process.poll() is None]
+
     def start_training(
-        self, config: TrainingConfig, run_id: str, resume_from: str | None = None
+        self,
+        config: TrainingConfig,
+        run_id: str,
+        resume_from: str | None = None,
+        resume_mode: str = "fresh",
+        allow_concurrent: bool = False,
     ) -> dict:
+        if resume_mode not in ("fresh", "continue", "transfer"):
+            raise ValueError(f"resume_mode must be fresh, continue or transfer, got {resume_mode!r}")
+        if not allow_concurrent:
+            running = [job for job in self.active_jobs() if not job.startswith("ev-")]
+            if not running:
+                active = self.store.latest_active_run()
+                if active and active["id"] != run_id:
+                    running = [active["id"]]
+            if running:
+                raise RuntimeError(
+                    f"training run {running[0]} is already active; stop it first or start this "
+                    "run with allow_concurrent=true (two trainers will fight for the same CPUs)"
+                )
         run_dir = self._run_dir(run_id)
         config_path = run_dir / "config.json"
         config.save(config_path)
@@ -89,6 +113,7 @@ class JobManager:
             "--config-file",
             str(config_path),
         ]
+        command += ["--resume-mode", resume_mode]
         if resume_from:
             command += ["--resume-from", str(resume_from)]
         process = subprocess.Popen(
@@ -103,8 +128,13 @@ class JobManager:
         with self._lock:
             self.processes[run_id] = process
         self.store.update_run(run_id, status="starting", pid=process.pid, message="started")
-        self.store.log(run_id, "INFO", f"launched training process pid={process.pid}")
-        return {"run_id": run_id, "pid": process.pid}
+        self.store.log(
+            run_id,
+            "INFO",
+            f"launched training process pid={process.pid} resume_mode={resume_mode}"
+            + (f" resume_from={resume_from}" if resume_from else ""),
+        )
+        return {"run_id": run_id, "pid": process.pid, "resume_mode": resume_mode}
 
     def control(self, run_id: str, *, pause: bool | None = None, stop: bool | None = None) -> dict:
         run_dir = self._run_dir(run_id)
@@ -151,6 +181,11 @@ class JobManager:
         seed: int,
         match_seconds: float,
         device: str = "cpu",
+        opponents: list[str] | None = None,
+        sides: list[str] | tuple[str, ...] = ("blue",),
+        mirror: bool = True,
+        stochastic: bool = False,
+        phase: str = "manual",
     ) -> str:
         eval_id = f"ev-{int(time.time())}-{uuid.uuid4().hex[:6]}"
         run_dir = self._run_dir(f"eval-{eval_id}")
@@ -179,7 +214,17 @@ class JobManager:
             device,
             "--store",
             str(self.store.path),
+            "--sides",
+            ",".join(sides) or "blue",
+            "--phase",
+            phase,
         ]
+        if opponents and len(opponents) > 1:
+            command += ["--opponents", ",".join(opponents)]
+        if not mirror:
+            command += ["--no-mirror"]
+        if stochastic:
+            command += ["--stochastic"]
         process = subprocess.Popen(
             command,
             cwd=str(project_root()),
@@ -191,7 +236,13 @@ class JobManager:
         log_file.close()
         with self._lock:
             self.processes[eval_id] = process
-        self.store.log(None, "INFO", f"evaluation {eval_id} started for {model_id} vs {opponent}")
+        self.store.log(
+            None,
+            "INFO",
+            f"evaluation {eval_id} started for {model_id} vs "
+            f"{'+'.join(opponents) if opponents and len(opponents) > 1 else opponent} "
+            f"({games} games, sides={','.join(sides)}, mirror={mirror})",
+        )
         return eval_id
 
     def job_alive(self, run_id: str) -> bool:

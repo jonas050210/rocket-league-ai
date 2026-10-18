@@ -16,12 +16,18 @@ Details: `docs/TESTING.md`.
 | Bereich | Zustand | Nachweis |
 | --- | --- | --- |
 | 1v1 / 2v2 / 3v3 / Heatseeker 2v2 | implementiert | `tests/test_env_modes.py`, `tests/test_heatseeker.py` |
-| PPO-Training, Checkpoints, Resume | implementiert | `tests/test_ppo.py`, Smoke-Runs über die API |
+| PPO-Training, Checkpoints, Resume | implementiert | `tests/test_ppo.py`, `tests/test_trainer.py` |
+| GAE über Zeitlimit-Truncations | korrigiert | `tests/test_gae_truncation.py` |
+| Automatische Fortsetzung (fresh/continue/transfer) | implementiert | `tests/test_resume.py`, `tests/test_continuation.py` |
+| Unveränderliche Selbstspiel-Snapshots | korrigiert | `tests/test_continuation.py`, `tests/test_league.py` |
+| Lauf-Report (Statistik nach jedem Lauf) | implementiert | `tests/test_report.py` |
 | Parallele Worker (Multiprocessing) | implementiert | 2-Worker-Runs für 3v3 und Heatseeker |
-| Evaluation mit festen Seeds | implementiert | `tests/test_evaluation.py` |
+| Durchsatz-Benchmark (Simulation/Inferenz getrennt) | korrigiert | `tests/test_benchmark.py` |
+| Seitengeglichene Evaluation + Gegner-Suiten | implementiert | `tests/test_evaluation_v2.py`, `tests/test_side_balance.py` |
+| Beobachtungs-Spiegelung (180° um z) | implementiert | `tests/test_obs_mirror.py`, `tests/test_side_balance.py` |
 | Modell-Registry, Promotion, Schutzregeln | implementiert | `tests/test_checkpoints.py` |
-| Dashboard + Steuerung + Logs | implementiert | 7 Routen headless gerendert, API-Tests |
-| RLBot-v5-Adapter | implementiert, **nicht im Spiel verifiziert** | `tests/test_rlbot_adapter.py` |
+| Dashboard + Steuerung + Logs + Reports | implementiert | 9 Routen headless gerendert (jsdom), API-Tests |
+| RLBot-v5-Adapter inkl. Seiten-Spiegelung | implementiert, **nicht im Spiel verifiziert** | `tests/test_rlbot_adapter.py`, `tests/test_rlbot_bot.py` |
 | Windows-/Epic-Anleitung | dokumentiert | `docs/SETUP_WINDOWS.md` |
 
 ## Schnellstart (Linux/macOS)
@@ -34,8 +40,13 @@ pip install -e ".[dev]"      # torch, RLGym, RocketSim, FastAPI, pytest
 python -m rlai.cli serve --port 8000
 ```
 
-Danach `http://localhost:8000` öffnen. Training startet **nie** automatisch –
-es muss im Tab *Training* explizit gestartet werden.
+Danach `http://localhost:8000` öffnen. Der Server bindet standardmäßig nur an
+`127.0.0.1`; `--host 0.0.0.0` exponiert die API im Netz und sollte nur zusammen
+mit `RLAI_AUTH_TOKEN` (oder `--token`) verwendet werden. Cross-Origin-Zugriff ist
+standardmäßig aus und wird über `RLAI_CORS_ORIGINS=https://host` explizit
+freigeschaltet. Training startet **nie** automatisch – weder beim Start der App,
+noch nach einem Absturz, noch wenn ein Checkpoint auftaucht. Jeder Lauf muss im
+Tab *Training* explizit gestartet und bestätigt werden.
 
 Erster sinnvoller Lauf: Preset **1v1 vs chaser** oder eine kleine eigene
 Konfiguration. Ein Smoke-Test dauert wenige Sekunden:
@@ -44,6 +55,26 @@ Konfiguration. Ein Smoke-Test dauert wenige Sekunden:
 python -m rlai.cli train --config-file configs/smoke-1v1.json
 python -m rlai.cli evaluate --model data/models/<id>/model.pt --games 2 --match-seconds 20
 python -m rlai.cli benchmark --mode heatseeker-2v2 --workers 2 --seconds 2
+```
+
+Fortsetzung, Report und seitengeglichene Evaluation:
+
+```bash
+# Was würde ein Resume wiederherstellen? (startet kein Training)
+python -m rlai.cli resume-plan --config-file configs/smoke-1v1.json --run-id <run-id>
+
+# Explizit fortsetzen / nur Gewichte übernehmen / bewusst neu anfangen
+python -m rlai.cli train --config-file configs/smoke-1v1.json --auto-resume --max-steps 40000
+python -m rlai.cli train --config-file configs/smoke-1v1.json --resume-from <model-id> --resume-mode transfer
+python -m rlai.cli train --config-file configs/smoke-1v1.json --plan-only
+
+# Statistik-Report eines Laufs (bzw. Vergleich mehrerer Läufe)
+python -m rlai.cli report --run-id <run-id> --summary
+python -m rlai.cli report --compare <run-a>,<run-b>
+
+# Suite gegen Diagnose- und Stärkegegner, auf beiden Seiten
+python -m rlai.cli evaluate --model <model-id> --opponents idle,chase \
+    --games 10 --sides blue,orange --phase manual
 ```
 
 Unter Windows: `powershell -ExecutionPolicy Bypass -File scripts/setup_windows.ps1`
@@ -88,25 +119,79 @@ ein Checkpoint kann daher als Initialisierung für größere Teams dienen.
 * Jeder Worker ist ein eigener Prozess mit einer RocketSim-Arena; der Trainer
   sammelt Rollouts, trainiert zentral und schreibt Metriken in SQLite.
 * Checkpoints sind atomar und unveränderlich; der stabile Zeiger wird nur
-  explizit gesetzt. Der letzte Checkpoint ist gegen Löschen geschützt.
-* Resume nach Unterbrechung lädt Modell, Optimizer, Schrittstand,
-  Gegnerpool-Bilanz und Curriculum-Stufe.
+  explizit gesetzt. Der letzte Checkpoint ist gegen Löschen geschützt. Laden
+  erfolgt standardmäßig mit `torch.load(weights_only=True)`, Modellreferenzen
+  aus HTTP-Anfragen bleiben auf `data/models` beschränkt.
+* **Fortsetzung ist explizit**: `fresh` (nichts wird geladen), `continue`
+  (Gewichte, Optimizer, Schrittstand, RNG, Curriculum, Gegnerpool, geerbte
+  Config-Felder) und `transfer` (nur Gewichte, Schrittzähler beginnt bei 0).
+  Gesucht wird der neueste gültige, kompatible Checkpoint der Lauf-Linie;
+  ist er defekt oder inkompatibel, wird auf einen älteren zurückgefallen –
+  mit Begründung im Log und im Report. Ein **namentlich** angeforderter
+  Checkpoint wird niemals stillschweigend durch einen anderen ersetzt:
+  dann startet der Lauf nicht. `rlai resume-plan` bzw. `POST /api/resume/plan`
+  zeigen vorher, was wiederhergestellt würde und was fehlt.
+* Gegnerpool-Snapshots sind echte Kopien (`freeze_state`), die sich beim
+  Weiterlernen nicht verändern; ihre Gewichte werden mit
+  `league_states=true` (Standard) im Checkpoint gespeichert, damit Selbstspiel
+  nach einem Resume gegen dieselben Gegner weiterläuft.
 * Selbstspiel nutzt einen begrenzten Pool eingefrorener Snapshots mit
   Elo-/PFSP-Auswahl (optional); ein Curriculum kann Gegnerstufen anhand
   gemessener Siegquoten weiterschalten.
-* Periodische Evaluation gegen feste Gegner schreibt Siegquote, Tore und
-  95-%-Wilson-Intervall; `best.json` dokumentiert die beste Messung, ohne
-  automatisch zu deployen.
+* Evaluation läuft auf Wunsch auf beiden Seiten (`eval_sides`), wobei die
+  Beobachtung für Orange um 180° um die Hochachse gedreht wird
+  (`eval_mirror`); die Aktion bleibt unverändert, weil sie autorelativ ist.
+  Gegner-Suiten (`eval_opponents`) trennen Diagnosebaselines (idle, random)
+  von Stärkegegnern (chase, mixed, self, model:*). Jede Serie schreibt
+  Siegquote, Tore, Touches, 95-%-Wilson-Intervall **und das Protokoll**
+  (Modus, Gegner, Spiele, Seed, Matchlänge, Seiten, Spiegelung, Sampling,
+  Obs-Version); `best.json` wird nur nach einem Protokoll und nur mit
+  mindestens einem Sieg gesetzt.
+* Nach jedem Lauf – abgeschlossen, gestoppt oder fehlgeschlagen – wird ein
+  Report geschrieben (`data/runs/<id>/report.json` und Datenbank): Schritte
+  von/bis, Dauer, zwei Durchsatzzahlen (Wandzeit und pro Iteration), Gerät und
+  Worker, Konfiguration, Resume-Herkunft, PPO-Kennzahlen, Zeitanteile
+  (Simulation, Inferenz, Update, Evaluation, Checkpoint), Belohnungskomponenten,
+  Episoden, Before/After-Evaluation **nur bei gleichem Gegner und gleichem
+  Protokoll**, Checkpoint-Gültigkeit, Kurven und Vergleichsläufe.
+  Nicht Gemessenes steht als `available: false` mit Begründung darin.
 * Alle Kennzahlen im Dashboard kommen aus der Datenbank des laufenden Prozesses –
-  keine erfundenen Werte.
+  keine erfundenen Werte. Trainings-Reward belegt keine Spielstärke; dafür ist
+  ausschließlich der Evaluations-Teil des Reports da.
 
 Details: `docs/TRAINING.md`.
 
 ## Web-Dashboard
 
-Sieben Ansichten: Dashboard, Training, Monitoring, Models, Evaluation, Live match,
-Settings. Es gibt keine Dummy-Buttons: nicht verfügbare Aktionen sind deaktiviert
-und erklären sich, fehlende Abhängigkeiten werden als Diagnose angezeigt.
+Neun Ansichten: Dashboard, Training, Monitoring, **Reports**, **Report**, Models,
+Evaluation, Live match, Settings. Es gibt keine Dummy-Buttons: nicht verfügbare
+Aktionen sind deaktiviert und erklären sich, fehlende Abhängigkeiten werden als
+Diagnose angezeigt.
+
+* **Training** enthält ein Fortsetzungs-Panel: Modus (fresh/continue/transfer),
+  Checkpoint-Auswahl („automatisch" = neuester kompatibler), Vorschau
+  „Was würde wiederhergestellt?" (inkl. abgelehnter Checkpoints mit Gründen und
+  geerbter Config-Felder), Schalter für einen zweiten parallelen Lauf und
+  Evaluations-Regler (Gegner-Suite, Seiten, Spiegelung, Baseline vor dem Lauf,
+  Seitenrandomisierung). Gestartet wird erst nach einem Bestätigungsdialog.
+* **Monitoring** zeigt zusätzlich die Iterationskosten (Collect, Simulation,
+  Inferenz, Update, Evaluation, Checkpoint), Curriculum-Stufe, Pool-Größe und
+  bei Fortsetzungen, ab welchem Schritt gezählt wird.
+* **Reports** listet alle Läufe mit Status, Schritten, Dauer, Durchsatz,
+  finaler Evaluation und Checkpoint-Gültigkeit, erlaubt den Vergleich
+  ausgewählter Läufe (inkl. „nicht vergleichbar"-Warnung) und kann Reports
+  älterer Läufe aus der Datenbank neu berechnen.
+* **Models** prüft einen Checkpoint gegen eine Konfiguration
+  (`POST /api/models/{id}/validate`) und zeigt, ob `continue` bzw. `transfer`
+  möglich ist und welcher Zustand fehlt.
+* **Evaluation** startet Einzelserien oder Suiten mit Seiten, Spiegelung,
+  Sampling und Phasen-Label, zeigt Protokoll-Chips, Konfidenzintervalle und
+  trennt Stärke- von Diagnoseergebnissen.
+* **Settings** misst den Durchsatz wahlweise parallel/sequenziell und mit oder
+  ohne Inferenzanteil und verwaltet das API-Token (localStorage, Header
+  `x-rlai-token`; der SSE-Strom nutzt `?token=`, weil `EventSource` keine
+  Header senden kann).
+
 Live-Matches sind außerhalb von Windows deaktiviert (Serverprüfung, kein Fake);
 Schaltflächen für Setup-Prüfung und reines Vorbereiten der Match-Dateien
 funktionieren auch dort und zeigen echte Ergebnisse.
@@ -114,17 +199,28 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q
+python -m pytest -q                    # 277 passed, ca. 34 s (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **153 passed** in ca. 8,3 s (2 vCPU, keine GPU,
-kein Spiel). Abgedeckt: Modi, Aktionen, Beobachtung v1/v2 inkl. Parität,
-Belohnungs-Events, PPO inkl. Truncation-Bootstrap und Early Stop,
-Checkpoint-Schutz und best-Zeiger, Gegnerpool/Curriculum, Resume-Restore,
-Store, API, CLI (Run-Registrierung, Live-Preflight/Dry-Run),
-Evaluation inkl. Konfidenzintervall, RLBot-Parser für alle generierten
-Match-Configs, Heatseeker-Regeln. Nicht abgedeckt: echtes Rocket League,
-RLBot-Start, GPU-Pfad, Spielstärke.
+Ergebnis in dieser Umgebung: **277 passed** in ca. 34 s. Abgedeckt: Modi,
+Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
+PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,
+Validierung und best-Zeiger, Gegnerpool (inkl. **Unveränderlichkeit** und
+ serialisierter Gewichte), Curriculum, **Resume-Pläne/Fallback/Ablehnungen**,
+**echte unterbrochene und fortgesetzte Läufe**, **Report-Inhalte und
+Before/After-Paarung**, Store, API (inkl. 409 bei parallelem Lauf,
+Resume-Vorschau, Validierung, Suite, Token, CORS), CLI (Run-Registrierung,
+`resume-plan`, `report`, Suite-Evaluation, Live-Preflight/Dry-Run),
+Evaluation inkl. Konfidenzintervall und **Seitengleichgewicht**,
+**Benchmark-Messung** (parallel/sequenziell/Inferenz), RLBot-Parser für alle
+generierten Match-Configs sowie **Bot-Laden, Spiegelung und Fehlerverhalten**.
+
+Das Web-Frontend wird headless mit jsdom gerendert (`tests/gui/smoke.mjs`,
+automatisch als `tests/test_gui_smoke.py` ausgeführt; einmalig
+`cd tests/gui && npm install`). Fehlt node oder jsdom, wird der Test
+übersprungen statt rot zu werden.
+
+Nicht abgedeckt: echtes Rocket League, RLBot-Start, GPU-Pfad, Spielstärke.
 
 ## Grenzen
 
@@ -133,7 +229,10 @@ RLBot-Start, GPU-Pfad, Spielstärke.
 * Live-Deployment ist ungetestet, weil hier kein Windows/Spiel/RLBot-Lauf
   möglich ist. Die Anleitung nennt exakte Schritte und bekannte Risiken.
 * 2 vCPU bedeutet: 3v3/Heatseeker mit 8 Workern sind auf dieser Maschine
-  langsamer als die Workerzahl suggeriert; das Dashboard zeigt die echte Rate.
+  langsamer als die Workerzahl suggeriert; das Dashboard zeigt die echte Rate
+  (Benchmark mit parallelen Prozessen, ohne Env-Aufbau, plus Inferenzanteil).
+* Alte Checkpoints (vor `CHECKPOINT_VERSION = 2`) enthalten weder RNG- noch
+  Gegnerpool-Gewichte; ein Resume daraus läuft, meldet aber laut, was fehlt.
 * `data/` ist Laufzeitverzeichnis und nicht versioniert.
 
 ## Dokumentation

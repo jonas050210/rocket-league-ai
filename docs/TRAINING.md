@@ -60,10 +60,19 @@ durchgeführt.
 * Die Auswahl nutzt PFSP-Gewichte: Begegnungen nahe 50 % werden bevorzugt,
   damit der Lernende nicht überwiegend gegen deutlich schwächere Kopien
   spielt. Ein Mindestgewicht hält jede Kopie samplerbar.
-* Ergebnisse aus Rollouts aktualisieren die Elo-Zahlen (k = 16); die
-  Pool-Bilanz wird im Checkpoint gespeichert und beim Resume
-  wiederhergestellt. Die Modellgewichte der Pool-Einträge werden bewusst
-  nicht serialisiert (sie sind groß und aus Checkpoints reproduzierbar).
+* Snapshots sind echte Kopien: `freeze_state` legt für jeden Pool-Eintrag
+  eigene Tensoren an (`detach().to("cpu", copy=True)`), weil
+  `state_dict()`-Tensoren eines CPU-Modells sonst Speicher der lebenden
+  Parameter aliasieren und der Pool still zu „immer die aktuelle Policy"
+  degeneriert. `tests/test_continuation.py` prüft, dass sich ein Snapshot
+  nach drei Adam-Schritten mit lr = 0.5 nicht verändert.
+* Ergebnisse aus Rollouts aktualisieren die Elo-Zahlen (k = 16). Bilanz
+  **und Gewichte** der Pool-Einträge werden im Checkpoint gespeichert
+  (`league_states = true`, Standard) und beim Resume wiederhergestellt, damit
+  Selbstspiel gegen dieselben Gegner weiterläuft. Ein Snapshot kostet etwa
+  eine Policy (~1 MB bei 256×256), maximal `capacity` Stück; mit
+  `league_states = false` werden nur die Bilanzen gespeichert – dann meldet
+  der Trainer laut, dass der Pool bis zum nächsten Snapshot leer bleibt.
 * `curriculum = true` aktiviert gestufte Gegner mit messbaren
   Aufstiegskriterien (`src/rlai/curriculum.py`):
 
@@ -138,10 +147,71 @@ berichtet; der deterministische Wert ist die Deployment-Metrik.
   Evaluationstabelle). Er wird nie schlechter und ersetzt **nicht** die
   stabile Promotion. Ein Checkpoint ohne Sieg wird nicht als „best“
   markiert.
-* Resume: `python -m rlai.cli train --config-file ... --run-id ... --resume-from data/models/<id>/model.pt`.
-  Das Dashboard bietet denselben Pfad über die Run-Ansicht an. Modell,
-  Optimizer, Schrittstand, Liga-Bilanz und Curriculum-Stufe werden
-  wiederhergestellt; die Policy-Architektur muss exakt passen.
+### Fortsetzung: drei explizite Modi
+
+| Modus | Bedeutung | Was wiederhergestellt wird |
+| --- | --- | --- |
+| `fresh` | Standard, wenn nichts angegeben wird | nichts – neue Policy, Schritt 0 |
+| `continue` | Lauf fortsetzen | Gewichte, Optimizer, Schrittstand, Iteration, RNG (numpy/torch/python/CUDA), Curriculum-Stufe, Gegnerpool inkl. Gewichten, geerbte Config-Felder (`gamma`, `learning_rate`, …), Elternlauf |
+| `transfer` | Fine-Tuning auf neuer Aufgabe | nur die Gewichte; Schrittzähler, Optimizer, RNG und Curriculum beginnen neu |
+
+```bash
+# Vorschau ohne Training – zeigt Kandidaten, Ablehnungen und was fehlt
+python -m rlai.cli resume-plan --config-file configs/1v1-vs-chaser.json --run-id <run-id>
+python -m rlai.cli train --config-file ... --plan-only
+
+# neuester gültiger, kompatibler Checkpoint der Lauf-Linie
+python -m rlai.cli train --config-file ... --auto-resume --run-id <kind> --max-steps 40000
+
+# explizit, oder bewusst nur Gewichte
+python -m rlai.cli train --config-file ... --resume-from <model-id> --resume-mode continue
+python -m rlai.cli train --config-file ... --resume-from <model-id> --resume-mode transfer
+```
+
+Regeln, die `src/rlai/resume.py` durchsetzt:
+
+* Kompatibilität wird **vor** dem Laden geprüft (`validate_checkpoint`):
+  Dateiformat, endliche Gewichte, exakt passende Policy-Architektur,
+  Beobachtungsversion und Modus. Jede Ablehnung nennt den Grund.
+* Automatische Fortsetzung fällt auf einen älteren Kandidaten zurück, wenn der
+  neueste defekt oder inkompatibel ist – mit Warnung und Eintrag im Report
+  (`fallback_used`). Ein **namentlich** angeforderter Checkpoint wird dagegen
+  niemals ersetzt: ist er unbrauchbar, startet der Lauf nicht
+  (`explicit_unavailable`).
+* Nichts wird stillschweigend neu begonnen. Fehlt der Optimizer- oder
+  RNG-Zustand (alte Checkpoints), läuft das Resume trotzdem, sagt aber im Log,
+  im Plan und im Report, was fehlt und was das bedeutet.
+* Die API verweigert den Start, bevor eine Run-Zeile angelegt wird
+  (`POST /api/runs` → 400), und meldet 409, wenn bereits ein Lauf aktiv ist
+  (`allow_concurrent` setzt das bewusst außer Kraft).
+* `parent_run` und `resumed_step` werden in der Datenbank gespeichert; der
+  Report zählt deshalb nur die Schritte, die dieser Prozess wirklich gemacht hat.
+
+### Report nach jedem Lauf
+
+`src/rlai/report.py` schreibt nach jedem Lauf – abgeschlossen, gestoppt oder
+fehlgeschlagen – `data/runs/<id>/report.json` und eine Zeile in der Tabelle
+`reports`. Inhalt: Schritte von/bis/gesamt/Ziel, Dauer, **zwei**
+Durchsatzzahlen (Wandzeit inkl. Worker-Start/Evaluation/Checkpointing und
+Iterationen ohne diese Anteile, jeweils mit Angabe der Basis), Gerät, Worker,
+Plattform, torch-Threads, vollständige Konfiguration, Resume-Herkunft,
+PPO-Kennzahlen (first/last/mean/min/max), Zeitanteile pro Phase,
+Belohnungskomponenten, Episoden (dieser Lauf, gesamt, letzte 100),
+Evaluation vor/nach/periodisch inkl. Protokoll und Wilson-Intervall,
+Gültigkeit des finalen Checkpoints, Kurven, Vergleichsläufe, Warnungen.
+
+Before/After wird **nur** als Änderung berichtet, wenn Gegner und Protokoll
+identisch sind (Modus, Spiele, Matchlänge, Episodenlänge, Seiten, Spiegelung,
+Sampling, Beobachtungsversion). Unterschiedliche Kickoff-Seeds sind erlaubt und
+werden als `same_seed: false` markiert, weil der Trainer pro Phase einen neuen
+Seed ableitet – die Serien sind dann unabhängige Stichproben desselben
+Protokolls. Alles Nicht-Gemessene steht als `{"available": false, "reason": …}`
+im Report; eine fehlende Evaluation wird nie als 0 % interpretiert.
+
+```bash
+python -m rlai.cli report --run-id <id> [--summary] [--rebuild]
+python -m rlai.cli report --compare <run-a>,<run-b>
+```
 
 ## Begrenzter Lernnachweis (kein Langlauf)
 

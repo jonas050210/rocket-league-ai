@@ -38,6 +38,7 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
   "slow: tests that run a full match series",
+  "gui: headless browser (jsdom) smoke tests for the web interface",
 ]
 
 [tool.ruff]

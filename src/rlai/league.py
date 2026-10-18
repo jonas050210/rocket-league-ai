@@ -21,6 +21,33 @@ import numpy as np
 DEFAULT_ELO = 1000.0
 
 
+def freeze_state(state: Any) -> Any:
+    """Return a genuinely immutable copy of a snapshot state.
+
+    A pool entry must not change when the learner keeps training.  Torch
+    tensors taken with ``detach().cpu()`` on a CPU model *alias the live
+    parameters*, so the pool would silently degrade into "always play the
+    current policy" and its Elo ratings would describe mirror matches.
+    Non-tensor states (used by tests and by restored checkpoints) are copied
+    shallowly, which is enough for plain data.
+    """
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        copied: dict[Any, Any] = {}
+        for key, value in state.items():
+            if hasattr(value, "detach") and hasattr(value, "to"):
+                copied[key] = value.detach().to("cpu", copy=True).contiguous()
+            elif isinstance(value, np.ndarray):
+                copied[key] = value.copy()
+            else:
+                copied[key] = value
+        return copied
+    if isinstance(state, np.ndarray):
+        return state.copy()
+    return state
+
+
 @dataclass
 class PoolEntry:
     id: str
@@ -67,7 +94,9 @@ class OpponentPool:
 
     # -- maintenance -------------------------------------------------------
     def add(self, entry_id: str, step: int, state: dict[str, Any]) -> PoolEntry:
-        entry = PoolEntry(id=str(entry_id), step=int(step), elo=self.agent_elo, state=state)
+        entry = PoolEntry(
+            id=str(entry_id), step=int(step), elo=self.agent_elo, state=freeze_state(state)
+        )
         self.entries.append(entry)
         # newest entries are the most relevant; drop the oldest first
         while len(self.entries) > self.capacity:
@@ -81,9 +110,11 @@ class OpponentPool:
     def usable(self) -> int:
         """Entries that can actually be played.
 
-        Ratings survive a resume, but model weights are not serialised in the
-        pool.  Restored entries therefore count for the Elo history only
-        until a new snapshot is added.
+        Ratings always survive a resume.  Weights survive too when the
+        checkpoint was written with ``include_states=True`` (the default for
+        ``league_states`` in the training config); older checkpoints carry
+        ratings only, and those entries count for the Elo history until a new
+        snapshot is added.
         """
         return sum(1 for entry in self.entries if entry.state is not None)
 
@@ -132,24 +163,38 @@ class OpponentPool:
         }
 
     # -- serialisation -----------------------------------------------------
-    def to_dict(self) -> dict:
-        # State dicts are intentionally not serialised: they are large and
-        # reproducible from checkpoints.
+    def to_dict(self, *, include_states: bool = False, max_states: int | None = None) -> dict:
+        """Serialise the pool.
+
+        Ratings are always stored.  ``include_states=True`` additionally stores
+        the frozen weights of the newest ``max_states`` snapshots (all of them by
+        default) so a resumed self-play run faces its *actual* former selves
+        instead of Elo ratings that point at nothing.  One snapshot costs about
+        one policy (roughly 1 MB for a 256x256 network), which is why the
+        behaviour is configurable.
+        """
+        limit = len(self.entries) if max_states is None else max(0, int(max_states))
+        first_kept = len(self.entries) - limit if include_states else len(self.entries)
+        entries = []
+        for index, entry in enumerate(self.entries):
+            record = {
+                "id": entry.id,
+                "step": entry.step,
+                "elo": entry.elo,
+                "games": entry.games,
+                "wins": entry.wins,
+                "losses": entry.losses,
+                "draws": entry.draws,
+                "has_state": bool(index >= first_kept and entry.state is not None),
+            }
+            if record["has_state"]:
+                record["state"] = freeze_state(entry.state)
+            entries.append(record)
         return {
             "capacity": self.capacity,
             "agent_elo": self.agent_elo,
-            "entries": [
-                {
-                    "id": entry.id,
-                    "step": entry.step,
-                    "elo": entry.elo,
-                    "games": entry.games,
-                    "wins": entry.wins,
-                    "losses": entry.losses,
-                    "draws": entry.draws,
-                }
-                for entry in self.entries
-            ],
+            "states_included": any(record["has_state"] for record in entries),
+            "entries": entries,
         }
 
     @classmethod
@@ -157,6 +202,7 @@ class OpponentPool:
         pool = cls(capacity=int(data.get("capacity", 8)))
         pool.agent_elo = float(data.get("agent_elo", DEFAULT_ELO))
         for item in data.get("entries", []):
+            state = item.get("state")
             entry = PoolEntry(
                 id=str(item["id"]),
                 step=int(item.get("step", 0)),
@@ -165,6 +211,7 @@ class OpponentPool:
                 wins=int(item.get("wins", 0)),
                 losses=int(item.get("losses", 0)),
                 draws=int(item.get("draws", 0)),
+                state=freeze_state(state) if state is not None else None,
             )
             pool.entries.append(entry)
         return pool

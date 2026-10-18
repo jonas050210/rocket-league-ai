@@ -1,24 +1,35 @@
-"""Atomic checkpoint storage and model registry.
+"""Atomic checkpoint storage, validation and model registry.
 
 Rules enforced here (safety requirements):
 * checkpoints are written to a temporary file and atomically renamed;
 * an existing checkpoint is never overwritten — a new id is generated;
 * the stable model is never deleted or replaced automatically;
-* promotion is an explicit operation.
+* promotion is an explicit operation;
+* loading uses ``weights_only`` by default, so a hostile file cannot execute
+  code inside the training process;
+* model references coming from the network are confined to the models
+  directory.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
 
+from .policy import clone_state_dict
+
 CHECKPOINT_FORMAT = "rlai-checkpoint-v1"
+#: Bumped when new optional fields are added.  Older readers accept newer
+#: files only if the format string matches; newer readers accept version 1.
+CHECKPOINT_VERSION = 2
 MANIFEST = "manifest.json"
 MODEL_FILE = "model.pt"
 STABLE_POINTER = "stable.json"
@@ -73,8 +84,12 @@ def save_checkpoint(
 
     payload = {
         "format": CHECKPOINT_FORMAT,
+        "version": CHECKPOINT_VERSION,
         "step": int(step),
-        "model": {k: v.detach().cpu() for k, v in model_state.items()},
+        # A real copy: ``detach().cpu()`` aliases the live parameters when the
+        # model is already on the CPU, and the file must never depend on what
+        # the learner does between building the payload and writing it.
+        "model": clone_state_dict(model_state),
         "optimizer": optimizer_state,
         "policy_config": policy_config,
         "training_config": training_config,
@@ -98,18 +113,219 @@ def save_checkpoint(
         "policy_config": policy_config,
         "size_bytes": (directory / MODEL_FILE).stat().st_size,
         "label": label,
+        # cheap metadata for the GUI and for resume planning; older manifests
+        # simply do not have these keys.
+        "checkpoint_version": CHECKPOINT_VERSION,
+        "has_optimizer": bool(optimizer_state),
+        "obs_version": (extra or {}).get("obs_version"),
+        "has_rng": isinstance((extra or {}).get("rng"), dict),
+        "parent_run": (extra or {}).get("parent_run"),
     }
     (directory / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 
 
-def load_checkpoint(path: str | Path) -> dict:
-    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+def load_checkpoint(
+    path: str | Path,
+    *,
+    weights_only: bool = True,
+    map_location: str = "cpu",
+) -> dict:
+    """Load a checkpoint payload.
+
+    ``weights_only=True`` is the default and refuses files that would execute
+    arbitrary code through ``pickle``.  Every checkpoint written by this
+    project only contains tensors, numbers, strings, lists and dicts, so the
+    safe loader accepts them.  ``weights_only=False`` remains available for
+    hand-built legacy files, but callers must opt in explicitly.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"checkpoint not found: {path}")
+    try:
+        payload = torch.load(path, map_location=map_location, weights_only=weights_only)
+    except Exception as exc:
+        if weights_only:
+            raise ValueError(
+                f"{path} could not be loaded safely ({type(exc).__name__}: {exc}). "
+                "If this is a trusted legacy checkpoint, load it with weights_only=False."
+            ) from exc
+        raise
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} does not contain a checkpoint dictionary")
     if payload.get("format") != CHECKPOINT_FORMAT:
         raise ValueError(
             f"{path} is not a {CHECKPOINT_FORMAT} checkpoint (got {payload.get('format')!r})"
         )
+    version = int(payload.get("version", 1))
+    if version > CHECKPOINT_VERSION:
+        raise ValueError(
+            f"{path} was written by a newer version of rlai "
+            f"(checkpoint version {version}, supported up to {CHECKPOINT_VERSION})"
+        )
     return payload
+
+
+@dataclass
+class CheckpointValidation:
+    """Result of validating one checkpoint for a specific purpose."""
+
+    path: str
+    ok: bool
+    reasons: list[str] = field(default_factory=list)
+    step: int | None = None
+    run_id: str | None = None
+    mode: str | None = None
+    label: str = ""
+    created_at: str | None = None
+    obs_version: int | None = None
+    policy_config: dict | None = None
+    training_config: dict | None = None
+    extra: dict | None = None
+    has_model: bool = False
+    has_optimizer: bool = False
+    has_rng: bool = False
+    has_curriculum: bool = False
+    has_league: bool = False
+    size_bytes: int = 0
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "ok": self.ok,
+            "reasons": list(self.reasons),
+            "step": self.step,
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "label": self.label,
+            "created_at": self.created_at,
+            "obs_version": self.obs_version,
+            "policy_config": self.policy_config,
+            "training_config": self.training_config,
+            "extra": self.extra,
+            "has_model": self.has_model,
+            "has_optimizer": self.has_optimizer,
+            "has_rng": self.has_rng,
+            "has_curriculum": self.has_curriculum,
+            "has_league": self.has_league,
+            "size_bytes": self.size_bytes,
+            "error": self.error,
+        }
+
+
+def validate_checkpoint(
+    path: str | Path,
+    *,
+    policy_config: dict | None = None,
+    mode: str | None = None,
+    obs_version: int | None = None,
+    require_optimizer: bool = False,
+    load: bool = True,
+) -> CheckpointValidation:
+    """Check integrity and compatibility *before* anything is restored.
+
+    Verifies, in order: the file exists and is a supported checkpoint, the
+    weights are finite and match the expected architecture, the optimiser
+    state is present when a continuation needs it, and the mode / observation
+    layout agree with the run that wants to resume.  Every failure is
+    collected in ``reasons`` so the GUI can explain a rejected checkpoint.
+    """
+    from .policy import PolicyConfig
+
+    path = Path(path)
+    result = CheckpointValidation(path=str(path), ok=False)
+    if not path.exists():
+        result.error = "file does not exist"
+        result.reasons.append("file does not exist")
+        return result
+    try:
+        result.size_bytes = path.stat().st_size
+    except OSError as exc:
+        result.error = f"cannot stat file: {exc}"
+        result.reasons.append(result.error)
+        return result
+
+    directory = path.parent
+    if (directory / MANIFEST).exists():
+        try:
+            manifest = read_manifest(directory)
+            result.step = manifest.get("step")
+            result.run_id = manifest.get("run_id")
+            result.mode = manifest.get("mode")
+            result.label = manifest.get("label", "") or ""
+            result.created_at = manifest.get("created_at")
+        except (json.JSONDecodeError, OSError) as exc:
+            result.reasons.append(f"manifest unreadable: {exc}")
+
+    if not load:
+        result.ok = not result.reasons
+        return result
+
+    try:
+        payload = load_checkpoint(path)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        result.error = f"{type(exc).__name__}: {exc}"
+        result.reasons.append(result.error)
+        return result
+
+    model_state = payload.get("model")
+    if not isinstance(model_state, dict) or not model_state:
+        result.reasons.append("checkpoint contains no model weights")
+        return result
+    result.has_model = True
+    result.step = int(payload.get("step", result.step or 0))
+    result.run_id = payload.get("run_id") or result.run_id
+    result.mode = payload.get("mode") or result.mode
+    extra = payload.get("extra") or {}
+    result.obs_version = extra.get("obs_version")
+    result.policy_config = payload.get("policy_config")
+    stored_config = payload.get("training_config")
+    result.training_config = stored_config if isinstance(stored_config, dict) else None
+    result.extra = extra if isinstance(extra, dict) else {}
+    result.has_optimizer = bool(payload.get("optimizer"))
+    result.has_rng = isinstance(extra.get("rng"), dict)
+    result.has_curriculum = isinstance(extra.get("curriculum"), dict)
+    result.has_league = isinstance(extra.get("league"), dict)
+
+    for name, tensor in model_state.items():
+        if not isinstance(tensor, torch.Tensor):
+            result.reasons.append(f"weight {name!r} is not a tensor")
+            break
+        if tensor.is_floating_point() and not bool(torch.isfinite(tensor).all()):
+            result.reasons.append(f"weight {name!r} contains NaN or Inf")
+            break
+
+    saved_config = PolicyConfig.from_dict(result.policy_config)
+    if policy_config is not None:
+        expected = PolicyConfig.from_dict(policy_config)
+        if saved_config.to_dict() != expected.to_dict():
+            result.reasons.append(
+                "architecture mismatch: "
+                f"{saved_config.to_dict()} vs requested {expected.to_dict()}"
+            )
+    if obs_version is not None:
+        from .obs import obs_size
+
+        if saved_config.obs_size != obs_size(int(obs_version)):
+            result.reasons.append(
+                f"observation layout mismatch: checkpoint obs_size={saved_config.obs_size}, "
+                f"requested obs_version={int(obs_version)} (size {obs_size(int(obs_version))})"
+            )
+    if mode is not None and result.mode not in (None, mode):
+        result.reasons.append(f"mode mismatch: checkpoint {result.mode!r} vs requested {mode!r}")
+    if require_optimizer and not result.has_optimizer:
+        result.reasons.append("no optimizer state: cannot continue training exactly")
+
+    if not result.reasons:
+        try:
+            model = saved_config.build()
+            model.load_state_dict(model_state)
+        except Exception as exc:
+            result.reasons.append(f"weights do not fit the declared architecture: {exc}")
+
+    result.ok = not result.reasons
+    return result
 
 
 def read_manifest(model_dir: str | Path) -> dict:
@@ -145,6 +361,26 @@ def _pointer_id(models_dir: str | Path, name: str) -> str | None:
     return str(value) if value else None
 
 
+def protocol_key(protocol: dict | None) -> str:
+    """Stable identity of an evaluation protocol.
+
+    Two evaluations are only comparable when every knob that can change the
+    result is identical: opponents, number of games, sides, match length,
+    seeds, mode, observation layout and whether actions were sampled.
+    """
+    if not protocol:
+        return "default"
+    canonical = json.dumps(protocol, sort_keys=True, default=str)
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def _best_pointer_path(models_dir: str | Path, key: str) -> Path:
+    models_dir = Path(models_dir)
+    if key in ("", "default"):
+        return models_dir / BEST_POINTER
+    return models_dir / f"best-{key}.json"
+
+
 def best_model(models_dir: str | Path) -> dict | None:
     """The checkpoint with the best measured evaluation score.
 
@@ -160,9 +396,24 @@ def best_model(models_dir: str | Path) -> dict | None:
         return None
 
 
-def best_record(models_dir: str | Path) -> dict:
-    """Raw best-pointer record (may be empty)."""
-    pointer = Path(models_dir) / BEST_POINTER
+def best_record(models_dir: str | Path, protocol: dict | None = None) -> dict:
+    """Raw best-pointer record (may be empty).
+
+    Without ``protocol`` this is the primary pointer (``best.json``); with a
+    protocol it is the best measurement taken under exactly that protocol.
+    """
+    key = protocol_key(protocol)
+    pointer = _best_pointer_path(models_dir, key)
+    if key != "default" and not pointer.exists():
+        primary = Path(models_dir) / BEST_POINTER
+        if primary.exists():
+            try:
+                data = json.loads(primary.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = {}
+            if isinstance(data, dict) and data.get("protocol_key") == key:
+                return data
+        return {}
     if not pointer.exists():
         return {}
     try:
@@ -172,17 +423,44 @@ def best_record(models_dir: str | Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def best_records(models_dir: str | Path) -> list[dict]:
+    """Every best pointer, one per evaluation protocol."""
+    models_dir = Path(models_dir)
+    if not models_dir.exists():
+        return []
+    records: list[dict] = []
+    for pointer in sorted(models_dir.glob("best*.json")):
+        try:
+            data = json.loads(pointer.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and data.get("id"):
+            data = dict(data)
+            data["pointer"] = pointer.name
+            records.append(data)
+    return records
+
+
 def set_best(
     models_dir: str | Path,
     model_id: str,
     score: float,
     *,
     metric: str = "win_rate",
+    protocol: dict | None = None,
 ) -> dict:
-    """Record a better evaluation score.  Never lowers an existing best."""
+    """Record a better evaluation score.  Never lowers an existing best.
+
+    Scores are only compared inside one evaluation protocol.  A result
+    measured with a different protocol is written to its own pointer file so
+    that "best model" always means "best under a fixed, reproducible
+    measurement" instead of "best under whichever settings happened to be
+    easy that day".
+    """
     models_dir = Path(models_dir)
     get_model(models_dir, model_id)  # validate
-    pointer = models_dir / BEST_POINTER
+    key = protocol_key(protocol)
+    pointer = _best_pointer_path(models_dir, key)
     previous = {}
     if pointer.exists():
         try:
@@ -197,12 +475,22 @@ def set_best(
         "id": model_id,
         "score": float(score),
         "metric": metric,
+        "protocol": protocol or {},
+        "protocol_key": key,
         "updated_at": _utc_now(),
         "previous": previous.get("id"),
     }
-    tmp = models_dir / (BEST_POINTER + ".tmp")
+    tmp = models_dir / (pointer.name + ".tmp")
     tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
     os.replace(tmp, pointer)
+    if key != "default":
+        # Keep the primary pointer in sync only when it is empty or already
+        # describes the same protocol; never mix incomparable measurements.
+        primary = best_record(models_dir)
+        if not primary or primary.get("protocol_key") == key:
+            primary_tmp = models_dir / (BEST_POINTER + ".tmp")
+            primary_tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+            os.replace(primary_tmp, models_dir / BEST_POINTER)
     return record
 
 
@@ -211,7 +499,7 @@ def list_models(models_dir: str | Path) -> list[dict]:
     if not models_dir.exists():
         return []
     stable = _stable_id(models_dir)
-    best = _pointer_id(models_dir, BEST_POINTER)
+    best_ids = {str(record["id"]) for record in best_records(models_dir)}
     models: list[dict] = []
     for directory in models_dir.iterdir():
         if not directory.is_dir():
@@ -224,7 +512,7 @@ def list_models(models_dir: str | Path) -> list[dict]:
         except (json.JSONDecodeError, OSError):
             continue
         manifest["stable"] = manifest.get("id") == stable
-        manifest["best"] = manifest.get("id") == best
+        manifest["best"] = str(manifest.get("id")) in best_ids
         models.append(manifest)
     models.sort(key=lambda m: (m.get("created_at", ""), m.get("step", 0)), reverse=True)
     return models
@@ -236,7 +524,7 @@ def get_model(models_dir: str | Path, model_id: str) -> dict:
         raise KeyError(f"unknown model {model_id!r}")
     manifest = read_manifest(directory)
     manifest["stable"] = _stable_id(models_dir) == model_id
-    manifest["best"] = _pointer_id(models_dir, BEST_POINTER) == model_id
+    manifest["best"] = any(str(record.get("id")) == model_id for record in best_records(models_dir))
     manifest["absolute_path"] = str(directory / MODEL_FILE)
     return manifest
 
@@ -300,11 +588,12 @@ def delete_model(models_dir: str | Path, model_id: str) -> None:
     # A best pointer must never dangle.  Pruning already skips the best
     # checkpoint; an explicit delete removes the pointer together with it.
     if manifest.get("best"):
-        pointer = models_dir / BEST_POINTER
-        try:
-            pointer.unlink()
-        except OSError:
-            pass
+        for pointer in list(models_dir.glob("best*.json")):
+            try:
+                if json.loads(pointer.read_text(encoding="utf-8")).get("id") == model_id:
+                    pointer.unlink()
+            except (json.JSONDecodeError, OSError):
+                continue
     shutil.rmtree(checkpoint_dir(models_dir, model_id))
 
 
@@ -337,14 +626,111 @@ def prune_candidates(models_dir: str | Path, keep: int = 8, run_id: str | None =
     return deleted
 
 
-def resolve_model_path(models_dir: str | Path, reference: str) -> Path:
-    path = Path(reference)
-    if path.exists():
-        return path
-    candidate = checkpoint_dir(models_dir, reference) / MODEL_FILE
-    if candidate.exists():
-        return candidate
+def load_policy(
+    path: str | Path,
+    device: str = "cpu",
+    *,
+    weights_only: bool = True,
+    map_location: str | None = None,
+):
+    """Load a checkpoint into a ready-to-use :class:`~rlai.policy.TorchPolicy`.
+
+    Single implementation shared by evaluation, model opponents and the RLBot
+    bot, so all three reject the same files and behave identically.  The safe
+    loader is the default; ``weights_only=False`` is an explicit opt-in for a
+    trusted legacy file.
+    """
+    from .policy import PolicyConfig, TorchPolicy
+
+    payload = load_checkpoint(
+        path, weights_only=weights_only, map_location=map_location or device
+    )
+    config = PolicyConfig.from_dict(payload.get("policy_config"))
+    policy = TorchPolicy.from_config(config, device=device)
+    policy.model.load_state_dict(payload["model"])
+    policy.model.eval()
+    return policy
+
+
+def resolve_model_path(
+    models_dir: str | Path,
+    reference: str,
+    *,
+    allow_outside: bool = False,
+) -> Path:
+    """Resolve a model id or path to a checkpoint file.
+
+    By default the result must live inside ``models_dir``: references that
+    arrive over HTTP must never be able to point the loader at an arbitrary
+    file on the machine.  Local callers (the CLI, where the user already has
+    filesystem access) can opt out with ``allow_outside=True``.
+    """
+    models_dir = Path(models_dir).resolve()
+    text = str(reference).strip()
+    if not text:
+        raise FileNotFoundError("empty model reference")
+
+    path = Path(text)
+    candidates: list[Path] = []
+    if path.is_absolute() or path.exists():
+        candidates.append(path)
+    candidates.append(checkpoint_dir(models_dir, text) / MODEL_FILE)
+    if not path.is_absolute():
+        candidates.append(models_dir / path)
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if not resolved.exists():
+            continue
+        inside = resolved == models_dir or models_dir in resolved.parents
+        if not inside and not allow_outside:
+            raise ValueError(
+                f"model reference {reference!r} resolves outside the models directory "
+                f"({resolved}); pass allow_outside=True only for local, trusted paths"
+            )
+        return resolved
     raise FileNotFoundError(f"model {reference!r} not found")
+
+
+def list_checkpoint_candidates(
+    models_dir: str | Path,
+    *,
+    mode: str | None = None,
+    run_id: str | None = None,
+    require_optimizer: bool | None = None,
+) -> list[dict]:
+    """All checkpoints, newest first, with the metadata a resume needs.
+
+    ``require_optimizer`` filters for checkpoints that can continue an
+    interrupted run exactly (weights *and* optimiser state).  Sorting is by
+    creation time and then by step, so a run that was resumed from an older
+    checkpoint still yields its newest file first.
+    """
+    candidates: list[dict] = []
+    for manifest in list_models(models_dir):
+        if mode is not None and manifest.get("mode") not in (None, mode):
+            continue
+        if run_id is not None and manifest.get("run_id") != run_id:
+            continue
+        if require_optimizer is True and manifest.get("has_optimizer") is False:
+            # Only manifests written by this version carry the flag; unknown
+            # entries stay in the list and are validated when they are used.
+            continue
+        directory = checkpoint_dir(models_dir, manifest["id"])
+        model_file = directory / MODEL_FILE
+        manifest = dict(manifest)
+        manifest["absolute_path"] = str(model_file)
+        manifest["exists"] = model_file.exists()
+        manifest["size_bytes"] = model_file.stat().st_size if model_file.exists() else 0
+        candidates.append(manifest)
+    candidates.sort(
+        key=lambda item: (item.get("created_at") or "", int(item.get("step") or 0)),
+        reverse=True,
+    )
+    return candidates
 
 
 def export_weights(models_dir: str | Path, model_id: str, output: str | Path) -> Path:

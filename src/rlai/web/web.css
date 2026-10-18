@@ -258,3 +258,135 @@ table.compact td small {
   width: 13px;
   height: 13px;
 }
+
+/* ------------------------------------------------- continuation (training) */
+.resume-block {
+  margin: 0 20px 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 10px);
+  background: color-mix(in srgb, var(--panel) 82%, var(--accent) 4%);
+}
+
+.resume-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.resume-head h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.resume-head p {
+  margin: 2px 0 0;
+  color: var(--faint);
+  font-size: var(--fs-2xs);
+}
+
+.resume-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.resume-actions .approval-check {
+  margin: 0;
+  padding: 0;
+  flex: 1 1 260px;
+}
+
+#resume-plan:empty {
+  display: none;
+}
+
+#resume-plan .callout {
+  margin: 12px 0 0;
+}
+
+#resume-plan .table-wrap {
+  margin-top: 10px;
+}
+
+/* ------------------------------------------------------------- shared bits */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.reason-list {
+  margin-top: 8px;
+}
+
+.reason-list strong {
+  color: var(--text);
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.reason-list ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--faint);
+  font-size: var(--fs-2xs);
+}
+
+.reason-list li + li {
+  margin-top: 2px;
+}
+
+.muted {
+  color: var(--faint);
+}
+
+/* --------------------------------------------------------------- reports */
+.report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  padding: 0 20px 18px;
+}
+
+.report-block {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 10px);
+  background: var(--panel);
+}
+
+.report-block > strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.report-block .metadata-list {
+  padding: 0;
+}
+
+.report-note {
+  padding: 0 20px 18px;
+  color: var(--faint);
+  font-size: var(--fs-2xs);
+}
+
+.compare-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 0 20px 18px;
+}

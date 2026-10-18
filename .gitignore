@@ -20,6 +20,10 @@ dist/
 .ruff_cache/
 .mypy_cache/
 
+# node (headless GUI smoke test in tests/gui)
+node_modules/
+package-lock.json
+
 # os / editors
 .DS_Store
 Thumbs.db

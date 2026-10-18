@@ -15,12 +15,28 @@ import torch
 from torch import nn
 
 from .actions import ACTION_COUNT
-from .obs import OBS_SIZE
+from .obs import OBS_SIZE, mirror_observation, version_for_obs_size
 
 
 def ortho_init(layer: nn.Linear, gain: float) -> None:
     nn.init.orthogonal_(layer.weight, gain)
     nn.init.zeros_(layer.bias)
+
+
+def clone_state_dict(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Detached, CPU-resident **copy** of a state dict.
+
+    ``tensor.detach().cpu()`` returns the *same* tensor when the model already
+    lives on the CPU, so a "frozen" snapshot taken that way silently follows
+    every later ``optimizer.step()``.  Self-play opponents and checkpoint
+    payloads must be real copies; this helper is the single place that
+    guarantees it.
+    """
+    return {
+        str(key): value.detach().to("cpu", copy=True).contiguous()
+        for key, value in state.items()
+        if isinstance(value, torch.Tensor)
+    }
 
 
 class MLP(nn.Module):
@@ -161,4 +177,39 @@ class TorchPolicy:
         )
 
     def state_dict(self) -> dict:
-        return {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
+        return clone_state_dict(self.model.state_dict())
+
+
+class MirroredPolicy:
+    """Same checkpoint, opposite side of the field.
+
+    Rocket League is symmetric under a 180 deg rotation about the vertical
+    axis.  ``mirror_observation`` rewrites an observation from the other side
+    into the side the checkpoint was trained on, so a blue-trained policy can
+    play orange without retraining.  Actions are car-relative and therefore
+    pass through unchanged (see ``rlai.obs.mirror_observation``).
+    """
+
+    def __init__(self, inner: "TorchPolicy", obs_version: int | None = None):
+        self.inner = inner
+        self.model = inner.model  # obs_size / device introspection keeps working
+        self.device = inner.device
+        self.obs_version = (
+            int(obs_version)
+            if obs_version is not None
+            else version_for_obs_size(int(inner.model.obs_size))
+        )
+
+    def _mirror(self, obs):
+        if isinstance(obs, np.ndarray):
+            return mirror_observation(obs, self.obs_version)
+        return {key: mirror_observation(value, self.obs_version) for key, value in obs.items()}
+
+    @torch.no_grad()
+    def act(self, obs, *, deterministic: bool = False, generator: torch.Generator | None = None):
+        return self.inner.act(
+            self._mirror(obs), deterministic=deterministic, generator=generator
+        )
+
+    def state_dict(self) -> dict:
+        return self.inner.state_dict()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 from rlai.league import DEFAULT_ELO, OpponentPool, expected_score
 
@@ -16,7 +17,7 @@ def test_pool_is_bounded_and_drops_oldest():
     assert [entry.id for entry in pool.entries] == ["snap-2", "snap-3", "snap-4"]
 
 
-def test_transient_states_are_not_serialised():
+def test_states_are_not_serialised_by_default():
     pool = OpponentPool(capacity=2)
     pool.add("a", 1, {"weight": np.zeros(3, dtype=np.float32)})
     data = pool.to_dict()
@@ -93,3 +94,53 @@ def test_snapshot_reports_games_and_win_rate():
     assert summary["win_rate"] == pytest.approx(0.75)
     assert summary["step"] == 42
     assert DEFAULT_ELO == 1000.0
+
+
+def test_pool_states_round_trip_and_stay_frozen():
+    """Self-play continuation needs the real opponents, not only their ratings."""
+    pool = OpponentPool(capacity=3)
+    states = [
+        {"actor.0.weight": torch.full((2, 2), float(index + 1))} for index in range(3)
+    ]
+    for index, state in enumerate(states):
+        pool.add(f"snapshot-{index}", step=100 * (index + 1), state=state)
+    pool.record("snapshot-2", wins=2, losses=1, draws=0)
+
+    # default serialisation keeps ratings only (old behaviour, small checkpoints)
+    ratings_only = OpponentPool.from_dict(pool.to_dict())
+    assert len(ratings_only) == 3 and ratings_only.usable == 0
+    assert ratings_only.agent_elo == pytest.approx(pool.agent_elo)
+    assert ratings_only.to_dict()["states_included"] is False
+
+    # with states the restored pool is immediately playable
+    restored = OpponentPool.from_dict(pool.to_dict(include_states=True))
+    assert restored.usable == 3
+    assert [entry.id for entry in restored.entries] == [entry.id for entry in pool.entries]
+    assert [entry.elo for entry in restored.entries] == [entry.elo for entry in pool.entries]
+    for original, copy in zip(pool.entries, restored.entries):
+        assert torch.equal(original.state["actor.0.weight"], copy.state["actor.0.weight"])
+    # the restored weights are copies, so training cannot mutate the pool
+    assert (
+        restored.entries[0].state["actor.0.weight"].data_ptr()
+        != pool.entries[0].state["actor.0.weight"].data_ptr()
+    )
+    with torch.no_grad():
+        pool.entries[0].state["actor.0.weight"].add_(10.0)
+    assert torch.equal(
+        restored.entries[0].state["actor.0.weight"], torch.full((2, 2), 1.0)
+    )
+    entry = restored.sample(np.random.default_rng(0))
+    assert entry.state is not None
+
+
+def test_pool_states_can_be_capped():
+    pool = OpponentPool(capacity=4)
+    for index in range(4):
+        pool.add(f"snapshot-{index}", step=index, state={"w": torch.zeros(2)})
+    data = pool.to_dict(include_states=True, max_states=2)
+    assert data["states_included"] is True
+    kept = [entry["has_state"] for entry in data["entries"]]
+    assert kept == [False, False, True, True]  # newest snapshots win
+    restored = OpponentPool.from_dict(data)
+    assert restored.usable == 2 and len(restored) == 4
+    assert pool.to_dict(include_states=True, max_states=0)["states_included"] is False

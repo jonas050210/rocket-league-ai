@@ -93,6 +93,61 @@ def version_for_obs_size(size: int) -> int:
     raise ValueError(f"no observation layout matches obs_size={size}")
 
 
+#: RLGym's side-swap convention: rotate the whole scene 180 deg about z.
+#: ``PhysicsObject.INV_VEC`` flips x and y, ``GameState.inverted_boost_pad_timers``
+#: reverses the pad list, and the rotation matrix is left-multiplied by
+#: ``diag(-1, -1, 1)``.  Using the same convention here means the observation
+#: mirror agrees with the simulator's own notion of "the other side".
+SIDE_SWAP_AXES = (0, 1)
+PAD_MIRROR: tuple[int, ...] = tuple(range(PAD_FEATURES - 1, -1, -1))
+
+
+def pad_mirror_permutation() -> tuple[int, ...]:
+    """Pad index a car on the opposite side sees at each slot.
+
+    ``BOOST_LOCATIONS`` is ordered so that reversing the list is exactly the
+    180 deg rotation about z; the simulator's own pad order matches that list
+    index-for-index (verified against ``RocketSim.Arena.get_boost_pads()``).
+    """
+    return PAD_MIRROR
+
+
+def mirror_observation(obs: np.ndarray, obs_version: int = OBS_VERSION) -> np.ndarray:
+    """Rewrite an observation as seen from the opposite side of the field.
+
+    The field is symmetric under a 180 deg rotation about the vertical axis.
+    Applied to the whole scene (car, ball, pads, both teams) that rotation
+    leaves almost the observation untouched, because the observation is
+    expressed in the car's own frame and the car rotates with the world:
+
+    * relative ball / teammate / opponent features: **invariant**;
+    * the absolute field block (v2): ``pos_x``, ``pos_y``, ``forward_x``,
+      ``forward_y``, ``ball_x`` and ``ball_y`` all flip sign, while goal
+      alignment and goal distance stay the same;
+    * boost pads: the block is reversed (RLGym's ``inverted_boost_pad_timers``);
+    * the recorded last action: **invariant** - throttle, steer, yaw, pitch,
+      roll, jump, boost and handbrake are all car-relative.
+
+    This is what makes side-balanced evaluation and orange-side deployment
+    possible for a checkpoint that only ever trained on blue.
+    """
+    version = int(obs_version)
+    expected = obs_size(version)
+    values = np.asarray(obs, dtype=np.float32).reshape(-1)
+    if values.shape[0] != expected:
+        raise ValueError(
+            f"observation has {values.shape[0]} values, expected {expected} for version {version}"
+        )
+    mirrored = values.copy()
+    mirrored[PADS_START : PADS_START + PAD_FEATURES] = values[
+        PADS_START + PAD_FEATURES - 1 : PADS_START - 1 : -1
+    ]
+    if version >= 2:
+        for offset in range(6):  # pos x/y, forward x/y, ball x/y
+            mirrored[FIELD_START + offset] = -values[FIELD_START + offset]
+    return mirrored
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     # Scalar clamping is ~10x cheaper than calling np.clip on a 3-vector.
     return low if value < low else (high if value > high else value)

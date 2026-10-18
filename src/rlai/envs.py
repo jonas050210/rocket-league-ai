@@ -13,7 +13,7 @@ wall bounce redirection and goal scoring).  We only need to:
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -128,6 +128,8 @@ class StepInfo:
     goal_scored: bool
     scoring_team: int | None
     touches: dict[str, int]
+    #: reward components accumulated for the current episode (see rewards.py)
+    reward_components: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -158,10 +160,14 @@ class MatchEnv:
         episode_seconds: float | None = None,
         rlbot_delay: bool = True,
         obs_version: int = OBS_VERSION,
+        policy_team: int = BLUE_TEAM,
     ):
         self.spec = spec
         self.obs_version = int(obs_version)
         self.opponent = opponent
+        #: Team the *learning* policy controls.  Evaluation uses this to play
+        #: a side-balanced series; training normally stays on blue.
+        self.policy_team = int(policy_team)
         self.seed = int(seed)
         self.tick_skip = tick_skip
         self.episode_seconds = (
@@ -199,6 +205,31 @@ class MatchEnv:
     def orange_agents(self) -> list[str]:
         return [a for a in self.env.agents if self.env.state.cars[a].team_num == ORANGE_TEAM]
 
+    @property
+    def policy_agents(self) -> list[str]:
+        """Cars controlled by the learning policy (``policy_team``)."""
+        return self.blue_agents if self.policy_team == BLUE_TEAM else self.orange_agents
+
+    @property
+    def opponent_agents(self) -> list[str]:
+        """Cars controlled by the opponent policy."""
+        return self.orange_agents if self.policy_team == BLUE_TEAM else self.blue_agents
+
+    @property
+    def score_for(self) -> int:
+        """Goals scored by the policy team in the current episode."""
+        return self.score_blue if self.policy_team == BLUE_TEAM else self.score_orange
+
+    @property
+    def score_against(self) -> int:
+        """Goals conceded by the policy team in the current episode."""
+        return self.score_orange if self.policy_team == BLUE_TEAM else self.score_blue
+
+    @property
+    def reward_stats(self) -> dict[str, float]:
+        """Per-episode reward components accumulated by the reward function."""
+        return dict(self.env.shared_info.get("reward_stats", {}) or {})
+
     # -- lifecycle ---------------------------------------------------------
     def reset(self, *, episode_seed: int | None = None) -> dict[str, np.ndarray]:
         self.episode_index += 1
@@ -230,7 +261,9 @@ class MatchEnv:
         elapsed = (self.env.state.tick_count - self.start_tick) / 120.0
         remaining = max(self.episode_seconds - elapsed, 0.0)
         self.env.shared_info["time_remaining"] = remaining
-        self.env.shared_info["score_diff"] = self.score_blue - self.score_orange
+        # always from the learning policy's point of view, whatever side it is
+        # playing on: a positive value means "we are ahead".
+        self.env.shared_info["score_diff"] = self.score_for - self.score_against
 
     def step(self, actions: dict[str, int]) -> StepResult:
         if not self._observations:
@@ -238,7 +271,7 @@ class MatchEnv:
         all_actions: dict[str, np.ndarray] = {
             agent: np.asarray([int(action)], dtype=np.int64) for agent, action in actions.items()
         }
-        opponent_actions = self.opponent.act(self, self._observations, self.orange_agents)
+        opponent_actions = self.opponent.act(self, self._observations, self.opponent_agents)
         all_actions.update(
             {
                 agent: np.asarray([int(action)], dtype=np.int64)
@@ -264,8 +297,8 @@ class MatchEnv:
                 self.score_orange += 1
                 self.episode_goals_against += 1
 
-        done = any(bool(terminated.get(a, False)) for a in self.blue_agents)
-        trunc = any(bool(truncated.get(a, False)) for a in self.blue_agents)
+        done = any(bool(terminated.get(a, False)) for a in self.policy_agents)
+        trunc = any(bool(truncated.get(a, False)) for a in self.policy_agents)
         self._sync_clock()
 
         info = StepInfo(
@@ -276,10 +309,11 @@ class MatchEnv:
             goal_scored=goal,
             scoring_team=scoring_team,
             touches=self._touch_cache(state),
+            reward_components=self.reward_stats,
         )
         return StepResult(
             obs=obs,
-            rewards={a: float(rewards.get(a, 0.0)) for a in self.blue_agents},
+            rewards={a: float(rewards.get(a, 0.0)) for a in self.policy_agents},
             done=done,
             truncated=trunc,
             info=info,
