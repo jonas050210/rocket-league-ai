@@ -86,10 +86,12 @@ def test_touch_reward_is_an_event_not_a_constant():
     for agent in agents:
         state.cars[agent].ball_touches = 1
     touching = reward.get_rewards(agents, state, {}, {}, shared)
-    assert all(value >= 0.5 for value in touching.values())
+    # touches are directional now: with the ball at rest the base factor pays
+    # 0.3 * weight; a touch that drives the ball at the goal pays in full
+    assert all(value >= 0.25 for value in touching.values())
     # the same (unchanged) state must not pay the touch bonus twice
     after = reward.get_rewards(agents, state, {}, {}, shared)
-    assert all(abs(value) < 0.5 for value in after.values())
+    assert all(abs(value) < 0.25 for value in after.values())
 
 
 def test_reward_components_match_the_documented_order():

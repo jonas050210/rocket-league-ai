@@ -113,6 +113,10 @@ class TrainingConfig(BaseModel):
     #: measure the policy before the first update so the report has a "before"
     eval_before: bool = True
     curriculum: bool = False
+    #: starting-state distribution when no curriculum stage overrides it:
+    #: ``kickoff`` (standard), ``drill`` (randomized attacking setups that
+    #: teach ball contact far faster) or ``mixed``
+    reset_mode: str = "kickoff"
     #: let workers play on either side so the policy learns both
     side_randomization: bool = False
     #: clamp ``n_workers`` to what this machine can actually run.  Turning
@@ -207,6 +211,14 @@ class TrainingConfig(BaseModel):
         if not cleaned:
             raise ValueError("eval_sides must not be empty")
         return cleaned
+
+    @field_validator("reset_mode")
+    @classmethod
+    def _reset_mode_valid(cls, value: str) -> str:
+        key = str(value or "").strip().lower()
+        if key not in {"kickoff", "drill", "mixed"}:
+            raise ValueError("reset_mode must be kickoff, drill or mixed")
+        return key
 
     @field_validator("obs_version")
     @classmethod

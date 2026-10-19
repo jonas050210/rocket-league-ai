@@ -462,6 +462,7 @@ def build_run_report(
     run_dir: str | Path | None = None,
     config: dict | None = None,
     resume: dict | None = None,
+    curriculum: dict | None = None,
     device: str | None = None,
     workers: int | None = None,
     wall_seconds: float | None = None,
@@ -564,6 +565,47 @@ def build_run_report(
         store.episode_stats(run_id, since_step=resumed_step) if resumed_step else episodes_all
     )
     episodes_window = store.episode_summary(run_id, window=100)
+
+    # Learning evidence independent of the shaped reward: what did the first
+    # episodes of this run look like vs the last ones, in outcomes and ball
+    # interaction?  A rising reward with flat touches/goals is proxy farming,
+    # and this block makes that visible at a glance.
+    first_window = store.episode_window_stats(
+        run_id, which="first", window=200, since_step=resumed_step
+    )
+    last_window = store.episode_window_stats(
+        run_id, which="last", window=200, since_step=resumed_step
+    )
+    learning_evidence: dict[str, Any] = {
+        "first_200_episodes": first_window,
+        "last_200_episodes": last_window,
+        "basis": (
+            "training-episode outcomes of this run (not an independent "
+            "evaluation); compare with the evaluation section for strength"
+        ),
+    }
+    if first_window.get("available") and last_window.get("available"):
+        learning_evidence["delta"] = {
+            key: (
+                round(float(last_window[key]) - float(first_window[key]), 4)
+                if first_window.get(key) is not None and last_window.get(key) is not None
+                else None
+            )
+            for key in (
+                "mean_reward", "win_rate", "goals_per_episode",
+                "conceded_per_episode", "touches_per_episode", "shots_per_episode",
+            )
+        }
+        reward_up = (learning_evidence["delta"].get("mean_reward") or 0) > 0
+        play_flat = (
+            abs(learning_evidence["delta"].get("goals_per_episode") or 0) < 1e-9
+            and abs(learning_evidence["delta"].get("touches_per_episode") or 0) < 1e-9
+        )
+        if reward_up and play_flat:
+            warnings.append(
+                "training reward rose while goals and touches per episode did not "
+                "move: the policy is likely optimising shaping proxies, not play"
+            )
 
     curves = {
         name: _downsample(points)
@@ -689,6 +731,10 @@ def build_run_report(
             "all_time": episodes_all,
             "last_100": episodes_window,
         },
+        "learning_evidence": learning_evidence,
+        "curriculum": curriculum
+        if curriculum is not None
+        else unavailable("no curriculum was active for this run"),
         "evaluation": evaluation,
         "final_checkpoint": checkpoint_section,
         "curves": curves,

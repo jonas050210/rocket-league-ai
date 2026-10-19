@@ -31,14 +31,18 @@ def _env(mode: str = "soccer-2v2"):
 
 
 def test_sizes_match_the_documented_versions():
+    # the module default stays v2 so existing configs/checkpoints keep their
+    # meaning; v3 (own velocity block) is opt-in per configuration
     assert OBS_VERSION == 2
     assert obs_size(1) == 190
     assert obs_size(2) == OBS_SIZE == 198
+    assert obs_size(3) == 204
     assert version_for_obs_size(190) == 1
     assert version_for_obs_size(198) == 2
+    assert version_for_obs_size(204) == 3
     assert version_for_obs_size(OBS_SIZE) == 2
     with pytest.raises(ValueError):
-        obs_size(3)
+        obs_size(99)
 
 
 def test_version_one_payload_is_the_legacy_prefix():

@@ -40,9 +40,17 @@ def is_best_candidate(result: dict, best_score: float) -> bool:
     """A model can only become "best" after it has actually won a game.
 
     Untrained policies produce 0:0 draws; marking those as best would put a
-    meaningless checkpoint at the top of the GUI and of ``best.json``.
+    meaningless checkpoint at the top of the GUI and of ``best.json``.  A
+    single decisive game is not evidence either: with the loser known, at
+    least two decisive games are required before a win rate may dethrone
+    the incumbent.
     """
-    return int(result.get("wins", 0)) > 0 and float(result.get("win_rate", 0.0)) > best_score
+    wins = int(result.get("wins", 0))
+    if wins <= 0:
+        return False
+    if result.get("losses") is not None and wins + int(result.get("losses") or 0) < 2:
+        return False
+    return float(result.get("win_rate", 0.0)) > best_score
 
 
 def _outcome_counts(episodes: list[dict]) -> tuple[int, int, int]:
@@ -79,7 +87,13 @@ class Trainer:
         run_dir: Path | None = None,
         resume_mode: str = "continue",
         resume_plan: ResumePlan | None = None,
+        config_override_fields: tuple[str, ...] = (),
     ):
+        #: inherited config fields the operator explicitly wants to change
+        #: on a ``continue`` resume (a phase change, see rlai.resume)
+        self.config_override_fields = tuple(config_override_fields or ())
+        #: merge decisions of the resume, for the report
+        self.resume_overrides: list[dict] = []
         self.config = config
         self.run_id = run_id
         self.store = store
@@ -277,6 +291,7 @@ class Trainer:
             mode=self.resume_mode,
             run_id=self.run_id,
             checkpoint=self.resume_from,
+            explicit_overrides=self.config_override_fields,
         )
 
     def _load_resume(self) -> None:
@@ -325,9 +340,14 @@ class Trainer:
         saved_timing = (payload.get("extra") or {}).get("timing")
         self._saved_timing = saved_timing if isinstance(saved_timing, dict) else None
 
+        explicit = tuple(plan.explicit_overrides or ()) or self.config_override_fields
         merged, overrides, inherited = merge_config(
-            payload.get("training_config"), self.config, mode=plan.mode
+            payload.get("training_config"),
+            self.config,
+            mode=plan.mode,
+            explicit_overrides=explicit,
         )
+        self.resume_overrides = overrides
         if overrides:
             for override in overrides:
                 if "error" in override:
@@ -338,8 +358,18 @@ class Trainer:
                         "config field "
                         f"{override['field']!r}: using {override['used']!r} "
                         f"(checkpoint had {override['checkpoint']!r}, request asked for "
-                        f"{override['requested']!r})",
+                        f"{override['requested']!r}, source={override.get('source', 'inherited')})",
                     )
+        phase_change = [
+            item["field"] for item in overrides if item.get("source") == "explicit"
+        ]
+        if phase_change:
+            self._warn(
+                "phase change: continuing these weights with changed "
+                f"{', '.join(phase_change)}; value estimates and optimizer "
+                "moments were fitted to the old settings and will re-adapt "
+                "over the next iterations"
+            )
         self.config = merged
         self.resume_inherited = inherited
 
@@ -389,6 +419,13 @@ class Trainer:
                 start_index=int(saved.get("index", 0)),
                 stage_iterations=int(saved.get("iterations", 0)),
                 total_iterations=int(saved.get("total_iterations", 0)),
+                window_episodes=saved.get("window") if isinstance(saved.get("window"), list) else None,
+            )
+            self._log(
+                "INFO",
+                f"restored curriculum stage {self.curriculum.index} "
+                f"({self.curriculum.stage.name}); blocked: "
+                f"{self.curriculum.blocked_reason() or 'no'}",
             )
         elif self.curriculum is not None:
             self._warn("checkpoint has no curriculum state; the curriculum restarts at stage 0")
@@ -797,30 +834,42 @@ class Trainer:
         self.resource_plan = plan
 
     # -- opponent selection --------------------------------------------------
-    def _select_opponent(self) -> tuple[str | None, dict | None, str | None, str]:
-        """Return (opponent name, opponent weights, pool entry id, stage name)."""
+    def _select_opponent(
+        self,
+    ) -> tuple[str | None, dict | None, str | None, str, str, float]:
+        """Return (opponent, weights, pool id, stage name, reset mode, seconds).
+
+        The reset distribution and episode horizon belong to the stage: a
+        touch drill wants randomized close starts and short episodes, a
+        match stage wants kickoffs and longer ones.
+        """
+        seconds = float(self.config.episode_seconds)
         if self.curriculum is not None:
             stage = self.curriculum.stage
+            reset_mode = stage.reset_mode
+            if stage.episode_seconds is not None:
+                seconds = float(stage.episode_seconds)
             if stage.opponent == "self" and self.league.usable:
                 entry = self.league.sample(self.rng)
-                return None, entry.state, entry.id, stage.name
+                return None, entry.state, entry.id, stage.name, reset_mode, seconds
             if stage.opponent == "mixed":
                 name = str(self.rng.choice(["chase", "random"]))
-                return name, None, None, stage.name
+                return name, None, None, stage.name, reset_mode, seconds
             if stage.opponent == "self":
                 # The pool has no playable snapshot yet (first iteration, or a
                 # checkpoint written without league states).  "self" is not a
                 # buildable opponent, so fall back to a scripted one instead
                 # of handing the worker a name it cannot resolve.
                 fallback = self._self_play_fallback()
-                return fallback, None, None, stage.name
-            return stage.opponent, None, None, stage.name
+                return fallback, None, None, stage.name, reset_mode, seconds
+            return stage.opponent, None, None, stage.name, reset_mode, seconds
+        reset_mode = str(self.config.reset_mode)
         if self.config.self_play and self.league.usable:
             entry = self.league.sample(self.rng)
-            return None, entry.state, entry.id, "self-play"
+            return None, entry.state, entry.id, "self-play", reset_mode, seconds
         if self.config.opponent == "self":
-            return self._self_play_fallback(), None, None, "fixed"
-        return self.config.opponent, None, None, "fixed"
+            return self._self_play_fallback(), None, None, "fixed", reset_mode, seconds
+        return self.config.opponent, None, None, "fixed", reset_mode, seconds
 
     def _self_play_fallback(self) -> str:
         """Scripted opponent to use while no self-play snapshot exists yet."""
@@ -1063,10 +1112,13 @@ class Trainer:
             self.store.update_run(self.run_id, status="running")
             self.league.add(f"initial-{self.run_id[:6]}", self.step, self._snapshot_state())
             if self.curriculum is not None:
+                stage = self.curriculum.stage
                 self._log(
                     "INFO",
-                    f"curriculum stage 0/{len(self.curriculum.stages) - 1}: "
-                    f"{self.curriculum.stage.name} vs {self.curriculum.stage.opponent}",
+                    f"curriculum stage {self.curriculum.index}/"
+                    f"{len(self.curriculum.stages) - 1}: {stage.name} vs "
+                    f"{stage.opponent} (resets {stage.reset_mode}); promotion "
+                    f"blocked by: {self.curriculum.blocked_reason() or 'nothing'}",
                 )
             if self.config.eval_interval and self.config.eval_before:
                 self._log("INFO", "measuring the policy before the first update")
@@ -1095,7 +1147,14 @@ class Trainer:
                     self._log("INFO", "resumed")
 
                 iteration_started = time.perf_counter()
-                opponent_name, opponent_state, opponent_id, stage_name = self._select_opponent()
+                (
+                    opponent_name,
+                    opponent_state,
+                    opponent_id,
+                    stage_name,
+                    reset_mode,
+                    episode_seconds,
+                ) = self._select_opponent()
                 started = time.perf_counter()
                 rollouts = self.pool.collect(
                     self._cpu_state(),
@@ -1105,6 +1164,8 @@ class Trainer:
                     opponent=opponent_name,
                     policy_teams=self._policy_teams(),
                     opponent_execution=self._opponent_execution(),
+                    reset_mode=reset_mode,
+                    episode_seconds=episode_seconds,
                 )
                 collect_seconds = time.perf_counter() - started
 
@@ -1141,17 +1202,27 @@ class Trainer:
                     self._metric("league/pool_size", float(len(self.league)))
 
                 if self.curriculum is not None:
-                    promoted = self.curriculum.observe(episodes)
+                    transitioned = self.curriculum.observe(episodes)
                     for key, value in self.curriculum.metrics().items():
                         self._metric(key, value)
-                    if promoted:
+                    event = self.curriculum.last_event
+                    if transitioned and event in ("promotion", "demotion"):
                         stage = self.curriculum.stage
                         self._log(
                             "INFO",
-                            f"curriculum promotion -> {stage.name} "
-                            f"(opponent {stage.opponent}, target {stage.win_rate:.0%})",
+                            f"curriculum {event} -> {stage.name} "
+                            f"(opponent {stage.opponent}, resets {stage.reset_mode}, "
+                            f"episodes {stage.episode_seconds or self.config.episode_seconds:.0f}s; "
+                            f"blocked by: {self.curriculum.blocked_reason() or 'nothing'})",
                         )
-                        self.curriculum.reset_window()
+                    elif event == "stagnation":
+                        self._warn(
+                            f"curriculum stage {self.curriculum.stage.name!r} has not "
+                            f"promoted for {self.curriculum.stage_iterations} iterations; "
+                            f"blocked by: {self.curriculum.blocked_reason()}. Training "
+                            "continues on this stage - check reward/touch metrics "
+                            "instead of waiting for the stage to move by itself."
+                        )
 
                 self._log_iteration(
                     episodes,
@@ -1270,6 +1341,16 @@ class Trainer:
             resume_info["mode"] = self.resume_mode
             resume_info["restored_step"] = self.start_step
             resume_info["inherited_fields"] = list(getattr(self, "resume_inherited", []))
+            # the merge decisions actually applied by this process (the plan
+            # may predate them); the report must show the effective config's
+            # provenance, not only the final values
+            if self.resume_overrides:
+                resume_info["overrides"] = self.resume_overrides
+            resume_info["phase_change"] = [
+                item["field"]
+                for item in (resume_info.get("overrides") or [])
+                if item.get("source") == "explicit"
+            ]
             payload = report_module.build_run_report(
                 self.store,
                 self.run_id,
@@ -1277,6 +1358,7 @@ class Trainer:
                 run_dir=self.run_dir,
                 config=self.config.to_dict(),
                 resume=resume_info,
+                curriculum=self.curriculum.status() if self.curriculum else None,
                 device=str(self.device),
                 workers=int(self.config.n_workers),
                 wall_seconds=max(0.0, time.time() - self.started),
@@ -1330,6 +1412,8 @@ class Trainer:
                 "charts/draw_rate": _mean([1.0 if e.get("result") == "draw" else 0.0 for e in episodes]),
                 "charts/goals_for": _mean([e["goals_for"] for e in episodes]),
                 "charts/goals_against": _mean([e["goals_against"] for e in episodes]),
+                "charts/touches": _mean([e.get("touches", 0) for e in episodes]),
+                "charts/shots": _mean([e.get("shots", 0) for e in episodes]),
                 "charts/episodes": float(len(episodes)),
                 "charts/truncation_rate": _mean(
                     [1.0 if e.get("truncated") else 0.0 for e in episodes]
@@ -1356,6 +1440,8 @@ class Trainer:
                 step=self.step,
                 truncated=bool(episode.get("truncated")),
                 opponent=episode.get("opponent") or opponent_name,
+                touches=int(episode.get("touches", 0)),
+                shots=int(episode.get("shots", 0)),
             )
         self._log(
             "INFO",
@@ -1387,6 +1473,7 @@ def run_training(
     resume_from: str | None = None,
     resume_mode: str = "continue",
     resume_plan: ResumePlan | None = None,
+    config_override_fields: tuple[str, ...] = (),
 ) -> dict:
     return Trainer(
         config,
@@ -1395,4 +1482,5 @@ def run_training(
         resume_from=resume_from,
         resume_mode=resume_mode,
         resume_plan=resume_plan,
+        config_override_fields=config_override_fields,
     ).run()

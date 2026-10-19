@@ -57,14 +57,26 @@ def _empty_rollout() -> dict[str, np.ndarray]:
     }
 
 
-def collect_rollout(env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int) -> dict[str, Any]:
-    obs = env.reset(episode_seed=seed)
+def collect_rollout(
+    env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int, *, fresh: bool = True
+) -> dict[str, Any]:
+    """Collect ``n_steps`` decision steps.
+
+    ``fresh=True`` starts a new episode (first collection, or after the env
+    was rebuilt).  ``fresh=False`` continues the episode the previous
+    collection left unfinished: the old code reset on every call, which
+    silently discarded one partial episode per worker per iteration and
+    oversampled kickoff states.  Episode returns/lengths are accumulated by
+    the env itself, so a spanning episode is reported whole.
+    """
+    if fresh or not env.current_obs:
+        obs_full = env.reset(episode_seed=seed)
+    else:
+        obs_full = env.current_obs
     agents = env.policy_agents
     n_agents = len(agents)
-    obs = {agent: obs[agent] for agent in agents}
+    obs = {agent: obs_full[agent] for agent in agents}
     rollout = _empty_rollout()
-    episode_rewards = np.zeros(n_agents, dtype=np.float32)
-    episode_start_tick = env.state.tick_count
     episodes: list[dict] = []
     started = time.perf_counter()
     infer_seconds = 0.0
@@ -97,9 +109,7 @@ def collect_rollout(env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int)
         else:
             rollout["bootstrap"].append(np.zeros(n_agents, dtype=np.float32))
 
-        episode_rewards += rewards
         if done:
-            length = int(result.info.tick_count - episode_start_tick)
             goals_for = int(env.score_for)
             goals_against = int(env.score_against)
             if goals_for > goals_against:
@@ -108,20 +118,33 @@ def collect_rollout(env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int)
                 outcome = "loss"
             else:
                 outcome = "draw"
+            totals = [env.episode_reward_total.get(a, 0.0) for a in agents]
+            events = result.info.reward_events
             episodes.append(
                 {
                     "episode": int(env.episode_index),
-                    "reward": float(episode_rewards.mean()),
-                    "length": length,
+                    "reward": float(np.mean(totals)) if totals else 0.0,
+                    # length in *decision* steps (the unit PPO and the step
+                    # counter use).  The old code stored physics ticks
+                    # (120/s), which made a 15 s episode look 1800 "steps"
+                    # long next to a 512-step rollout.
+                    "length": int(env.episode_decisions),
+                    "length_ticks": int(env.episode_decisions * env.tick_skip),
                     "goals_for": goals_for,
                     "goals_against": goals_against,
                     "result": outcome,
                     "won": outcome == "win",
                     "truncated": bool(truncated),
                     "policy_team": int(env.policy_team),
+                    # ball-interaction evidence for the curriculum and the
+                    # report: reward alone cannot distinguish progress from
+                    # proxy farming.
+                    "touches": int(events.get("touches", 0)),
+                    "shots": int(events.get("shots", 0)),
+                    "defensive_touches": int(events.get("defensive_touches", 0)),
                     # reward components accumulated by the reward function for
-                    # this episode; persisted so the report can show *why* the
-                    # reward moved, not only that it moved.
+                    # this episode (learning team only); persisted so the
+                    # report can show *why* the reward moved.
                     "reward_components": {
                         key: float(value)
                         for key, value in result.info.reward_components.items()
@@ -131,8 +154,6 @@ def collect_rollout(env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int)
             )
             obs_full = env.reset()
             obs = {agent: obs_full[agent] for agent in agents}
-            episode_rewards[:] = 0
-            episode_start_tick = env.state.tick_count
         else:
             obs = {agent: result.obs[agent] for agent in agents}
 
@@ -178,15 +199,23 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
             # opaque "unknown opponent" error.
             opponent_name = "chase"
         active_opponent = opponent_name
-        env = MatchEnv(
-            spec,
-            build_opponent(opponent_name, seed=seed, device="cpu"),
-            seed=seed,
-            tick_skip=config.tick_skip,
-            reward_weights=weights,
-            episode_seconds=config.episode_seconds,
-            obs_version=config.obs_version,
-        )
+        active_reset_mode = str(config.reset_mode)
+        active_episode_seconds = float(config.episode_seconds)
+
+        def build_env() -> MatchEnv:
+            return MatchEnv(
+                spec,
+                build_opponent(active_opponent, seed=seed, device="cpu"),
+                seed=seed,
+                tick_skip=config.tick_skip,
+                reward_weights=weights,
+                episode_seconds=active_episode_seconds,
+                obs_version=config.obs_version,
+                reset_mode=active_reset_mode,
+            )
+
+        env = build_env()
+        fresh = True
         policy_config = PolicyConfig.from_dict(config.policy_config().to_dict())
         policy = TorchPolicy.from_config(policy_config, device="cpu")
         opponent_policy = TorchPolicy.from_config(policy_config, device="cpu")
@@ -200,6 +229,23 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
                 continue
             policy.model.load_state_dict(message["state_dict"])
             policy.model.eval()
+            # A curriculum stage may change the reset distribution or the
+            # episode horizon.  The horizon is baked into the truncation
+            # condition, so the env is rebuilt (rare: once per transition);
+            # the reset mode alone could switch live, but rebuilding for
+            # both keeps one code path and the cost is one arena setup.
+            wanted_reset = message.get("reset_mode") or active_reset_mode
+            wanted_seconds = message.get("episode_seconds")
+            wanted_seconds = (
+                active_episode_seconds if wanted_seconds is None else float(wanted_seconds)
+            )
+            if wanted_reset != active_reset_mode or wanted_seconds != active_episode_seconds:
+                old_opponent, old_team = env.opponent, env.policy_team
+                env.close()
+                active_reset_mode, active_episode_seconds = wanted_reset, wanted_seconds
+                env = build_env()
+                env.opponent, env.policy_team = old_opponent, old_team
+                fresh = True
             requested_team = message.get("policy_team")
             if requested_team is not None:
                 env.policy_team = int(requested_team)
@@ -234,7 +280,9 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
                 policy,
                 int(message["n_steps"]),
                 int(message["seed"]) + worker_index * 104_729,
+                fresh=fresh,
             )
+            fresh = False
             rollout["type"] = "rollout"
             rollout["worker"] = worker_index
             remote.send(rollout)
@@ -305,6 +353,8 @@ class WorkerPool:
         opponent: str | None = None,
         policy_teams: list[int] | None = None,
         opponent_execution: dict | None = None,
+        reset_mode: str | None = None,
+        episode_seconds: float | None = None,
     ) -> list[dict]:
         for index, parent in enumerate(self.parents):
             team = None if policy_teams is None else int(policy_teams[index % len(policy_teams)])
@@ -318,6 +368,8 @@ class WorkerPool:
                     "opponent": opponent,
                     "policy_team": team,
                     "opponent_execution": opponent_execution,
+                    "reset_mode": reset_mode,
+                    "episode_seconds": episode_seconds,
                 }
             )
         results = []

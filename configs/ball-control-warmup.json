@@ -6,7 +6,7 @@
   "rollout_steps": 512,
   "n_workers": 4,
   "tick_skip": 8,
-  "episode_seconds": 15,
+  "episode_seconds": 20,
   "learning_rate": 0.0003,
   "gamma": 0.995,
   "gae_lambda": 0.95,
@@ -26,13 +26,15 @@
   "reward": {
     "goal": 10.0,
     "concede": 10.0,
-    "touch": 0.35,
-    "progress": 0.9,
-    "alignment": 0.02,
-    "approach": 0.03,
-    "boost": 0.02,
-    "defense": 0.15,
-    "bump": 0.3
+    "touch": 0.4,
+    "ball_progress": 1.0,
+    "progress": 0.35,
+    "shot": 1.0,
+    "defense": 0.5,
+    "alignment": 0.0,
+    "approach": 0.0,
+    "boost": 0.0,
+    "bump": 0.0
   },
   "policy": {
     "hidden": [
@@ -44,5 +46,7 @@
   "eval_opponent": "idle",
   "eval_interval": 10,
   "eval_games": 4,
-  "eval_match_seconds": 20
+  "eval_match_seconds": 20,
+  "reset_mode": "drill",
+  "obs_version": 3
 }
