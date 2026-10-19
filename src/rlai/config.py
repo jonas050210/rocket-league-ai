@@ -81,6 +81,15 @@ class TrainingConfig(BaseModel):
     opponent: str = "chase"
     self_play: bool = False
     snapshot_interval: int = Field(default=5, ge=1, le=1000)
+    #: a snapshot that is within this many steps of the newest one is only
+    #: kept when its weights actually differ.  Without it the pool fills up
+    #: with near-duplicates of the current policy.
+    pool_duplicate_step_tolerance: int = Field(default=0, ge=0, le=100000)
+    #: mean absolute weight difference below which two snapshots count as
+    #: "the same policy"
+    pool_duplicate_distance_tolerance: float = Field(default=1e-4, ge=0, le=1.0)
+    #: how many snapshots the opponent pool keeps
+    pool_capacity: int = Field(default=8, ge=1, le=64)
     #: store the frozen weights of the opponent pool inside checkpoints so a
     #: resumed self-play run keeps its real opponents (about one policy size per
     #: snapshot, at most ``OpponentPool.capacity`` of them).  Ratings are always
@@ -106,6 +115,40 @@ class TrainingConfig(BaseModel):
     curriculum: bool = False
     #: let workers play on either side so the policy learns both
     side_randomization: bool = False
+    #: clamp ``n_workers`` to what this machine can actually run.  Turning
+    #: this off reproduces the old behaviour (use exactly ``n_workers``),
+    #: which is only sensible when the machine was measured beforehand.
+    auto_worker_limit: bool = True
+    #: how many rows per metric name are kept in the database.  The newest
+    #: rows win, so the charts and the report still describe the end of the
+    #: run.  ``0`` disables the pruning.
+    metric_retention: int = Field(default=20_000, ge=0, le=5_000_000)
+    #: how many log rows are kept per run
+    log_retention: int = Field(default=5_000, ge=0, le=1_000_000)
+    #: how many episode rows are kept per run
+    episode_retention: int = Field(default=20_000, ge=0, le=5_000_000)
+    #: write the retained rows to the database every N iterations instead of
+    #: after every iteration.  1 keeps the old behaviour; higher values
+    #: reduce the write overhead on slow disks.
+    metric_flush_interval: int = Field(default=1, ge=1, le=1000)
+    #: --- Adaptive Match Dynamics -------------------------------------
+    #: adapt the *scripted* opponent to the measured result.  Off by
+    #: default; a trained policy is never modified at runtime.
+    adaptive_dynamics: bool = False
+    #: the win rate the agent should reach against the opponent
+    adaptive_target_win_rate: float = Field(default=0.6, ge=0.0, le=1.0)
+    #: how far the measured win rate may drift before a change is made
+    adaptive_tolerance: float = Field(default=0.15, ge=0.0, le=1.0)
+    #: at least this many games between two changes
+    adaptive_min_games: int = Field(default=10, ge=1, le=10000)
+    #: at least this many seconds between two changes
+    adaptive_min_seconds: float = Field(default=60.0, ge=0.0, le=86400.0)
+    #: how much a single change moves the opponent (0..1)
+    adaptive_step: float = Field(default=0.1, gt=0, le=1.0)
+    #: --- Player Memory -------------------------------------------------
+    #: remember the players the agent met.  The memory is data, never
+    #: part of the model weights.
+    player_memory: bool = True
 
     @field_validator("reward", mode="before")
     @classmethod
@@ -125,30 +168,28 @@ class TrainingConfig(BaseModel):
             raise ValueError(f"mode must be one of {mode_ids()}")
         return value
 
+    @field_validator("opponent")
+    @classmethod
+    def _opponent_valid(cls, value: str) -> str:
+        from .opponents import validate_opponent_name
+
+        return validate_opponent_name(value)
+
     @field_validator("eval_opponent")
     @classmethod
     def _eval_opponent_valid(cls, value: str) -> str:
-        allowed = {"idle", "random", "chase", "self"}
-        key = str(value).strip()
-        if key not in allowed and not key.startswith("model:"):
-            raise ValueError(
-                f"eval_opponent must be one of {sorted(allowed)} or 'model:<checkpoint>', "
-                f"got {value!r}"
-            )
-        return key
+        from .opponents import validate_opponent_name
+
+        return validate_opponent_name(value)
 
     @field_validator("eval_opponents")
     @classmethod
     def _eval_opponents_valid(cls, values: list[str]) -> list[str]:
-        allowed = {"idle", "random", "chase", "self"}
+        from .opponents import validate_opponent_name
+
         cleaned: list[str] = []
         for value in values:
-            key = str(value).strip()
-            if key not in allowed and not key.startswith("model:"):
-                raise ValueError(
-                    f"eval_opponents entries must be one of {sorted(allowed)} or "
-                    f"'model:<checkpoint>', got {value!r}"
-                )
+            key = validate_opponent_name(value)
             if key not in cleaned:
                 cleaned.append(key)
         return cleaned
@@ -190,6 +231,13 @@ class TrainingConfig(BaseModel):
             )
         if self.minibatch_size > self.rollout_steps * self.n_workers:
             raise ValueError("minibatch_size cannot exceed one rollout batch")
+        if self.curriculum:
+            # The stages are validated here, so a broken threshold is
+            # reported when the configuration is checked and not in the
+            # middle of a run.
+            from .curriculum import stages_for_mode
+
+            stages_for_mode(self.mode)
         return self
 
     def resolved_device(self) -> str:

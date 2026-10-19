@@ -21,6 +21,33 @@ import numpy as np
 DEFAULT_ELO = 1000.0
 
 
+def _state_distance(left: Any, right: Any) -> float:
+    """Mean absolute difference between two parameter snapshots.
+
+    Used to recognise a snapshot that is (almost) the same policy as the
+    newest one.  Returns ``inf`` when the two cannot be compared, so an
+    unknown distance never counts as a duplicate.
+    """
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return float("inf")
+    differences: list[float] = []
+    for name, value in left.items():
+        other = right.get(name)
+        if other is None:
+            continue
+        try:
+            first = np.asarray(value, dtype=np.float64)
+            second = np.asarray(other, dtype=np.float64)
+        except (TypeError, ValueError):
+            continue
+        if first.shape != second.shape:
+            continue
+        differences.append(float(np.mean(np.abs(first - second))))
+    if not differences:
+        return float("inf")
+    return float(np.mean(differences))
+
+
 def freeze_state(state: Any) -> Any:
     """Return a genuinely immutable copy of a snapshot state.
 
@@ -83,6 +110,8 @@ class OpponentPool:
         initial_elo: float = DEFAULT_ELO,
         k_factor: float = 16.0,
         min_weight: float = 0.05,
+        duplicate_step_tolerance: int = 0,
+        duplicate_distance_tolerance: float = 1e-4,
     ):
         if capacity < 1:
             raise ValueError("capacity must be at least 1")
@@ -90,6 +119,12 @@ class OpponentPool:
         self.agent_elo = float(initial_elo)
         self.k_factor = float(k_factor)
         self.min_weight = float(min_weight)
+        #: two snapshots closer than this many steps are compared by weight
+        self.duplicate_step_tolerance = max(0, int(duplicate_step_tolerance))
+        #: a mean absolute weight difference below this counts as "the same"
+        self.duplicate_distance_tolerance = float(duplicate_distance_tolerance)
+        #: how many snapshots were rejected as near-duplicates
+        self.skipped_duplicates = 0
         self.entries: list[PoolEntry] = []
 
     # -- maintenance -------------------------------------------------------
@@ -97,11 +132,36 @@ class OpponentPool:
         entry = PoolEntry(
             id=str(entry_id), step=int(step), elo=self.agent_elo, state=freeze_state(state)
         )
+        # A snapshot that is nearly identical to the newest one adds nothing:
+        # the learner would play the same opponent again.  Snapshots that
+        # are far apart (a different number of steps or clearly different
+        # weights) are the interesting ones.
+        if self._is_near_duplicate(entry):
+            self.skipped_duplicates += 1
+            return entry
         self.entries.append(entry)
         # newest entries are the most relevant; drop the oldest first
         while len(self.entries) > self.capacity:
             self.entries.pop(0)
         return entry
+
+    def _is_near_duplicate(self, entry: PoolEntry) -> bool:
+        """True when the snapshot is (almost) the newest one.
+
+        The check uses the step distance *and* the weight distance, so a
+        run that snapshots every iteration does not fill the pool with
+        copies of the same policy, while a run that really changed still
+        gets its snapshot in.
+        """
+        if not self.entries or entry.state is None:
+            return False
+        newest = self.entries[-1]
+        if newest.state is None:
+            return False
+        if abs(int(entry.step) - int(newest.step)) > self.duplicate_step_tolerance:
+            return False
+        distance = _state_distance(newest.state, entry.state)
+        return distance < self.duplicate_distance_tolerance
 
     def __len__(self) -> int:
         return len(self.entries)

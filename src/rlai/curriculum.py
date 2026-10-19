@@ -25,6 +25,42 @@ class Stage:
     min_episodes: int = 30
     window: int = 60
 
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Check the stage's criteria.
+
+        A stage with an impossible threshold would block the run forever,
+        and one with a trivial threshold would skip the stage without
+        training.  Both are configuration errors, not runtime surprises.
+        """
+        if not str(self.name).strip():
+            raise ValueError("a curriculum stage needs a name")
+        if not 0.0 <= float(self.win_rate) <= 1.0:
+            raise ValueError(
+                f"curriculum stage {self.name!r}: win_rate must be between 0 and 1, "
+                f"got {self.win_rate}"
+            )
+        if int(self.min_iterations) < 0:
+            raise ValueError(
+                f"curriculum stage {self.name!r}: min_iterations must not be negative"
+            )
+        if int(self.min_episodes) < 1:
+            raise ValueError(
+                f"curriculum stage {self.name!r}: min_episodes must be at least 1"
+            )
+        if int(self.window) < int(self.min_episodes):
+            raise ValueError(
+                f"curriculum stage {self.name!r}: the window ({self.window}) must hold at "
+                f"least min_episodes ({self.min_episodes}), otherwise the target can "
+                "never be reached"
+            )
+        if self.opponent not in {"idle", "random", "chase", "mixed", "self"}:
+            raise ValueError(
+                f"curriculum stage {self.name!r}: unknown opponent {self.opponent!r}"
+            )
+
     def to_dict(self) -> dict:
         return {
             "name": self.name,
@@ -32,6 +68,7 @@ class Stage:
             "min_iterations": self.min_iterations,
             "win_rate": self.win_rate,
             "min_episodes": self.min_episodes,
+            "window": self.window,
         }
 
 

@@ -234,9 +234,20 @@ class MatchEnv:
     def reset(self, *, episode_seed: int | None = None) -> dict[str, np.ndarray]:
         self.episode_index += 1
         seed = self.seed + self.episode_index if episode_seed is None else episode_seed
-        random.seed(seed)
-        np.random.seed(seed % (2**32 - 1))
-        obs = self.env.reset()
+        # RLGym's kickoff mutator draws from the *global* ``random`` module, so
+        # a deterministic kickoff needs the global seed set.  The global state
+        # is restored right afterwards: the trainer keeps its own Python RNG
+        # state in the checkpoint, and an evaluation in the trainer process
+        # must not silently rewrite it.
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+        try:
+            random.seed(seed)
+            np.random.seed(seed % (2**32 - 1))
+            obs = self.env.reset()
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
         self.start_tick = self.env.state.tick_count
         self.score_blue = 0
         self.score_orange = 0
@@ -264,6 +275,20 @@ class MatchEnv:
         # always from the learning policy's point of view, whatever side it is
         # playing on: a positive value means "we are ahead".
         self.env.shared_info["score_diff"] = self.score_for - self.score_against
+
+    def close(self) -> None:
+        """Release the RocketSim arena.
+
+        A reused arena keeps its memory footprint between games, so the
+        evaluation loop closes them explicitly instead of waiting for the
+        garbage collector.
+        """
+        close = getattr(self.env, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # pragma: no cover - defensive
+                pass
 
     def step(self, actions: dict[str, int]) -> StepResult:
         if not self._observations:

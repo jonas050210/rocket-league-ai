@@ -213,6 +213,74 @@ python -m rlai.cli report --run-id <id> [--summary] [--rebuild]
 python -m rlai.cli report --compare <run-a>,<run-b>
 ```
 
+## Trainingszeit
+
+Die Trainingszeit wird **gemessen**, nicht geschätzt: `src/rlai/timing.py`
+benutzt eine monotone Uhr für die Dauer und eine UTC-Uhr nur für die
+Zeitpunkte. Der Trainer öffnet beim Start eine Sitzung, schließt sie beim
+Ende (auch bei Stopp und Fehler) und schreibt die gemessene Dauer in die
+Tabelle `sessions`, in die Run-Zeile und in jeden Checkpoint
+(`extra.timing`).
+
+* **Aktuelle Sitzung** – die Zeit des laufenden Prozesses.
+* **Akkumuliert** – die Summe aller beendeten Sitzungen des Laufs, inklusive
+  der Zeit, die eine Fortsetzung aus dem Checkpoint übernimmt.
+* **Checkpoint** – trägt die akkumulierte Zeit, die **bis zum Schreiben**
+  gemessen war, plus die Dauer der laufenden Sitzung. Ein Checkpoint kann
+  nie behaupten, dass weitertrainiert wurde, während der Prozess gestoppt
+  war.
+* **Absturz** – eine offen gelassene Sitzung wird beim nächsten Start als
+  *interrupted* markiert; ihre Dauer bleibt unbekannt, weil ein Absturz die
+  eigene Laufzeit nicht messen kann. Die akkumulierte Zeit kommt aus dem
+  Checkpoint.
+* **Alte Checkpoints** ohne Zeit-Metadaten bleiben ladbar; die historische
+  Dauer wird als *unbekannt* gemeldet, nicht als 0.
+
+```bash
+# der Headless-Abschlussbericht enthält die gemessene Zeit
+python -m rlai.cli headless --config-file configs/smoke-1v1.json
+```
+
+## Statistik im GUI (Stats-Tab)
+
+Der Stats-Tab liest `/api/stats`. Alle Zahlen kommen aus
+`src/rlai/stats.py` – dieselbe Quelle, die Report und Headless-Bericht
+benutzen, damit GUI und Bericht nie auseinanderlaufen. Der Tab zeigt:
+
+* **Trainingszeit** – aktuelle Sitzung, akkumulierte Zeit, Start-/Endzeit,
+  letzte Checkpoint-Zeit, Sitzungsverlauf (Status `completed` / `stopped` /
+  `interrupted` / `inherited`), Historie der früheren Läufe;
+* **Fortschritt** – Umweltschritte, Iteration, beendete Episoden, Status;
+* **Lernmetriken** – Belohnungsverlauf, Episodenergebnisse, PPO-Verluste
+  (Policy/Value/KL/Entropy/Clip-Fraktion/erklärte Varianz), Kurven und eine
+  Kompakttabelle;
+* **Performance** – Schritte/s (letzte Iteration und über den Lauf),
+  CPU/RAM/GPU, wenn verfügbar;
+* **Checkpoints** – Erstellungszeit, akkumulierte Trainingszeit bei
+  Erstellung, Iteration, Schrittzahl, gemessener Eval-Score („unbekannt“,
+  wenn nie gemessen);
+* **Evaluation** – Siegquote je Gegner, einzelne Serien, Vergleich der
+  Checkpoints nach gemessenem Score.
+
+Kurven werden auf 400 Punkte heruntergesampelt; die GUI fragt nur die
+geänderten Werte ab. Metrik-, Log- und Episoden-Zeilen sind begrenzt
+(`metric_retention`, `log_retention`, `episode_retention`), Schreibvorgänge
+werden gebündelt (`metric_flush_interval`).
+
+## Weitere Merkmale
+
+| Merkmal | Nutzfläche | Grenze |
+| --- | --- | --- |
+| Team Builder | Teams aus Bot-Slots (Name, Schwierigkeit, Verhalten, Modell, Rolle) speichern, prüfen, als Gegner verwenden | beschreibt Teams; die Ausführung nutzt die Gegner-Implementierung |
+| Schwierigkeitsprofile | vier Stufen (Rock/Tiny/Medium/Pro) mit Zielwert **und** Mechanismus (Fehlerrate, Reaktionszeit, Boost-Effizienz) | die Prozentzahlen sind **Zielwerte**, keine Messung (`target_is_measured = false`) |
+| Bot Brain | vier Verhaltensprofile, deterministisch und ohne Simulator | beschreibt Verhalten, nicht Stärke |
+| Adaptive Match Dynamics | passt den skriptgesteuerten Gegner (`opponent: "difficulty:<level>"`) innerhalb konfigurierter Grenzen an; die neuen Parameter werden an die Worker übergeben und wirken sich wirklich aus | verändert nie eine trainierte Policy; braucht Messungen, Mindest-Spielzahl und Hysterese; ein Gegner ohne Schwierigkeitsstufe wird nicht angepasst |
+| Rival-System | benannte Gegner mit Historie, Rangfolge, Engpass, Trend | nur gemessene Evalutionsergebnisse |
+| Spielerspeicher | Begegnungen mit Notizen, begrenzt (500 Einträge / 90 Tage) | reine Daten, nie Teil der Gewichte oder des Checkpoints |
+| Match-/Replay-Analyse | Auswertung der protokollierten Spiele und Episoden | echte `.replay`-Dateien können hier nicht gelesen werden; die Oberfläche sagt das |
+| Bot Evaluation Lab | wiederholbare Experimente, Plan **vor** der Ausführung, Vergleich, Bericht | ein Lauf startet nur mit `execute=true` |
+| Ressourcenwächter | CPU-/Speicherbudget, Warnungen vor dem Start, automatisches Klemmen der Workerzahl | Empfehlung, keine Garantie |
+
 ## Begrenzter Lernnachweis (kein Langlauf)
 
 Ein bewusst kurzer Lauf (`configs/learning-smoke-1v1.json`, 2 Worker,

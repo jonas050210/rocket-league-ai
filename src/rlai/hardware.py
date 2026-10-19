@@ -46,6 +46,7 @@ def system_info() -> dict:
         "executable": sys.executable,
         "cpu_count": os.cpu_count(),
         "cpu_physical": psutil.cpu_count(logical=False),
+        # a real measurement, not a cached "0 %" from the first call
         "cpu_percent": psutil.cpu_percent(interval=0.15),
         "memory_total_gb": round(memory.total / 1024**3, 2),
         "memory_available_gb": round(memory.available / 1024**3, 2),
@@ -270,7 +271,7 @@ def benchmark_inference(
 
 
 def benchmark(
-    mode: str = "soccar-1v1",
+    mode: str = "soccer-1v1",
     seconds: float = 3.0,
     workers: int = 1,
     *,

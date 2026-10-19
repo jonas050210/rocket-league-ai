@@ -125,6 +125,57 @@ CREATE TABLE IF NOT EXISTS reports (
     report_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_s REAL,
+    status TEXT NOT NULL,
+    start_step INTEGER DEFAULT 0,
+    end_step INTEGER DEFAULT 0,
+    pid INTEGER,
+    note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_run ON sessions(run_id, id);
+
+CREATE TABLE IF NOT EXISTS player_memory (
+    name TEXT PRIMARY KEY,
+    games INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0,
+    losses INTEGER DEFAULT 0,
+    draws INTEGER DEFAULT 0,
+    goals_for INTEGER DEFAULT 0,
+    goals_against INTEGER DEFAULT 0,
+    first_seen REAL,
+    last_seen REAL,
+    data_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS teams (
+    name TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    mode TEXT,
+    description TEXT,
+    data_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rivals (
+    name TEXT PRIMARY KEY,
+    kind TEXT,
+    reference TEXT,
+    description TEXT,
+    evaluations INTEGER DEFAULT 0,
+    games INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0,
+    losses INTEGER DEFAULT 0,
+    draws INTEGER DEFAULT 0,
+    goals_for INTEGER DEFAULT 0,
+    goals_against INTEGER DEFAULT 0,
+    data_json TEXT
+);
+
 """
 
 #: columns added after the first release; existing databases are migrated in
@@ -133,6 +184,12 @@ _RUN_MIGRATIONS = {
     "parent_run": "TEXT",
     "resumed_step": "INTEGER DEFAULT 0",
     "report_path": "TEXT",
+    # accumulated training time of the run across all its sessions
+    "duration_s": "REAL",
+    # duration of the *last* session only
+    "session_duration_s": "REAL",
+    "last_checkpoint_at": "TEXT",
+    "last_checkpoint_id": "TEXT",
 }
 _EPISODE_MIGRATIONS = {
     "step": "INTEGER DEFAULT 0",
@@ -246,6 +303,10 @@ class Store:
             "parent_run",
             "resumed_step",
             "report_path",
+            "duration_s",
+            "session_duration_s",
+            "last_checkpoint_at",
+            "last_checkpoint_id",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -497,6 +558,39 @@ class Store:
         with self._lock, self._connect() as conn:
             conn.execute("UPDATE models SET eval_score=? WHERE id=?", (score, model_id))
 
+    def get_model_eval_score(self, model_id: str) -> float | None:
+        """The measured evaluation score of a checkpoint (``None`` if none).
+
+        The score comes from the ``models`` table when the checkpoint was
+        registered there.  Otherwise it is taken from the stored evaluations
+        that reference the checkpoint - a checkpoint that was written before
+        the database knew about it still has a measured score, and the
+        comparison view must not lose it.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT eval_score FROM models WHERE id=?", (model_id,)
+            ).fetchone()
+            if row and row["eval_score"] is not None:
+                return float(row["eval_score"])
+            row = conn.execute(
+                "SELECT wins, games, details_json FROM evaluations WHERE model_id=?"
+                " ORDER BY created_at DESC, id DESC LIMIT 1",
+                (model_id,),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            details = json.loads(row["details_json"] or "{}")
+        except json.JSONDecodeError:
+            details = {}
+        if details.get("win_rate") is not None:
+            return float(details["win_rate"])
+        games = int(row["games"] or 0)
+        if games:
+            return float(row["wins"] or 0) / games
+        return None
+
     # -- evaluations -------------------------------------------------------
     def add_evaluation(self, result: dict) -> str:
         eval_id = result.get("id") or uuid.uuid4().hex[:12]
@@ -692,6 +786,340 @@ class Store:
                 item["summary"] = {}
             results.append(item)
         return results
+
+    # -- player memory -----------------------------------------------------
+    def list_player_memory(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM player_memory ORDER BY last_seen DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_player_memory(self, rows: list[dict]) -> int:
+        """Replace the whole memory with ``rows`` (atomic)."""
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM player_memory")
+            conn.executemany(
+                "INSERT OR REPLACE INTO player_memory (name,games,wins,losses,draws,"
+                "goals_for,goals_against,first_seen,last_seen,data_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        row["name"],
+                        int(row.get("games") or 0),
+                        int(row.get("wins") or 0),
+                        int(row.get("losses") or 0),
+                        int(row.get("draws") or 0),
+                        int(row.get("goals_for") or 0),
+                        int(row.get("goals_against") or 0),
+                        float(row.get("first_seen") or 0.0),
+                        float(row.get("last_seen") or 0.0),
+                        row.get("data_json"),
+                    )
+                    for row in rows
+                ],
+            )
+        return len(rows)
+
+    def delete_player_memory(self, name: str | None = None) -> int:
+        """Delete one player, or the whole memory.  Returns the row count."""
+        with self._lock, self._connect() as conn:
+            if name:
+                cursor = conn.execute("DELETE FROM player_memory WHERE name=?", (name,))
+            else:
+                cursor = conn.execute("DELETE FROM player_memory")
+            return cursor.rowcount or 0
+
+    # -- teams -------------------------------------------------------------
+    def save_team(self, name: str, data: dict, *, mode: str | None = None) -> None:
+        now = utc_now()
+        payload = json.dumps(data, default=str)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO teams (name,created_at,updated_at,mode,description,data_json)"
+                " VALUES (?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET"
+                " updated_at=excluded.updated_at, mode=excluded.mode,"
+                " description=excluded.description, data_json=excluded.data_json",
+                (
+                    name,
+                    now,
+                    now,
+                    mode or data.get("mode"),
+                    data.get("description") or "",
+                    payload,
+                ),
+            )
+
+    def list_teams(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM teams ORDER BY updated_at DESC"
+            ).fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["team"] = json.loads(item.pop("data_json") or "{}")
+            except json.JSONDecodeError:
+                item["team"] = {}
+            results.append(item)
+        return results
+
+    def get_team(self, name: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM teams WHERE name=?", (name,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        try:
+            item["team"] = json.loads(item.pop("data_json") or "{}")
+        except json.JSONDecodeError:
+            item["team"] = {}
+        return item
+
+    def delete_team(self, name: str) -> int:
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute("DELETE FROM teams WHERE name=?", (name,))
+            return cursor.rowcount or 0
+
+    # -- rivals ------------------------------------------------------------
+    def save_rival(self, name: str, data: dict) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO rivals (name,kind,reference,description,evaluations,games,"
+                "wins,losses,draws,goals_for,goals_against,data_json)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET"
+                " kind=excluded.kind, reference=excluded.reference,"
+                " description=excluded.description, evaluations=excluded.evaluations,"
+                " games=excluded.games, wins=excluded.wins, losses=excluded.losses,"
+                " draws=excluded.draws, goals_for=excluded.goals_for,"
+                " goals_against=excluded.goals_against, data_json=excluded.data_json",
+                (
+                    name,
+                    data.get("kind"),
+                    data.get("reference"),
+                    data.get("description") or "",
+                    int(data.get("evaluations") or 0),
+                    int(data.get("games") or 0),
+                    int(data.get("wins") or 0),
+                    int(data.get("losses") or 0),
+                    int(data.get("draws") or 0),
+                    int(data.get("goals_for") or 0),
+                    int(data.get("goals_against") or 0),
+                    json.dumps(data, default=str),
+                ),
+            )
+
+    def list_rivals(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM rivals ORDER BY name").fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["rival"] = json.loads(item.pop("data_json") or "{}")
+            except json.JSONDecodeError:
+                item["rival"] = {}
+            results.append(item)
+        return results
+
+    def delete_rival(self, name: str) -> int:
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute("DELETE FROM rivals WHERE name=?", (name,))
+            return cursor.rowcount or 0
+
+    # -- retention ---------------------------------------------------------
+    def prune_metrics(self, run_id: str, keep_per_name: int = 20_000) -> int:
+        """Keep only the newest ``keep_per_name`` rows of every metric.
+
+        A long run writes a few dozen metric names per iteration.  Without a
+        bound the table grows without limit and the queries behind the
+        charts get slower.  The *newest* rows are kept, so the charts and
+        the report still describe the end of the run, where the interesting
+        behaviour is.
+        """
+        keep = max(1, int(keep_per_name))
+        with self._lock, self._connect() as conn:
+            names = [
+                row["name"]
+                for row in conn.execute(
+                    "SELECT DISTINCT name FROM metrics WHERE run_id=?", (run_id,)
+                )
+            ]
+            deleted = 0
+            for name in names:
+                cursor = conn.execute(
+                    "DELETE FROM metrics WHERE run_id=? AND name=? AND id NOT IN ("
+                    "SELECT id FROM metrics WHERE run_id=? AND name=? ORDER BY id DESC"
+                    " LIMIT ?)",
+                    (run_id, name, run_id, name, keep),
+                )
+                deleted += cursor.rowcount or 0
+            return deleted
+
+    def prune_logs(self, run_id: str | None = None, keep: int = 5_000) -> int:
+        """Keep only the newest ``keep`` log rows (of one run, or of all)."""
+        keep = max(1, int(keep))
+        with self._lock, self._connect() as conn:
+            if run_id:
+                cursor = conn.execute(
+                    "DELETE FROM logs WHERE run_id=? AND id NOT IN ("
+                    "SELECT id FROM logs WHERE run_id=? ORDER BY id DESC LIMIT ?)",
+                    (run_id, run_id, keep),
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM logs WHERE id NOT IN ("
+                    "SELECT id FROM logs ORDER BY id DESC LIMIT ?)",
+                    (keep,),
+                )
+            return cursor.rowcount or 0
+
+    def prune_episodes(self, run_id: str, keep: int = 20_000) -> int:
+        """Keep only the newest ``keep`` episode rows of a run."""
+        keep = max(1, int(keep))
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM episodes WHERE run_id=? AND id NOT IN ("
+                "SELECT id FROM episodes WHERE run_id=? ORDER BY id DESC LIMIT ?)",
+                (run_id, run_id, keep),
+            )
+            return cursor.rowcount or 0
+
+    def metric_retention_plan(self, run_id: str) -> dict:
+        """Size of the metric table, for the report and the stats view."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, COUNT(DISTINCT name) AS names FROM metrics"
+                " WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            oldest = conn.execute(
+                "SELECT MIN(ts) AS ts FROM metrics WHERE run_id=?", (run_id,)
+            ).fetchone()
+            newest = conn.execute(
+                "SELECT MAX(ts) AS ts FROM metrics WHERE run_id=?", (run_id,)
+            ).fetchone()
+        return {
+            "rows": int(row["n"] or 0),
+            "names": int(row["names"] or 0),
+            "oldest_ts": oldest["ts"] if oldest else None,
+            "newest_ts": newest["ts"] if newest else None,
+        }
+
+    # -- sessions ----------------------------------------------------------
+    def start_session(
+        self,
+        run_id: str,
+        *,
+        started_at: str,
+        start_step: int = 0,
+        pid: int | None = None,
+    ) -> int:
+        """Record the start of a training session and return its id."""
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO sessions (run_id,started_at,status,start_step,pid)"
+                " VALUES (?,?,?,?,?)",
+                (run_id, started_at, "running", int(start_step), pid),
+            )
+            return int(cursor.lastrowid)
+
+    def finish_session(
+        self,
+        session_id: int,
+        *,
+        ended_at: str,
+        duration_s: float | None,
+        status: str,
+        end_step: int = 0,
+        note: str = "",
+    ) -> None:
+        """Close a session with its measured duration."""
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET ended_at=?, duration_s=?, status=?, end_step=?,"
+                " note=? WHERE id=?",
+                (ended_at, duration_s, status, int(end_step), note, int(session_id)),
+            )
+
+    def list_sessions(self, run_id: str | None = None, limit: int = 200) -> list[dict]:
+        """Sessions of a run (newest first), or of every run."""
+        query = "SELECT * FROM sessions"
+        params: list[Any] = []
+        if run_id:
+            query += " WHERE run_id=?"
+            params.append(run_id)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def session_totals(self, run_id: str) -> dict:
+        """Aggregated session information for one run.
+
+        ``accumulated_s`` is the sum of the *finished* sessions only; a
+        session that is still marked running (a crashed process) is reported
+        separately, because its duration was never measured.  A session
+        with the status ``inherited`` carries the training time a
+        continued run took over from its parent, so the total of a resumed
+        run is complete.
+        """
+        rows = self.list_sessions(run_id)
+        finished = [row for row in rows if row.get("duration_s") is not None]
+        # A session is "unfinished" while it is still marked running - a
+        # crashed session is closed as *interrupted* and keeps its unknown
+        # duration, but it is not running any more.
+        unfinished = [row for row in rows if row.get("status") == "running"]
+        inherited = [row for row in finished if row.get("status") == "inherited"]
+        return {
+            "sessions": rows,
+            "count": len(rows),
+            "finished_count": len(finished),
+            "inherited_count": len(inherited),
+            "accumulated_s": (
+                sum(float(row["duration_s"]) for row in finished) if finished else 0.0
+            ),
+            "own_s": (
+                sum(
+                    float(row["duration_s"])
+                    for row in finished
+                    if row.get("status") != "inherited"
+                )
+                if finished
+                else 0.0
+            ),
+            "has_unfinished": bool(unfinished),
+            "unfinished_count": len(unfinished),
+            "last_started_at": rows[0]["started_at"] if rows else None,
+            "last_ended_at": next(
+                (row["ended_at"] for row in rows if row.get("ended_at")), None
+            ),
+        }
+
+    def recover_interrupted_sessions(self, run_id: str, *, note: str = "") -> int:
+        """Mark sessions that never ended as interrupted.
+
+        A process that died leaves a session row without an end.  The
+        duration was never measured, so it stays ``None`` (unknown) instead
+        of being guessed from the wall clock.
+        """
+        rows = [
+            row
+            for row in self.list_sessions(run_id)
+            if row.get("duration_s") is None and row.get("status") == "running"
+        ]
+        for row in rows:
+            self.finish_session(
+                int(row["id"]),
+                ended_at=utc_now(),
+                duration_s=None,
+                status="interrupted",
+                end_step=int(row.get("end_step") or 0),
+                note=note or "the process ended without closing the session",
+            )
+        return len(rows)
 
     # -- settings ----------------------------------------------------------
     def get_setting(self, key: str, default: str | None = None) -> str | None:

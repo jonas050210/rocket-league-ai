@@ -28,6 +28,7 @@ from .policy import PolicyConfig, TorchPolicy, clone_state_dict
 from .ppo import Batch, flatten_rollout, learning_rate_at, ppo_update
 from .resume import ResumePlan, explicit_checkpoint_exists, merge_config, plan_resume
 from .store import Store
+from .timing import TrainingClock, utc_now_iso
 from .workers import WorkerPool
 
 
@@ -101,7 +102,11 @@ class Trainer:
         self.iteration = 0
         self.start_step = 0
         self.pool: WorkerPool | None = None
-        self.league = OpponentPool(capacity=8)
+        self.league = OpponentPool(
+            capacity=int(config.pool_capacity),
+            duplicate_step_tolerance=int(config.pool_duplicate_step_tolerance),
+            duplicate_distance_tolerance=float(config.pool_duplicate_distance_tolerance),
+        )
         self.curriculum = (
             Curriculum(stages_for_mode(config.mode)) if config.curriculum else None
         )
@@ -111,6 +116,9 @@ class Trainer:
         )
         self.run_best_score = float("-inf")
         self.started = time.time()
+        #: reliable training-time accounting (monotonic clock + persisted
+        #: accumulated total); see :mod:`rlai.timing`
+        self.clock = TrainingClock(self.run_id, pid=os.getpid())
         self.last_checkpoint_step = -1
         self.last_checkpoint_id: str | None = None
         self.final_manifest: dict | None = None
@@ -118,8 +126,40 @@ class Trainer:
         self.evaluation_seconds = 0.0
         self.checkpoint_seconds = 0.0
         self.evaluated_before = False
+        #: filled in by :meth:`_apply_resource_limits` before the workers start
+        self.resource_plan = None
+        #: id of the current session row in the database
+        self.session_id: int | None = None
+        #: metrics waiting for the next database write
+        self._pending_metrics: dict[str, tuple[int, float]] = {}
+        #: how many iterations passed since the last metric write
+        self._iterations_since_flush = 0
+        #: the adaptive-match-dynamics controller (created on demand)
+        self._adaptive = None
+        #: Torch thread budget of the *trainer* process.  Set before any
+        #: rollout is collected so the intended value is the one that is
+        #: actually used.
+        self.torch_threads = self._resolve_torch_threads()
+        self._apply_torch_threads(self.torch_threads)
 
     # -- logging -----------------------------------------------------------
+    @staticmethod
+    def _resolve_torch_threads() -> int:
+        """Torch threads for the learner process.
+
+        The learner runs one small MLP over a batch; it never benefits from
+        more threads than it has cores, and on a shared machine it is polite
+        to leave the rest to the simulator workers.
+        """
+        cores = os.cpu_count() or 1
+        return max(1, min(4, cores))
+
+    def _apply_torch_threads(self, threads: int) -> None:
+        try:
+            torch.set_num_threads(int(threads))
+        except Exception:  # pragma: no cover - platform specific
+            pass
+
     def _log(self, level: str, message: str) -> None:
         self.store.log(self.run_id, level, message)
         print(f"[{level.upper()}] {message}", flush=True)
@@ -130,7 +170,32 @@ class Trainer:
         self._log("WARNING", message)
 
     def _metric(self, name: str, value: float, step: int | None = None) -> None:
-        self.store.log_metric(self.run_id, self.step if step is None else step, name, float(value))
+        """Queue a metric for the next flush.
+
+        Writing every metric in its own transaction is pure overhead: one
+        iteration produces a few dozen values.  They are collected here
+        and written together, which keeps the database from becoming the
+        bottleneck of the training loop.
+        """
+        self._pending_metrics[name] = (
+            self.step if step is None else int(step),
+            float(value),
+        )
+
+    def _flush_metrics(self) -> None:
+        """Write the queued metrics in one transaction."""
+        if not self._pending_metrics:
+            return
+        pending = self._pending_metrics
+        self._pending_metrics = {}
+        rows: dict[int, dict[str, float]] = {}
+        for name, (step, value) in pending.items():
+            rows.setdefault(int(step), {})[name] = value
+        for step, values in rows.items():
+            try:
+                self.store.log_metrics(self.run_id, step, values)
+            except Exception as exc:  # never let the database kill a run
+                self._log("WARNING", f"could not write metrics: {exc}")
 
     # -- control -----------------------------------------------------------
     def _control(self) -> str | None:
@@ -240,12 +305,25 @@ class Trainer:
         path = Path(str(plan.checkpoint_path))
         payload = checkpoints.load_checkpoint(path)
         saved_config = PolicyConfig.from_dict(payload.get("policy_config"))
-        if saved_config.to_dict() != self.config.policy_config().to_dict():
-            raise ValueError(
-                "checkpoint policy architecture does not match this run: "
-                f"{saved_config.to_dict()} vs {self.config.policy_config().to_dict()}"
-            )
-        self.model.load_state_dict(payload["model"])
+        target_config = self.config.policy_config()
+        if saved_config.to_dict() != target_config.to_dict():
+            if plan.mode == "transfer":
+                # A transfer may use a different architecture as long as the
+                # observation and the action layout match: the layers whose
+                # shape changed are re-initialised, the rest is reused.
+                self._load_transfer_weights(payload, saved_config, target_config)
+            else:
+                raise ValueError(
+                    "checkpoint policy architecture does not match this run: "
+                    f"{saved_config.to_dict()} vs {target_config.to_dict()}"
+                )
+        else:
+            self.model.load_state_dict(payload["model"])
+        # The accumulated training time is restored after the step counter
+        # is known (below), because the inherited session belongs to the
+        # steps that were already trained.
+        saved_timing = (payload.get("extra") or {}).get("timing")
+        self._saved_timing = saved_timing if isinstance(saved_timing, dict) else None
 
         merged, overrides, inherited = merge_config(
             payload.get("training_config"), self.config, mode=plan.mode
@@ -271,6 +349,9 @@ class Trainer:
                 f"transfer learning from {path} (weights only, step counter restarts at 0)",
             )
             self.step = 0
+            # A transfer starts a new training lineage: the weights are
+            # reused, the training time is not.
+            self.clock.restore(None)
             return
 
         if payload.get("optimizer"):
@@ -319,10 +400,16 @@ class Trainer:
                 "checkpoint has no RNG state (older format); rollouts after the resume are "
                 "reproducible but not identical to an uninterrupted run"
             )
+        if isinstance(extra.get("adaptive"), dict) and extra["adaptive"]:
+            controller = self._adaptive_controller()
+            if controller is not None:
+                controller.restore(extra["adaptive"])
+                self._log("INFO", "restored the adaptive match dynamics state")
         # learning-rate annealing depends on the step counter; make the
         # optimiser agree with the restored position immediately
         for group in self.optimizer.param_groups:
             group["lr"] = learning_rate_at(self.config, self.step)
+        self._restore_training_time(plan)
         self._log(
             "INFO",
             f"resumed from {path} at step {self.step} (iteration {self.iteration}, "
@@ -337,10 +424,98 @@ class Trainer:
         except Exception:  # pragma: no cover - older databases without the column
             pass
 
+    def _load_transfer_weights(
+        self,
+        payload: dict,
+        saved_config: PolicyConfig,
+        target_config: PolicyConfig,
+    ) -> None:
+        """Load the weights of a checkpoint into a *different* architecture.
+
+        Only the layers whose shape matches are reused; the rest is
+        re-initialised and the run says so.  The observation size and the
+        action layout have to match, otherwise the weights would describe a
+        different problem.
+        """
+        if saved_config.obs_size != target_config.obs_size:
+            raise ValueError(
+                "the checkpoint was trained on a different observation layout "
+                f"({saved_config.obs_size} vs {target_config.obs_size} values); "
+                "a transfer needs the same observation"
+            )
+        source = payload.get("model") or {}
+        target = self.model.state_dict()
+        reused: list[str] = []
+        skipped: list[str] = []
+        new_state = {}
+        for name, tensor in target.items():
+            other = source.get(name)
+            if other is not None and hasattr(other, "shape") and other.shape == tensor.shape:
+                new_state[name] = other
+                reused.append(name)
+            else:
+                new_state[name] = tensor
+                skipped.append(name)
+        self.model.load_state_dict(new_state)
+        self._log(
+            "INFO",
+            f"transfer learning: reused {len(reused)} of {len(target)} tensors, "
+            f"re-initialised {len(skipped)} (the architecture changed)",
+        )
+        if skipped:
+            self._warn(
+                "the transferred checkpoint had a different architecture; "
+                f"{len(skipped)} layer(s) start from scratch: {', '.join(skipped[:6])}"
+            )
+
+    def _restore_training_time(self, plan: ResumePlan) -> None:
+        """Restore the accumulated training time of the continued run.
+
+        A checkpoint without duration metadata (an older format) leaves the
+        total unknown instead of inventing a value; the run then starts at
+        zero and the report says so.
+        """
+        saved_timing = getattr(self, "_saved_timing", None)
+        if not isinstance(saved_timing, dict) or saved_timing.get("accumulated_s") is None:
+            self.clock.restore(None)
+            self._warn(
+                "the checkpoint carries no training-time metadata; the accumulated "
+                "training time of this run starts at zero and the historical "
+                "duration is reported as unknown"
+            )
+            return
+        self.clock.restore(float(saved_timing["accumulated_s"]))
+        self._log(
+            "INFO",
+            f"restored accumulated training time: "
+            f"{self.clock.accumulated_s:.1f}s from the checkpoint",
+        )
+        # Make the inherited time visible in the session history, so the
+        # total of the run is complete and not only the last session.
+        parent = plan.parent_run or "an earlier run"
+        inherited_id = self.store.start_session(
+            self.run_id,
+            started_at=saved_timing.get("session_started_at") or utc_now_iso(),
+            start_step=0,
+            pid=os.getpid(),
+        )
+        self.store.finish_session(
+            inherited_id,
+            ended_at=saved_timing.get("measured_at") or utc_now_iso(),
+            duration_s=float(self.clock.accumulated_s),
+            status="inherited",
+            end_step=int(self.start_step),
+            note=f"inherited from run {parent}",
+        )
+
     def _save(self, *, label: str = "", force: bool = False) -> dict | None:
         if not force and self.step == self.last_checkpoint_step:
             return None
         started = time.perf_counter()
+        # The accumulated training time is measured with the monotonic clock
+        # and covers the sessions that actually ran - never the time the
+        # process was stopped.
+        accumulated = self.clock.accumulated_s + (self.clock.current_session_s or 0.0)
         manifest = save_checkpoint(
             self.models_dir,
             model_state=self.model.state_dict(),
@@ -360,6 +535,18 @@ class Trainer:
                 "resume_mode": self.resume_mode,
                 "start_step": self.start_step,
                 "side_randomization": bool(self.config.side_randomization),
+                "timing": {
+                    "accumulated_s": float(accumulated),
+                    "session_s": self.clock.current_session_s,
+                    "session_started_at": (
+                        self.clock.timer.started_at if self.clock.timer else None
+                    ),
+                    "measured_at": utc_now_iso(),
+                    "source": "monotonic clock",
+                },
+                "adaptive": (
+                    self._adaptive.state() if self._adaptive is not None else None
+                ),
             },
             label=label,
         )
@@ -367,6 +554,11 @@ class Trainer:
         self.last_checkpoint_step = self.step
         self.last_checkpoint_id = manifest["id"]
         self.final_manifest = manifest
+        self.store.update_run(
+            self.run_id,
+            last_checkpoint_at=manifest.get("created_at"),
+            last_checkpoint_id=manifest["id"],
+        )
         try:
             prune_candidates(self.models_dir, keep=self.config.keep_checkpoints, run_id=self.run_id)
         except Exception as exc:  # never let cleanup kill a run
@@ -375,6 +567,234 @@ class Trainer:
         self._metric("time/checkpoint_seconds", time.perf_counter() - started)
         self._log("INFO", f"checkpoint {manifest['id']} saved at step {self.step}")
         return manifest
+
+    # -- adaptive match dynamics --------------------------------------------
+    def _adaptive_controller(self):
+        """The controller that may adapt the scripted opponent.
+
+        It is created lazily and only when the feature is enabled: a
+        controller that is never used must not change anything.
+
+        The adaptation needs a difficulty level to start from, because the
+        level defines the opponent's execution quality.  A run against a
+        plain scripted opponent therefore gets a warning instead of a
+        controller - the opponent's behaviour would otherwise be replaced
+        by a difficulty profile.
+        """
+        if not self.config.adaptive_dynamics:
+            return None
+        if getattr(self, "_adaptive", None) is not None:
+            return self._adaptive
+        opponent = str(self.config.opponent or "")
+        level = opponent.split(":", 1)[1].strip() if opponent.startswith("difficulty:") else ""
+        if not level:
+            self._warn(
+                "the adaptive match dynamics need a difficulty opponent "
+                f"(opponent='difficulty:medium'); the configured opponent "
+                f"{opponent!r} keeps its own behaviour and is not adapted"
+            )
+            return None
+        from .adaptive import AdaptationLimits, AdaptationPolicy, AdaptiveController
+
+        self._adaptive = AdaptiveController(
+            level,
+            policy=AdaptationPolicy(
+                target_win_rate=float(self.config.adaptive_target_win_rate),
+                tolerance=float(self.config.adaptive_tolerance),
+                min_games_between_changes=int(self.config.adaptive_min_games),
+                min_seconds_between_changes=float(self.config.adaptive_min_seconds),
+                step=float(self.config.adaptive_step),
+                enabled=True,
+            ),
+            limits=AdaptationLimits(),
+            monotonic=time.monotonic,
+        )
+        return self._adaptive
+
+    def _opponent_execution(self) -> dict | None:
+        """The adapted execution parameters of the scripted opponent.
+
+        They are only sent when the adaptive match dynamics are enabled and
+        the controller has actually changed something - a trained policy is
+        never touched.
+        """
+        controller = getattr(self, "_adaptive", None)
+        if controller is None:
+            return None
+        return dict(controller.current)
+
+    def _apply_adaptation(self, episodes: list[dict]) -> dict | None:
+        """Feed the measured episodes to the adaptive controller.
+
+        Only the *scripted* opponent is adapted, and only inside the
+        configured limits.  A trained policy is never modified.
+        """
+        controller = self._adaptive_controller()
+        if controller is None or not episodes:
+            return None
+        games = len(episodes)
+        wins = sum(1 for episode in episodes if episode.get("result") == "win")
+        result = controller.observe(wins=wins, games=games, at=time.monotonic())
+        if result.get("adapted"):
+            self._log(
+                "INFO",
+                f"adaptive dynamics: {result['reason']}; the scripted opponent now "
+                f"uses mistake_rate={result['parameters']['mistake_rate']:.2f}, "
+                f"reaction_delay={result['parameters']['reaction_delay']:.2f}s, "
+                f"boost_efficiency={result['parameters']['boost_efficiency']:.2f}",
+            )
+            self._metric("adaptive/mistake_rate", result["parameters"]["mistake_rate"])
+            self._metric("adaptive/reaction_delay", result["parameters"]["reaction_delay"])
+            self._metric("adaptive/boost_efficiency", result["parameters"]["boost_efficiency"])
+        return result
+
+    # -- player memory ------------------------------------------------------
+    def _remember_players(self, episodes: list[dict]) -> None:
+        """Store what the agent learned about the players it met.
+
+        The memory is data about past encounters; it is kept in its own
+        table and never becomes part of the model weights.
+        """
+        if not self.config.player_memory or not episodes:
+            return
+        from .player_memory import memory_from_rows, rows_from_memory
+
+        memory = memory_from_rows(self.store.list_player_memory())
+        for episode in episodes:
+            name = episode.get("opponent") or "unknown"
+            memory.remember(
+                name,
+                won=(
+                    True
+                    if episode.get("result") == "win"
+                    else False
+                    if episode.get("result") == "loss"
+                    else None
+                ),
+                goals_for=int(episode.get("goals_for") or 0),
+                goals_against=int(episode.get("goals_against") or 0),
+                tag="match" if episode.get("policy_team") is not None else None,
+            )
+        memory.prune()
+        self.store.replace_player_memory(rows_from_memory(memory))
+
+    # -- retention ----------------------------------------------------------
+    def _apply_retention(self) -> None:
+        """Bound the size of the metric, log and episode tables.
+
+        The newest rows are kept, so the charts and the report still
+        describe the end of the run.  Pruning is a background chore: a
+        failure here must never end a run.
+        """
+        try:
+            removed = 0
+            if self.config.metric_retention:
+                removed += self.store.prune_metrics(self.run_id, self.config.metric_retention)
+            if self.config.episode_retention:
+                removed += self.store.prune_episodes(self.run_id, self.config.episode_retention)
+            if self.config.log_retention:
+                removed += self.store.prune_logs(self.run_id, self.config.log_retention)
+            if removed:
+                self._log("INFO", f"retention removed {removed} old rows")
+        except Exception as exc:  # pragma: no cover - defensive
+            self._log("WARNING", f"retention cleanup skipped: {exc}")
+
+    # -- time accounting ----------------------------------------------------
+    def _start_session(self) -> None:
+        """Open the training session and persist its start.
+
+        The session row is written *before* the first step, so a crash
+        leaves a trace that the recovery path can find.
+        """
+        started_at = utc_now_iso()
+        self.session_id = self.store.start_session(
+            self.run_id,
+            started_at=started_at,
+            start_step=self.step,
+            pid=os.getpid(),
+        )
+        self.clock.start_session(start_step=self.step, session_id=self.session_id)
+        timer = self.clock.timer
+        assert timer is not None
+        self.store.update_run(
+            self.run_id,
+            started_at=timer.started_at,
+            duration_s=self.clock.accumulated_s,
+        )
+
+    def _finish_session(self, status: str, *, note: str = "") -> None:
+        """Close the session and store its measured duration."""
+        if self.clock.timer is None:
+            # already closed (or never opened)
+            return
+        record = self.clock.stop_session(status, end_step=self.step, note=note)
+        if self.session_id is not None:
+            self.store.finish_session(
+                self.session_id,
+                ended_at=record.ended_at or utc_now_iso(),
+                duration_s=record.duration_s,
+                status=record.status,
+                end_step=self.step,
+                note=record.note,
+            )
+        self.store.update_run(
+            self.run_id,
+            duration_s=self.clock.accumulated_s,
+            session_duration_s=record.duration_s,
+        )
+        self._log(
+            "INFO",
+            f"session {record.status} after {record.duration_s or 0.0:.1f}s "
+            f"(accumulated training time {self.clock.accumulated_s:.1f}s)",
+        )
+
+    def _recover_interrupted_sessions(self) -> None:
+        """Close sessions that a previous process left open.
+
+        A crashed process cannot measure its own duration, so the session
+        is recorded as *interrupted* with an unknown duration.  The
+        accumulated total comes from the checkpoint, which is the last place
+        a measured value was written.
+        """
+        recovered = self.store.recover_interrupted_sessions(
+            self.run_id,
+            note="recovered after the process ended without closing the session",
+        )
+        if recovered:
+            self._warn(
+                f"{recovered} session(s) of this run were left open by a previous "
+                "process and are recorded as interrupted; their duration is unknown"
+            )
+
+    # -- resource limits ----------------------------------------------------
+    def _apply_resource_limits(self) -> None:
+        """Clamp the worker count to what this machine can actually run.
+
+        More workers do not automatically mean more throughput: every extra
+        RocketSim arena costs memory and a core, and past the core count the
+        workers simply take turns.  The clamp is applied *before* the pool
+        starts, and the decision is recorded as a warning so it shows up in
+        the report and in the GUI.
+        """
+        from .resources import plan_resources
+
+        plan = plan_resources(self.config.n_workers)
+        for warning in plan.warnings:
+            self._warn(warning)
+        for note in plan.notes:
+            self._log("INFO", note)
+        if plan.clamped and self.config.auto_worker_limit:
+            self._log(
+                "WARNING",
+                f"reducing workers from {self.config.n_workers} to "
+                f"{plan.recommended_workers} for this machine "
+                f"({plan.cpu_count} logical cores, "
+                f"{plan.memory_available_mb / 1024:.1f} GB free)",
+            )
+            self.config = self.config.model_copy(
+                update={"n_workers": int(plan.recommended_workers)}
+            )
+        self.resource_plan = plan
 
     # -- opponent selection --------------------------------------------------
     def _select_opponent(self) -> tuple[str | None, dict | None, str | None, str]:
@@ -387,11 +807,31 @@ class Trainer:
             if stage.opponent == "mixed":
                 name = str(self.rng.choice(["chase", "random"]))
                 return name, None, None, stage.name
+            if stage.opponent == "self":
+                # The pool has no playable snapshot yet (first iteration, or a
+                # checkpoint written without league states).  "self" is not a
+                # buildable opponent, so fall back to a scripted one instead
+                # of handing the worker a name it cannot resolve.
+                fallback = self._self_play_fallback()
+                return fallback, None, None, stage.name
             return stage.opponent, None, None, stage.name
         if self.config.self_play and self.league.usable:
             entry = self.league.sample(self.rng)
             return None, entry.state, entry.id, "self-play"
+        if self.config.opponent == "self":
+            return self._self_play_fallback(), None, None, "fixed"
         return self.config.opponent, None, None, "fixed"
+
+    def _self_play_fallback(self) -> str:
+        """Scripted opponent to use while no self-play snapshot exists yet."""
+        fallback = "chase" if self.config.opponent in ("self", "chase") else self.config.opponent
+        if fallback not in ("idle", "random", "chase") and not fallback.startswith("model:"):
+            fallback = "chase"
+        self._warn(
+            "self-play requested but the opponent pool has no playable snapshot; "
+            f"using the scripted {fallback!r} opponent until the first snapshot exists"
+        )
+        return fallback
 
     def _policy_teams(self) -> list[int] | None:
         """Per-worker team assignment (``None`` keeps everybody on blue)."""
@@ -440,6 +880,9 @@ class Trainer:
         seconds = time.perf_counter() - started
         self.evaluation_seconds += seconds
         self._metric("time/eval_seconds", seconds)
+        # the evaluation metrics belong to this step, so they are written
+        # together with the rest of the iteration
+        self._flush_metrics()
 
         result["phase"] = phase
         if phase == "before":
@@ -593,8 +1036,15 @@ class Trainer:
             f"starting run {self.run_id} mode={self.config.mode} device={self.device} "
             f"obs_v{self.config.obs_version} resume_mode={self.resume_mode}",
         )
+        self._recover_interrupted_sessions()
         if self.device.type == "cpu":
-            torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
+            # The thread budget was already applied in __init__; re-assert it
+            # here so a resumed run cannot inherit a different setting.
+            self._apply_torch_threads(self.torch_threads)
+            self._log(
+                "INFO",
+                f"torch threads for the learner: {self.torch_threads}",
+            )
 
         exit_status = "completed"
         exit_message = ""
@@ -607,6 +1057,8 @@ class Trainer:
                     {"step": self.step, "total_steps": self.config.total_steps}
                 ),
             )
+            self._apply_resource_limits()
+            self._start_session()
             self.pool = WorkerPool(self.config)
             self.store.update_run(self.run_id, status="running")
             self.league.add(f"initial-{self.run_id[:6]}", self.step, self._snapshot_state())
@@ -652,6 +1104,7 @@ class Trainer:
                     opponent_state=opponent_state,
                     opponent=opponent_name,
                     policy_teams=self._policy_teams(),
+                    opponent_execution=self._opponent_execution(),
                 )
                 collect_seconds = time.perf_counter() - started
 
@@ -680,6 +1133,8 @@ class Trainer:
 
                 episodes = [ep for rollout in rollouts for ep in rollout["episodes"]]
                 wins, losses, draws = _outcome_counts(episodes)
+                self._apply_adaptation(episodes)
+                self._remember_players(episodes)
                 if opponent_id:
                     self.league.record(opponent_id, wins, losses, draws)
                     self._metric("league/agent_elo", self.league.agent_elo)
@@ -738,6 +1193,12 @@ class Trainer:
                     ),
                 )
                 self._metric("time/iteration_seconds", time.perf_counter() - iteration_started)
+                # the queued metrics are written in one transaction, at
+                # most every ``metric_flush_interval`` iterations
+                self._iterations_since_flush += 1
+                if self._iterations_since_flush >= int(self.config.metric_flush_interval):
+                    self._flush_metrics()
+                    self._iterations_since_flush = 0
 
             if self.config.eval_interval and self.step > self.start_step:
                 self._run_evaluation(phase="after")
@@ -756,6 +1217,14 @@ class Trainer:
         finally:
             if self.pool is not None:
                 self.pool.close()
+            # The session is closed before the report is written, so the
+            # report contains the measured duration of this session.
+            try:
+                self._finish_session(exit_status)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log("WARNING", f"could not close the training session: {exc}")
+            self._flush_metrics()
+            self._apply_retention()
             self.store.update_run(
                 self.run_id,
                 status=exit_status,

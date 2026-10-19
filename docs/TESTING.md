@@ -12,6 +12,16 @@ python -m pytest -q
 
 | Bereich | Datei | Ergebnis |
 | --- | --- | --- |
+| Trainingszeit: monotoner Timer, Akkumulation über Sitzungen, unbekannte Historie, Sitzungs-CRUD | `test_timing.py` | bestanden |
+| Trainingszeit end-to-end: gemessene Sitzung, Checkpoint-Metadaten, Fortsetzung, Safe-Stop, Absturz-Rettung, kein Zählen der Standby-Zeit | `test_trainer_timing.py` | bestanden (slow) |
+| Statistik (Stats-Tab): Zeit, Fortschritt, Lernkurven, Checkpoints, Evaluation, Retention, unbekannte Werte | `test_stats.py` | bestanden |
+| Merkmale: Bot-Brain, Schwierigkeiten, Team-Builder, Spielerspeicher, Rivalen, adaptive Dynamik | `test_features.py` | bestanden |
+| Match-/Replay-Analyse: nur echte Messwerte, Replay-Parsing explizit nicht verfügbar | `test_analysis.py` | bestanden |
+| Ressourcenwächter: CPU-/Speicherbudget, Warnungen, abschaltbare Klemme | `test_resources.py` | bestanden |
+| Mikro-Benchmarks: Schwierigkeitsmechanik, Arena-Wiederverwendung, Thread-Budget | `test_benchmarks.py` | bestanden |
+| API der neuen Merkmale: Stats, Teams, Schwierigkeiten, Verhalten, Speicher, Rivalen, Analyse, Lab | `test_api_features.py` | bestanden |
+| Ausführungsmodi: Headless ohne Webdienst, Resume, Benchmarks-Kommando | `test_cli_modes.py` | bestanden |
+| Boost-Pad-Reihenfolge: RLBot (y,x) vs. RocketSim, Permutation, Live-Arena-Abgleich | `test_boost_pad_order.py` | bestanden |
 | Moduskatalog, Konfigurationsvalidierung | `test_modes.py` | bestanden |
 | Aktionstabelle (90 Aktionen, Grenzen, Mapping aller Indizes) | `test_actions.py` | bestanden |
 | Alle vier Modi: Reset/Step, Beobachtungsform, Padding, Seed | `test_env_modes.py` | bestanden |
@@ -47,7 +57,7 @@ python -m pytest -q
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
 | Exposure-Settings: Loopback-Standard, Host-/Port-/CORS-Validierung, Token-Warnung, `serve` | `test_app_settings.py` | bestanden |
 
-**Gesamt: 277 passed, 0 failed, 0 skipped** (ca. 34 s, 2 vCPU), `ruff check src
+**Gesamt: 464 passed, 0 failed, 0 skipped** (ca. 2 min, 2 vCPU), `ruff check src
 tests rlbot` sauber. Die einzigen verbleibenden Warnungen stammen aus
 `starlette`/`anyio` (Drittanbieter), nicht aus diesem Projekt.
 
@@ -58,6 +68,56 @@ fehlschlagen:
 cd tests/gui && npm install && npm test     # einmalig bzw. direkt
 python -m pytest tests/test_gui_smoke.py -q # läuft automatisch mit
 ```
+
+## Projekt-Mikro-Benchmarks (`python -m rlai.cli benchmarks`)
+
+Drei Messungen, die jeweils eine konkrete Frage beantworten. Sie laufen ohne
+Training und ohne GUI:
+
+| Benchmark | Was er misst | Ergebnis in dieser Umgebung |
+| --- | --- | --- |
+| `difficulty` | Ballberührungen des skriptgesteuerten Gegners je Stufe (3×500 Schritte) | rock 28 · tiny 27 · medium 36 · pro 42 (Spreizung 15) |
+| `evaluation_arena_reuse` | Kosten einer Eval-Serie (4 Spiele) mit Arena-Wiederverwendung gegenüber dem reinen Arena-Aufbau | 0,518 s Wiederverwendung (inkl. Simulation) · 0,144 s allein der Arena-Aufbau von 4 frischen Arenas |
+| `threads` | Kosten einer Forward-Passage je Torch-Thread-Zahl | 1 Thread 2 693/s · 2 Threads 2 900/s · 4 Threads 956/s |
+
+Die Schwierigkeitsmessung belegt, dass der *Mechanismus* (Fehlerrate,
+Reaktionszeit, Boost-Effizienz) die Spielweise messbar verändert. Sie belegt
+**nicht**, dass die Zielwerte 0/50/75/100 % erreicht sind – das braucht eine
+vollständige Evalutionsserie je Stufe. Die Prozentzahlen bleiben im Code und
+in der GUI als *Zielwerte* markiert (`target_is_measured = false`).
+
+Die Thread-Messung zeigt, warum der Trainer den Thread-Budget nicht
+standardmäßig erhöht: bei diesem kleinen MLP kostet der Wechsel auf vier
+Threads mehr, als er bringt (2 vCPU in dieser Umgebung).
+
+## Gemessene Trainingszeit (diese Umgebung)
+
+Zwei reale Läufe über die CLI (`rlai headless`), 1 Worker, `hidden=[16]`:
+
+| Lauf | Art | Schritte | Sitzungen | Akkumulierte Trainingszeit |
+| --- | --- | --- | --- | --- |
+| `a69a85a6b4dc` | fresh | 0 → 2 048 | 1 (`completed`, 4,41 s) | 4,41 s |
+| `run-b` | continue aus `a69a85a6b4dc` | 2 048 → 4 096 | 2 (`inherited` 4,11 s + `completed` 4,81 s) | 8,91 s |
+
+Die Fortsetzung liest `restored accumulated training time: 4.1s from the
+checkpoint`. Der geerbte Wert (4,11 s) ist die Zeit, die bis zum Schreiben
+des Checkpoints gemessen war; die eigene Sitzung misst 4,81 s. Die
+Sitzungstabelle trennt beides, und die Summe ist exakt die akkumulierte
+Trainingszeit. Die Zeit zwischen den Läufen (Prozess gestoppt) wird nicht
+mitgezählt. Im Checkpoint steht
+`timing: {accumulated_s, session_s, session_started_at, measured_at,
+source: "monotonic clock"}`; ältere Checkpoints ohne diese Angaben bleiben
+ladbar und melden die historische Dauer als *unbekannt*.
+
+## Headless-Modus (ohne GUI-Dienste)
+
+`python -m rlai.cli headless --config-file <cfg>` startet **keinen**
+Webdienst und keine Browser-Überwachung. Der Abschlussbericht
+(`rlai-headless-summary-v1`) enthält: gemessene Gesamtzeit, aktuelle Sitzung,
+Schritte, Durchsatz, Lernmetriken, Episoden, Evaluation, Checkpoint,
+Abbruchstatus. `POST /api/runs` verlangt zusätzlich `confirm=true` – dieselbe
+Bestätigung, die der GUI-Dialog einholt; eine unbestätigte Anfrage startet
+keinen Lauf.
 
 ## Gemessene Fortsetzung über die CLI (diese Umgebung)
 
@@ -230,6 +290,11 @@ aufwendigere Kollisionen).
 | Langzeittraining / Spielstärke | bewusst nicht gestartet (Ressourcen, keine belastbare Basis) |
 | Parität mit echten GamePackets | nur synthetische Pakete aus Simulatorzuständen |
 | Maus-/Tastatur-Interaktion im Dashboard | Klickpfade über API getestet; die neuen Live-Schaltflächen wurden hier nicht in einem Browser gerendert |
+| Zielwerte der Schwierigkeitsstufen (0/50/75/100 %) | **keine Messung**: gemessen wurde nur der Mechanismus (Ballberührungen). Eine Validierung braucht je Stufe eine vollständige Evalutionsserie |
+| Parsen echter Rocket-League-Replays | kein Replay-Parser verfügbar; die Analyse nutzt die protokollierten Spiel- und Episodenzeilen und sagt das im UI auch |
+| Speicherpfad des Wettbewerbs- und Spieler-Gedächtnisses über einen echten Langlauf | nur Unit- und API-Tests mit künstlichen Zeilen |
+| Adaptive Match Dynamics über mehrere Stufen | Unit-Tests decken Grenzen, Hysterese und Zustandswiederherstellung ab; ein langer Lauf hat es hier nicht gegeben |
+| Wirkung der adaptiven Dynamik über mehrere Anpassungen | in einem 60 000-Schritte-Smoke einmal gemessen (0 % Siegquote → Gegner leichter: `mistake_rate` 0,18 → 0,38); eine Serie über mehrere Anpassungen gab es hier nicht |
 
 ## Bekannte Warnungen
 

@@ -123,7 +123,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         run_id = store.create_run(
             config.run_name, config.mode, config.to_dict(), config.total_steps
         )
-        store.log(run_id, "INFO", f"run created from CLI (resume_mode={resume_mode})")
+    store.log(run_id, "INFO", f"run created from CLI (resume_mode={resume_mode})")
     result = run_training(
         config,
         run_id,
@@ -132,8 +132,64 @@ def cmd_train(args: argparse.Namespace) -> int:
         resume_mode=resume_mode,
         resume_plan=plan,
     )
+    if getattr(args, "headless", False):
+        # Headless mode prints one compact final report instead of the full
+        # result dictionary: total training time, steps, throughput, the
+        # learning metrics, the checkpoint and the termination status.
+        _print(_headless_summary(store, run_id, result))
+        return 0 if result["status"] in {"completed", "stopped"} else 1
     print(json.dumps(result, default=str))
     return 0 if result["status"] in {"completed", "stopped"} else 1
+
+
+def _headless_summary(store: Store, run_id: str, result: dict) -> dict:
+    """The compact final report of a headless training run."""
+    from .report import build_run_report
+    from .stats import learning_block, timing_block
+
+    run = store.get_run(run_id) or {}
+    paths = ensure_dirs()
+    report = build_run_report(store, run_id, models_dir=paths["models"])
+    timing = timing_block(store, run)
+    learning = learning_block(store, run)
+    learning = learning if isinstance(learning, dict) and "available" not in learning else {}
+    return {
+        "schema": "rlai-headless-summary-v1",
+        "run_id": run_id,
+        "status": result.get("status"),
+        "message": result.get("message"),
+        "termination": {
+            "status": result.get("status"),
+            "reason": result.get("message"),
+            "stopped_by_user": result.get("status") == "stopped",
+        },
+        "timing": {
+            "accumulated_s": timing.get("accumulated_s"),
+            "accumulated_human": timing.get("accumulated_human"),
+            "session_count": timing.get("session_count"),
+            "interrupted_count": timing.get("interrupted_count"),
+            "started_at": timing.get("started_at"),
+            "ended_at": timing.get("ended_at"),
+        },
+        "steps": {
+            "completed": report.get("steps", {}).get("completed"),
+            "target": report.get("steps", {}).get("target"),
+            "start": report.get("steps", {}).get("start"),
+            "end": report.get("steps", {}).get("end"),
+        },
+        "throughput": {
+            "steps_per_second": report.get("steps_per_second"),
+            "iteration_steps_per_second": (report.get("throughput") or {}).get(
+                "iteration_steps_per_second"
+            ),
+        },
+        "learning": learning,
+        "episodes": (report.get("episodes") or {}).get("all_time"),
+        "evaluation": report.get("evaluation"),
+        "checkpoint": report.get("final_checkpoint"),
+        "warnings": report.get("warnings", []),
+        "report_path": result.get("report"),
+    }
 
 
 def cmd_resume_plan(args: argparse.Namespace) -> int:
@@ -294,6 +350,14 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_benchmarks(args: argparse.Namespace) -> int:
+    """Run the project's own micro-benchmarks (no training, no GUI)."""
+    from .benchmarks import run_all
+
+    _print(run_all())
+    return 0
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     from .live import LiveUnavailable, launch_match, list_matches, preflight
 
@@ -365,11 +429,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the resume plan and exit without training anything",
     )
     train.add_argument("--max-steps", type=int, default=None)
+    train.add_argument(
+        "--headless",
+        action="store_true",
+        help=(
+            "headless mode: run the training without any GUI service and print a "
+            "compact final report (duration, steps, throughput, checkpoints, status)"
+        ),
+    )
     train.set_defaults(func=cmd_train)
 
     plan = sub.add_parser(
         "resume-plan", help="show which checkpoint a resume would restore (never trains)"
     )
+    headless = sub.add_parser(
+        "headless",
+        help="run a training job without the GUI and print a compact final report",
+    )
+    headless.add_argument("--config-file", required=True)
+    headless.add_argument("--run-id", default=None)
+    headless.add_argument("--resume-from", default=None)
+    headless.add_argument("--auto-resume", action="store_true")
+    headless.add_argument(
+        "--resume-mode",
+        default=None,
+        choices=["fresh", "continue", "transfer"],
+        help="fresh (default), continue (restore everything) or transfer (weights only)",
+    )
+    headless.add_argument("--plan-only", action="store_true")
+    headless.add_argument("--max-steps", type=int, default=None)
+    headless.set_defaults(func=cmd_train, headless=True)
     plan.add_argument("--config-file", required=True)
     plan.add_argument("--mode", default="continue", choices=["fresh", "continue", "transfer"])
     plan.add_argument("--run-id", default=None)
@@ -443,6 +532,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-inference", action="store_true", help="skip the separate inference measurement"
     )
     bench.set_defaults(func=cmd_benchmark)
+
+    bench_micro = sub.add_parser(
+        "benchmarks",
+        help="run the project's micro-benchmarks (difficulty, arena reuse, threads)",
+    )
+    bench_micro.set_defaults(func=cmd_benchmarks)
 
     live = sub.add_parser("live", help="launch a live RLBot match (Windows)")
     live.add_argument("--mode", default="soccer-1v1")

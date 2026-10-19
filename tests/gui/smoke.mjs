@@ -6,12 +6,50 @@ import { JSDOM } from "jsdom";
 const repo = process.argv[2] || "/home/user/rocket-league-ai";
 const html = readFileSync(`${repo}/src/rlai/web/index.html`, "utf8");
 const script = readFileSync(`${repo}/src/rlai/web/app.js`, "utf8");
+const statsScript = readFileSync(`${repo}/src/rlai/web/stats.js`, "utf8");
+const featuresScript = readFileSync(`${repo}/src/rlai/web/features.js`, "utf8");
 
 const report_before = {
   opponent: "chase", games: 4, wins: 1, losses: 3, draws: 0, win_rate: 0.1, goals_for: 2, goals_against: 6,
 };
 const report_after = {
   opponent: "chase", games: 4, wins: 2, losses: 2, draws: 0, win_rate: 0.4, goals_for: 5, goals_against: 4,
+};
+
+const statsPayload = {
+  available: true,
+  run_id: "run-1",
+  status: "completed",
+  name: "smoke run",
+  mode: "soccer-1v1",
+  timing: {
+    available: true,
+    accumulated_s: 125.5,
+    accumulated_human: "2m 05s",
+    current_session_s: 12.25,
+    current_session_human: "12 s",
+    session_count: 2,
+    interrupted_count: 0,
+    started_at: "2026-10-18T10:00:01+00:00",
+    ended_at: "2026-10-18T10:00:06+00:00",
+    last_checkpoint_at: "2026-10-18T10:00:05+00:00",
+    sessions: [
+      { started_at: "2026-10-18T10:00:01+00:00", ended_at: "2026-10-18T10:00:05+00:00", duration_s: 4.2, duration_human: "4 s", status: "completed", start_step: 1000, end_step: 3048, note: "" },
+      { started_at: "2026-10-18T11:00:01+00:00", ended_at: null, duration_s: null, status: "running", start_step: 3048, end_step: 3048, note: "" },
+    ],
+  },
+  progress: { status: "running", step: 3048, total_steps: 4096, resumed_step: 1000, progress: 0.7441, episodes: { available: true, count: 12, win_rate: 0.25, mean_reward: 0.6 }, episode_count: 12, iterations: 16, mode: "soccer-1v1", name: "smoke run" },
+  learning: { "charts/episodic_return": { last: 0.6, mean: 0.4, min: 0.1, max: 0.9, count: 16 }, "losses/policy": { last: -0.001, mean: -0.002, min: -0.01, max: 0, count: 16 }, "time/sps": { last: 1042, mean: 1000, min: 900, max: 1100, count: 16 } },
+  curves: { "charts/episodic_return": [{ step: 1000, value: 0.1 }, { step: 2000, value: 0.6 }], "charts/win_rate": [{ step: 1000, value: 0.1 }], "losses/policy": [{ step: 1000, value: -0.002 }], "losses/explained_variance": [] },
+  performance: { steps_per_second: 409.6, resources: { cpu_percent: 12, cpu_count: 2, memory_percent: 40, memory_used_gb: 1.2, memory_total_gb: 3, gpu: null, process: { rss_mb: 120, threads: 8 } } },
+  checkpoints: [{ id: "m-2026", step: 3048, created_at: "2026-10-18T10:00:06+00:00", duration_s: 120.25, duration_human: "2m 00s", duration_available: true, label: "final", state: "candidate", stable: false, best: true, size_bytes: 123456, eval_score: 0.4 }],
+  comparison: { available: true, count: 1, best: { id: "m-2026", step: 3048, eval_score: 0.4, duration_s: 120.25 }, ranking: [{ id: "m-2026", step: 3048, eval_score: 0.4, duration_s: 120.25, duration_human: "2m 00s" }] },
+  evaluation: { available: true, count: 1, per_opponent: [{ opponent: "chase", games: 4, wins: 2, losses: 1, draws: 1, win_rate: 0.5, evaluations: 1 }], evaluations: [] },
+  history: [
+    { started_at: "2026-10-18T10:00:01+00:00", ended_at: "2026-10-18T10:00:05+00:00", duration_s: 4.2, status: "completed", start_step: 1000, end_step: 3048, note: "" },
+    { started_at: "2026-10-18T11:00:01+00:00", ended_at: null, duration_s: null, status: "running", start_step: 3048, end_step: 3048, note: "" },
+  ],
+  retention: { rows: 420, names: 39 },
 };
 
 const report = {
@@ -182,6 +220,15 @@ const routes = {
   "/api/runs/run-1/metrics": [{ name: "time/sps", value: 1042, step: 3048 }, { name: "time/collect_seconds", value: 0.11, step: 3048 }, { name: "charts/episodic_return", value: 0.6, step: 3048 }, { name: "charts/win_rate", value: 0.1, step: 3048 }],
   "/api/runs/run-1/logs?limit=200": [{ id: 1, ts: 1760000000, level: "INFO", message: "hello" }],
   "/api/live/status": { platform: "Linux", is_windows: false, stable_model: models[0], rlbot_installed: false, launch_supported: false, note: "needs Windows" },
+  "/api/stats": statsPayload,
+  "/api/stats/overview": { runs: [{ id: "run-1", name: "smoke run", mode: "soccer-1v1", status: "completed", step: 3048, total_steps: 4096, accumulated_s: 125.5, accumulated_human: "2m 05s", session_count: 2, interrupted_count: 0, started_at: "2026-10-18T10:00:01+00:00", last_checkpoint_at: "2026-10-18T10:00:05+00:00" }], count: 1 },
+  "/api/teams": { teams: [{ name: "test team", mode: "soccer-1v1", description: "demo", bots: [{ name: "bot-1", difficulty: "medium", behaviour: "balanced" }], average_difficulty_target: 0.75, updated_at: "2026-10-18T10:00:00+00:00" }], count: 1 },
+  "/api/difficulties": { profiles: [{ name: "rock", label: "Rock", target_win_rate: 0, mistake_rate: 0.75, reaction_delay: 1.2, boost_efficiency: 0.15, behaviour: "defensive", description: "Almost never does the right thing." }, { name: "tiny", label: "Tiny", target_win_rate: 0.5, mistake_rate: 0.4, reaction_delay: 0.6, boost_efficiency: 0.45, behaviour: "balanced", description: "Reaches the ball most of the time." }, { name: "medium", label: "Medium", target_win_rate: 0.75, mistake_rate: 0.18, reaction_delay: 0.25, boost_efficiency: 0.75, behaviour: "balanced", description: "Competent basics." }, { name: "pro", label: "Pro", target_win_rate: 1, mistake_rate: 0.02, reaction_delay: 0.05, boost_efficiency: 1, behaviour: "aggressive", description: "Plays the whole field." }], targets_are_measured: false, note: "the percentages are design targets that still need validation", behaviours: {} },
+  "/api/bot-behaviour": { profiles: [{ name: "balanced", description: "Chases the ball.", parameters: { aggression: 0.5, boost_eagerness: 0.6, rotation: 0.6, shot_preference: 0.5, safety: 0.6, context_sensitivity: 0, reaction_delay: 0, mistake_rate: 0 } }] },
+  "/api/player-memory": { summary: { players: 1, games: 4, wins: 2, losses: 1, draws: 1, win_rate: 0.5, goals_for: 3, goals_against: 2, max_entries: 500, max_age_days: 90 }, players: [{ name: "chaser", games: 4, wins: 2, losses: 1, draws: 1, win_rate: 0.5, goals_for: 3, goals_against: 2, last_seen: 1760000000, note: "fast" }], note: "the player memory is data about past encounters" },
+  "/api/rivals": { count: 1, rivals: [{ name: "chaser", kind: "checkpoint", reference: "m-2026", games: 4, wins: 2, losses: 1, draws: 1, win_rate: 0.5, goal_diff: 1, evaluations: 1 }], ranking: [], bottleneck: { available: true, name: "chaser", win_rate: 0.5, games: 4, goal_diff: 1 } },
+  "/api/lab": { models: [{ id: "m-2026", step: 3048, created_at: "2026-10-18T10:00:06+00:00", eval_score: 0.4, duration_s: 5, state: "candidate" }], opponents: { strength: ["chase"], diagnostic: ["idle"] }, recent_evaluations: [{ id: "e-1", model_id: "m-2026", opponent: "chase", games: 4, wins: 2, losses: 1, draws: 1, details: { win_rate: 0.5 }, phase: "manual", created_at: "2026-10-18T10:00:06+00:00" }], note: "an experiment is only executed when the GUI asks for a confirmation" },
+  "/api/analysis": { schema: "rlai-match-analysis-v1", replays: { available: false, reason: "no replay parser is available" }, evaluations: { available: true, source: "evaluation game rows", games: 2, summary: { games: 2, wins: 1, losses: 1, draws: 0, win_rate: 0.5, goals_for: 2, goals_against: 1, mean_touches: 4.5 }, by_opponent: [{ opponent: "chase", games: 2, wins: 1, losses: 1, draws: 0, win_rate: 0.5, goals_for: 2, goals_against: 1, mean_touches: 4.5 }], by_side: [], timeline: [] }, episodes: { available: false, reason: "no episode" } },
 };
 
 const postRoutes = {
@@ -199,10 +246,15 @@ function makeFetch() {
   return async (url, options = {}) => {
     const method = (options.method || "GET").toUpperCase();
     calls.push(`${method} ${url}`);
-    const key = String(url).split("?")[0] === "/api/events" ? url : url;
+    // the event stream needs its query, every other route is matched with
+    // and without the query string
+    const raw = String(url);
+    const bare = raw.split("?")[0];
+    const key = bare === "/api/events" ? raw : raw;
+    const bareKey = bare === "/api/events" ? raw : bare;
     let payload;
-    if (method === "GET") payload = routes[key];
-    else payload = postRoutes[key];
+    if (method === "GET") payload = routes[key] !== undefined ? routes[key] : routes[bareKey];
+    else payload = postRoutes[key] !== undefined ? postRoutes[key] : postRoutes[bareKey];
     if (typeof payload === "function") payload = payload(JSON.parse(options.body || "{}"));
     if (payload === undefined) {
       return { ok: false, status: 404, statusText: "Not Found", text: async () => JSON.stringify({ detail: `no canned response for ${method} ${key}` }) };
@@ -219,6 +271,9 @@ window.scrollTo = () => {};
 window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
 window.HTMLDialogElement.prototype.close = function () { this.open = false; };
 window.eval(`${script}\n;window.__test = { views, render, app, api, setToken, renderResumePlan, evaluationFormHtml, splitList, chip, measured, eventUrl };`);
+// the feature modules attach their views to the shared registry
+window.eval(`${statsScript}\n`);
+window.eval(`${featuresScript}\n`);
 const test = window.__test;
 if (!test) throw new Error("app.js did not expose its internals");
 // let the app's own DOMContentLoaded boot render finish before we drive the views
@@ -327,6 +382,47 @@ await view("monitoring", "#/monitoring?run=run-1", (html) => {
   check("monitoring links the report", html.includes("#/report?run=run-1"));
 });
 
+await view("stats", "#/stats", (html) => {
+  check("stats shows the current session duration", html.includes("Current session"));
+  check("stats shows the accumulated training time", html.includes("Accumulated training time"));
+  check("stats shows the environment steps", html.includes("Environment steps"));
+  check("stats shows the throughput", html.includes("Throughput"));
+  check("stats shows the learning metrics table", html.includes("Policy loss") && html.includes("Approx. KL"));
+  check("stats shows the checkpoint table", html.includes("Checkpoints") && html.includes("m-2026"));
+  check("stats shows the evaluation table", html.includes("Opponent") && html.includes("chase"));
+  check("stats shows the session history", html.includes("Session history"));
+  check("stats shows the training history", html.includes("Training history"));
+  check("stats marks an unknown duration", html.includes("unknown"));
+  check("stats uses the local time zone", html.includes("Training time"));
+});
+
+await view("teams", "#/teams", (html) => {
+  check("teams lists the saved team", html.includes("test team"));
+  check("teams offers the difficulty levels", html.includes("Rock") && html.includes("Pro"));
+  check("teams marks the percentage as a target", html.includes("target"));
+  check("teams shows the behaviour profiles", html.includes("Bot behaviour"));
+  check("teams has the bot editor", html.includes("bot-difficulty") && html.includes("bot-behaviour"));
+  check("teams warns about the unmeasured targets", html.includes("design targets"));
+});
+
+await view("memory", "#/memory", (html) => {
+  check("memory lists the known players", html.includes("chaser"));
+  check("memory shows the summary", html.includes("Known players"));
+  check("memory separates the memory from the weights", html.includes("never model weights"));
+  check("memory lists the rivals", html.includes("Rivals"));
+  check("memory offers the export", html.includes("/api/player-memory/export"));
+  check("memory offers the reset", html.includes("reset-memory"));
+});
+
+await view("lab", "#/lab", (html) => {
+  check("lab offers the experiment form", html.includes("lab-opponents") && html.includes("lab-games"));
+  check("lab lists the checkpoints", html.includes("m-2026"));
+  check("lab shows the recent evaluations", html.includes("Recent evaluations"));
+  check("lab shows the match analysis", html.includes("Match analysis"));
+  check("lab states that replays are unavailable", html.includes("no replay parser"));
+  check("lab separates plan and run", html.includes("lab-plan") && html.includes("lab-run"));
+});
+
 // token handling
 test.setToken("secret");
 check("token is stored", window.localStorage.getItem("rlai.token") === "secret");
@@ -340,6 +436,10 @@ check("token can be cleared", window.localStorage.getItem("rlai.token") === null
 check("splitList trims and drops empties", JSON.stringify(test.splitList(" a, ,b ")) === '["a","b"]');
 check("measured labels unavailable values", test.measured({ available: false, reason: "nope" }).includes("unavailable"));
 check("renderResumePlan handles a refusal", test.renderResumePlan({ mode: "continue", will_resume: false, explicit_unavailable: true, warnings: ["bad"], rejected: [{ id: "x", reasons: ["architecture mismatch"] }] }).includes("architecture mismatch"));
+
+// a training start is only sent after the confirmation dialog was accepted
+check("the start request carries the confirmation", script.includes("payload.confirm = true"));
+check("the start is behind the confirmation dialog", /confirmAction\(`Start \$\{mode\} training`/.test(script));
 
 dom.window.close();
 if (failures.length) {

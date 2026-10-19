@@ -27,6 +27,7 @@ from rlai.modes import get_mode  # noqa: E402
 from rlai.obs import mirror_observation, version_for_obs_size  # noqa: E402
 from rlai.policy import TorchPolicy  # noqa: E402
 from rlai.rlbot.obs_adapter import packet_to_observation  # noqa: E402
+from rlai.rlbot.pad_order import field_info_matches_canonical  # noqa: E402
 
 BLUE_TEAM = 0
 ORANGE_TEAM = 1
@@ -131,6 +132,7 @@ class RocketLeagueAIBot(Bot):
         self.decisions = 0
         self.errors = 0
         self._check_checkpoint()
+        self._check_stadium()
         self.logger.info(
             "Rocket League AI ready | model=%s mode=%s obs_version=%d tick_skip=%d team=%s "
             "index=%s trained_side=%s mirror=%s",
@@ -142,6 +144,34 @@ class RocketLeagueAIBot(Bot):
             self.index,
             self.trained_side,
             self.mirror,
+        )
+
+    def _check_stadium(self) -> None:
+        """Confirm the live arena matches the stadium the policy was trained on.
+
+        The observation carries one timer per boost pad, so a different
+        stadium would silently feed the policy meaningless values.  RLBot
+        delivers the static field information once per match; the check runs
+        then.  A missing field info is not an error - the game may simply not
+        have sent it yet - but a *mismatch* is logged loudly.
+        """
+        field_info = getattr(self, "field_info", None)
+        pads = getattr(field_info, "boost_pads", None) if field_info is not None else None
+        if not pads:
+            return
+        result = field_info_matches_canonical(pads)
+        if not result.get("available"):
+            return
+        if result.get("ok"):
+            self.logger.info(
+                "stadium check ok: %s boost pads match the training layout",
+                len(pads),
+            )
+            return
+        self.logger.warning(
+            "stadium check FAILED: %s. The boost-pad observation block will not "
+            "describe this arena; drive with care or retrain on this stadium.",
+            result.get("reason"),
         )
 
     def _check_checkpoint(self) -> None:
