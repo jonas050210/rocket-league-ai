@@ -57,6 +57,5 @@
   "eval_sides": [
     "blue",
     "orange"
-  ],
-  "clip_value": 0.5
+  ]
 }

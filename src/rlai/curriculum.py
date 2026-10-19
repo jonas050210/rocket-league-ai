@@ -81,7 +81,16 @@ class Stage:
                 f"least min_episodes ({self.min_episodes}), otherwise the target can "
                 "never be reached"
             )
-        if self.opponent not in {"idle", "random", "chase", "mixed", "self"}:
+        if self.opponent.startswith("difficulty:"):
+            from .difficulty import DIFFICULTY_NAMES
+
+            level = self.opponent.split(":", 1)[1]
+            if level not in DIFFICULTY_NAMES:
+                raise ValueError(
+                    f"curriculum stage {self.name!r}: unknown difficulty level "
+                    f"{level!r} (use one of {sorted(DIFFICULTY_NAMES)})"
+                )
+        elif self.opponent not in {"idle", "random", "chase", "mixed", "self"}:
             raise ValueError(
                 f"curriculum stage {self.name!r}: unknown opponent {self.opponent!r}"
             )
@@ -154,11 +163,11 @@ DEFAULT_STAGES: tuple[Stage, ...] = (
     # Skill: keep scoring (and stop conceding) against an active chaser.
     Stage(
         "chase", "chase", min_iterations=10, win_rate=0.3, min_episodes=40,
-        episode_seconds=30.0, demote_win_rate=0.05,
+        reset_mode="mixed", episode_seconds=30.0, demote_win_rate=0.05,
     ),
     Stage(
         "mixed", "mixed", min_iterations=10, win_rate=0.4, min_episodes=40,
-        episode_seconds=45.0, demote_win_rate=0.1,
+        reset_mode="mixed", episode_seconds=45.0, demote_win_rate=0.1,
     ),
     Stage("self-play", "self", min_iterations=1, win_rate=1.0, min_episodes=1,
           episode_seconds=45.0),
@@ -180,9 +189,9 @@ TEAM_STAGES: tuple[Stage, ...] = (
         reset_mode="drill", episode_seconds=20.0, min_touches=2.0,
     ),
     Stage("chase", "chase", min_iterations=8, win_rate=0.3, min_episodes=30,
-          episode_seconds=30.0, demote_win_rate=0.05),
+          reset_mode="mixed", episode_seconds=30.0, demote_win_rate=0.05),
     Stage("mixed", "mixed", min_iterations=10, win_rate=0.4, min_episodes=40,
-          episode_seconds=45.0, demote_win_rate=0.1),
+          reset_mode="mixed", episode_seconds=45.0, demote_win_rate=0.1),
     Stage("self-play", "self", min_iterations=1, win_rate=1.0, min_episodes=1,
           episode_seconds=45.0),
 )

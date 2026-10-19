@@ -106,14 +106,23 @@ class ResetMutator(KickoffMutator):
     almost never experiences the states that matter (ball close, ball near
     the goal, shooting angles), so goal credit has nothing to attach to.
 
-    ``drill`` starts place the ball at a random field position (sometimes
-    rolling) and every car on its own defensive side of the ball, 700-2600 uu
-    away and facing it: the agent practices the last two seconds of an attack
-    thousands of times instead of hoping to stumble into them.  ``mixed``
-    flips a coin per episode.  The mode is read from
-    ``shared_info['reset_mode']`` on every reset, so a curriculum stage can
-    change it without rebuilding the arena.  Randomness comes from the
-    ``random`` module, which :meth:`MatchEnv.reset` seeds deterministically.
+    ``drill`` starts sample one of three scenarios per episode:
+
+    * **attack** (55 %): ball at a random position (sometimes rolling),
+      every car on its own defensive side of the ball - the last seconds of
+      an attack, thousands of times;
+    * **defense** (25 %): ball rolling toward the learning team's goal
+      (``shared_info['drill_team']``, set by :class:`MatchEnv`), its cars
+      goal-side of the ball - saves and clearances, which kickoff-only
+      training against a passive opponent never teaches;
+    * **race** (20 %): slow ball near midfield, both teams at comparable
+      distances - contested first touches and 50/50s.
+
+    ``mixed`` flips a coin between kickoff and drill per episode.  The mode
+    is read from ``shared_info['reset_mode']`` on every reset, so a
+    curriculum stage can change it without rebuilding the arena.
+    Randomness comes from the ``random`` module, which
+    :meth:`MatchEnv.reset` seeds deterministically.
     """
 
     def apply(self, state: GameState, shared_info: dict[str, Any]) -> None:
@@ -123,26 +132,55 @@ class ResetMutator(KickoffMutator):
         if mode != "drill":
             super().apply(state, shared_info)
             return
-        ball_x = random.uniform(-2500.0, 2500.0)
-        ball_y = random.uniform(-3500.0, 3500.0)
-        state.ball.position = np.array([ball_x, ball_y, 93.0], dtype=np.float32)
-        if random.random() < 0.5:
-            angle = random.uniform(0.0, 2.0 * np.pi)
-            speed = random.uniform(0.0, 600.0)
+        drill_team = int(shared_info.get("drill_team", BLUE_TEAM))
+        roll = random.random()
+        scenario = "attack" if roll < 0.55 else ("defense" if roll < 0.80 else "race")
+        if scenario == "defense":
+            # ball in the learning team's half, travelling at its goal
+            defend_sign = -1.0 if drill_team == BLUE_TEAM else 1.0  # own goal y sign
+            ball_x = random.uniform(-2000.0, 2000.0)
+            ball_y = defend_sign * random.uniform(500.0, 3000.0)
+            speed = random.uniform(800.0, 1600.0)
             state.ball.linear_velocity = np.array(
-                [speed * np.cos(angle), speed * np.sin(angle), 0.0], dtype=np.float32
+                [random.uniform(-300.0, 300.0), defend_sign * speed, 0.0], dtype=np.float32
+            )
+        elif scenario == "race":
+            ball_x = random.uniform(-1500.0, 1500.0)
+            ball_y = random.uniform(-1200.0, 1200.0)
+            state.ball.linear_velocity = np.array(
+                [random.uniform(-200.0, 200.0), random.uniform(-200.0, 200.0), 0.0],
+                dtype=np.float32,
             )
         else:
-            state.ball.linear_velocity = np.zeros(3, dtype=np.float32)
+            ball_x = random.uniform(-2500.0, 2500.0)
+            ball_y = random.uniform(-3500.0, 3500.0)
+            if random.random() < 0.5:
+                angle = random.uniform(0.0, 2.0 * np.pi)
+                speed = random.uniform(0.0, 600.0)
+                state.ball.linear_velocity = np.array(
+                    [speed * np.cos(angle), speed * np.sin(angle), 0.0], dtype=np.float32
+                )
+            else:
+                state.ball.linear_velocity = np.zeros(3, dtype=np.float32)
+        state.ball.position = np.array([ball_x, ball_y, 93.0], dtype=np.float32)
         state.ball.angular_velocity = np.zeros(3, dtype=np.float32)
+        shared_info["drill_scenario"] = scenario
         for car in state.cars.values():
-            # Blue attacks +y (orange goal), orange attacks -y.  "Behind the
-            # ball" = on the side of the car's own goal, so driving at the
-            # ball also drives it toward the target goal.
+            # Blue attacks +y (orange goal), orange attacks -y.  Every car
+            # starts on its own-goal side of the ball: for an attacker that
+            # is "behind the ball" (driving at it plays it toward the target
+            # goal); for the defending team in the defense scenario the same
+            # side is *between ball and own goal*, facing the incoming ball.
             attack = 1.0 if car.team_num == BLUE_TEAM else -1.0
-            distance = random.uniform(700.0, 2600.0)
+            if scenario == "defense" and int(car.team_num) == drill_team:
+                distance = random.uniform(500.0, 1800.0)
+            elif scenario == "race":
+                distance = random.uniform(1200.0, 2000.0)
+            else:
+                distance = random.uniform(700.0, 2600.0)
+            car_y_raw = ball_y - attack * distance
             car_x = float(np.clip(ball_x + random.uniform(-900.0, 900.0), -3800.0, 3800.0))
-            car_y = float(np.clip(ball_y - attack * distance, -4800.0, 4800.0))
+            car_y = float(np.clip(car_y_raw, -4800.0, 4800.0))
             car.physics.position = np.array([car_x, car_y, 17.0], dtype=np.float32)
             car.physics.linear_velocity = np.zeros(3, dtype=np.float32)
             car.physics.angular_velocity = np.zeros(3, dtype=np.float32)
@@ -155,6 +193,7 @@ def build_rlgym_env(
     spec: ModeSpec,
     *,
     reward_weights: RewardWeights | None = None,
+    potential_gamma: float = 1.0,
     episode_seconds: float | None = None,
     tick_skip: int = 8,
     rlbot_delay: bool = True,
@@ -168,7 +207,7 @@ def build_rlgym_env(
         ),
         obs_builder=SoccerObsBuilder(spec, obs_version=obs_version, episode_seconds=seconds),
         action_parser=RepeatAction(LookupTableAction(), tick_skip),
-        reward_fn=SoccerReward(spec, reward_weights),
+        reward_fn=SoccerReward(spec, reward_weights, potential_gamma=potential_gamma),
         transition_engine=ModeRocketSimEngine(spec, rlbot_delay=rlbot_delay),
         termination_cond=GoalCondition(),
         truncation_cond=TimeoutCondition(
@@ -224,6 +263,7 @@ class MatchEnv:
         obs_version: int = OBS_VERSION,
         policy_team: int = BLUE_TEAM,
         reset_mode: str = "kickoff",
+        potential_gamma: float = 1.0,
     ):
         if reset_mode not in RESET_MODES:
             raise ValueError(f"reset_mode must be one of {RESET_MODES}, got {reset_mode!r}")
@@ -243,6 +283,7 @@ class MatchEnv:
         self.env = build_rlgym_env(
             spec,
             reward_weights=reward_weights,
+            potential_gamma=potential_gamma,
             episode_seconds=self.episode_seconds,
             tick_skip=tick_skip,
             rlbot_delay=rlbot_delay,
@@ -347,6 +388,7 @@ class MatchEnv:
             np.random.seed(seed % (2**32 - 1))
             # the reset mutator reads the starting-state distribution here
             self.env.shared_info["reset_mode"] = self.reset_mode
+            self.env.shared_info["drill_team"] = int(self.policy_team)
             obs = self.env.reset()
         finally:
             random.setstate(python_state)

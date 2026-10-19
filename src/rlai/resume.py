@@ -70,6 +70,7 @@ REQUEST_FIELDS = (
     "rollout_steps",
     "episode_seconds",
     "reset_mode",
+    "discount_shaping",
     "n_workers",
     "device",
     "seed",

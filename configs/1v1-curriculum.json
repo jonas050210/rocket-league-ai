@@ -1,5 +1,5 @@
 {
-  "run_name": "1v1 curriculum (overhaul, obs v3)",
+  "run_name": "1v1 curriculum (overhaul, obs v4)",
   "mode": "soccer-1v1",
   "seed": 42,
   "total_steps": 5000000,
@@ -48,7 +48,7 @@
   "eval_games": 10,
   "eval_match_seconds": 60,
   "curriculum": true,
-  "obs_version": 3,
+  "obs_version": 4,
   "reset_mode": "kickoff",
   "eval_opponents": [
     "idle",
@@ -57,6 +57,5 @@
   "eval_sides": [
     "blue",
     "orange"
-  ],
-  "clip_value": 0.5
+  ]
 }

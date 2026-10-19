@@ -48,5 +48,5 @@
   "eval_games": 4,
   "eval_match_seconds": 20,
   "reset_mode": "drill",
-  "obs_version": 3
+  "obs_version": 4
 }

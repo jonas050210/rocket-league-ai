@@ -104,7 +104,8 @@ class TrainingConfig(BaseModel):
     #: optional multi-opponent suite; when empty ``eval_opponent`` is used
     eval_opponents: list[str] = Field(default_factory=list, max_length=8)
     eval_interval: int = Field(default=0, ge=0, le=100000)
-    eval_games: int = Field(default=4, ge=1, le=100)
+    #: 4-game series made win-rate checkpoint selection mostly noise
+    eval_games: int = Field(default=8, ge=1, le=100)
     eval_match_seconds: float = Field(default=30.0, ge=5, le=600)
     #: which side(s) the policy plays during evaluation; both = side balanced
     eval_sides: list[str] = Field(default_factory=lambda: ["blue"], min_length=1, max_length=2)
@@ -112,6 +113,11 @@ class TrainingConfig(BaseModel):
     eval_mirror: bool = True
     #: measure the policy before the first update so the report has a "before"
     eval_before: bool = True
+    #: make potential-based shaping discount-exact (F = gamma*Phi' - Phi).
+    #: Off by default: exactness streams a small positive reward at rest and
+    #: makes returns hard to read, for a negligible gain at gamma=0.995
+    #: (see rlai.rewards.SoccerReward).
+    discount_shaping: bool = False
     curriculum: bool = False
     #: starting-state distribution when no curriculum stage overrides it:
     #: ``kickoff`` (standard), ``drill`` (randomized attacking setups that

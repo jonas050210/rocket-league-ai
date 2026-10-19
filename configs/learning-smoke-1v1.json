@@ -45,7 +45,7 @@
     ],
     "activation": "tanh"
   },
-  "obs_version": 3,
+  "obs_version": 4,
   "eval_interval": 15,
   "eval_games": 4,
   "eval_match_seconds": 20,

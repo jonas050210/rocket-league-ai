@@ -33,6 +33,8 @@ CURVE_METRICS = (
     "charts/draw_rate",
     "charts/goals_for",
     "charts/goals_against",
+    "charts/touches",
+    "charts/shots",
     "losses/policy",
     "losses/value",
     "losses/entropy",

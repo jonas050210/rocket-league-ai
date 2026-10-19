@@ -46,7 +46,9 @@ Gewichte, sammelt die Rollouts ein und trainiert zentral.
 | Version | Größe | Inhalt | Verwendung |
 | --- | --- | --- | --- |
 | 1 | 190 | nur relative Merkmale | alte Checkpoints, Vergleich |
-| 2 (Standard) | 198 | zusätzlich 8 Werte Feldrahmen (Position, Blickrichtung, Ballposition, Torausrichtung, Tordistanz) | neue Läufe |
+| 2 (Standard) | 198 | zusätzlich 8 Werte Feldrahmen (Position, Blickrichtung, Ballposition, Torausrichtung, Tordistanz) | bestehende Checkpoints |
+| 3 | 204 | zusätzlich eigene Linear-/Winkelgeschwindigkeit (Auto-Rahmen) | Übergang |
+| 4 | 222 | zusätzlich eigener Up-Vektor (Welt) + Blickrichtung aller anderen Autos (Auto-Rahmen) | **neue Läufe** (`configs/1v1-curriculum.json`) |
 
 Die Feldrahmen-Werte sind keine Lerntheorie, sondern notwendige Information:
 Die Tore stehen an festen Weltkoordinaten, die relativen Blöcke enthalten
@@ -73,10 +75,12 @@ durchgeführt.
   des Alignment-Maximums bei ~0,06 Berührungen/Episode) stehen auf 0 und
   existieren nur noch, damit alte Konfigurationen ihr Verhalten exakt
   reproduzieren.
-* **Ereignisse mit Richtung.** Eine Berührung zahlt nach der
-  Ballgeschwindigkeit Richtung Gegnertor; ein harter Schuss in der
-  Angriffshälfte gibt `shot`, eine Rettungstat vor dem eigenen Tor
-  `defense`. Komponenten und Ereigniszähler werden pro Agent geführt; der
+* **Ereignisse mit Richtung und Treffergenauigkeit.** Eine Berührung zahlt
+  nach der Ballgeschwindigkeit Richtung Gegnertor; `shot` gibt es nur, wenn
+  die Flugbahn-Projektion (mit Gravitation) auch zwischen Pfosten/Querlatte
+  landet — Fehlschüsse zählen als `shots_off_target`, bleiben aber unbezahlt.
+  Eine Cooldown von 4 Entscheidungen pro Auto verhindert Tipp-Farming an
+  langsamen Bällen (gezählt werden weiterhin alle Kontakte). Komponenten und Ereigniszähler werden pro Agent geführt; der
   Report zeigt nur das Lernteam (früher wurden beide Teams summiert).
 
 ## Liga, Gegnerpool und Curriculum
@@ -112,9 +116,13 @@ Jede Stufe prüft die Fertigkeit, die sie lehrt: zuerst Ballberührungen pro
 Episode, dann Tore gegen niemanden, erst danach Siegquoten gegen aktive
 Gegner. (Die alte erste Stufe verlangte 60 % *Siege* – bei Ein-Tor-Episoden
 hieß das zuverlässiges Toreschießen ab Kaltstart; sie wurde in 2 Mio.
-Schritten nie verlassen.) Jede Stufe setzt außerdem Startverteilung
-(`drill` = randomisierte Angriffssituationen statt nur Kickoffs) und
-Episodenlänge. Blockierte Aufstiege nennen den exakten Grund
+Schritten nie verlassen.) Jede Stufe setzt außerdem Startverteilung und Episodenlänge. `drill`-Starts
+sind randomisierte Spielsituationen in drei Szenarien: Angriff (55 %),
+Verteidigung gegen einen aufs eigene Tor rollenden Ball (25 %) und
+Mittelfeld-Rennen (20 %); `chase`-/`mixed`-Stufen nutzen `mixed`
+(Kickoff + Drills). Jeder Worker zieht außerdem seinen eigenen Gegner
+(`mixed` = chase/random pro Worker, Selbstspiel = eigene PFSP-Losung), damit
+ein Batch nicht gegen genau einen Gegner korreliert ist. Blockierte Aufstiege nennen den exakten Grund
 (`Curriculum.status()`, im Log, Report und als Metrik
 `curriculum/blocked`); eine einstürzende Stufe kann absteigen, eine
 stagnierende meldet sich laut statt schweigend zu blockieren. Stufe,

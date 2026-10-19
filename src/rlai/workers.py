@@ -42,20 +42,6 @@ def limit_worker_threads(threads: int = WORKER_TORCH_THREADS) -> int:
     return max(1, int(threads))
 
 
-def _empty_rollout() -> dict[str, np.ndarray]:
-    return {
-        "obs": [],
-        "actions": [],
-        "logprobs": [],
-        "values": [],
-        "rewards": [],
-        "dones": [],
-        # time-limit truncations bootstrap from the value of the final state;
-        # true terminations (goals) bootstrap with zero.
-        "truncated": [],
-        "bootstrap": [],
-    }
-
 
 def collect_rollout(
     env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int, *, fresh: bool = True
@@ -68,6 +54,10 @@ def collect_rollout(
     silently discarded one partial episode per worker per iteration and
     oversampled kickoff states.  Episode returns/lengths are accumulated by
     the env itself, so a spanning episode is reported whole.
+
+    The loop is array-based end to end (preallocated buffers, batched
+    inference): the previous dict-per-step version spent a large share of
+    its time packing/unpacking 1-row dicts and stacking lists.
     """
     if fresh or not env.current_obs:
         obs_full = env.reset(episode_seed=seed)
@@ -75,39 +65,44 @@ def collect_rollout(
         obs_full = env.current_obs
     agents = env.policy_agents
     n_agents = len(agents)
-    obs = {agent: obs_full[agent] for agent in agents}
-    rollout = _empty_rollout()
+    obs_dim = int(np.asarray(obs_full[agents[0]]).shape[-1])
+    obs_arr = np.stack([obs_full[a] for a in agents]).astype(np.float32)
+
+    buf_obs = np.empty((n_steps, n_agents, obs_dim), dtype=np.float32)
+    buf_actions = np.empty((n_steps, n_agents), dtype=np.int64)
+    buf_logprobs = np.empty((n_steps, n_agents), dtype=np.float32)
+    buf_values = np.empty((n_steps, n_agents), dtype=np.float32)
+    buf_rewards = np.empty((n_steps, n_agents), dtype=np.float32)
+    buf_dones = np.zeros((n_steps, n_agents), dtype=np.float32)
+    buf_truncated = np.zeros((n_steps, n_agents), dtype=np.float32)
+    buf_bootstrap = np.zeros((n_steps, n_agents), dtype=np.float32)
     episodes: list[dict] = []
     started = time.perf_counter()
     infer_seconds = 0.0
 
-    for _ in range(n_steps):
+    for t in range(n_steps):
         inference_started = time.perf_counter()
-        actions, logprobs, values = policy.act(obs, deterministic=False)
+        actions, logprobs, values = policy.act_batch(obs_arr, deterministic=False)
         infer_seconds += time.perf_counter() - inference_started
-        result = env.step(actions)
-        rewards = np.asarray([result.rewards.get(a, 0.0) for a in agents], dtype=np.float32)
+        result = env.step({a: int(actions[i]) for i, a in enumerate(agents)})
         terminated = bool(result.done)
         truncated = bool(result.truncated) and not terminated
         done = terminated or truncated
 
-        rollout["obs"].append(np.stack([obs[a] for a in agents]).astype(np.float32))
-        rollout["actions"].append(np.asarray([actions[a] for a in agents], dtype=np.int64))
-        rollout["logprobs"].append(np.asarray([logprobs[a] for a in agents], dtype=np.float32))
-        rollout["values"].append(np.asarray([values[a] for a in agents], dtype=np.float32))
-        rollout["rewards"].append(rewards)
-        rollout["dones"].append(np.full(n_agents, float(done), dtype=np.float32))
-        rollout["truncated"].append(np.full(n_agents, float(truncated), dtype=np.float32))
+        buf_obs[t] = obs_arr
+        buf_actions[t] = actions
+        buf_logprobs[t] = logprobs
+        buf_values[t] = values
+        buf_rewards[t] = [result.rewards.get(a, 0.0) for a in agents]
+        if done:
+            buf_dones[t] = 1.0
         if truncated:
-            final_obs = {a: result.obs[a] for a in agents}
+            buf_truncated[t] = 1.0
+            final_arr = np.stack([result.obs[a] for a in agents]).astype(np.float32)
             inference_started = time.perf_counter()
-            _, _, final_values = policy.act(final_obs, deterministic=True)
+            _, _, final_values = policy.act_batch(final_arr, deterministic=True)
             infer_seconds += time.perf_counter() - inference_started
-            rollout["bootstrap"].append(
-                np.asarray([final_values[a] for a in agents], dtype=np.float32)
-            )
-        else:
-            rollout["bootstrap"].append(np.zeros(n_agents, dtype=np.float32))
+            buf_bootstrap[t] = final_values
 
         if done:
             goals_for = int(env.score_for)
@@ -153,24 +148,24 @@ def collect_rollout(
                 }
             )
             obs_full = env.reset()
-            obs = {agent: obs_full[agent] for agent in agents}
+            obs_arr = np.stack([obs_full[a] for a in agents]).astype(np.float32)
         else:
-            obs = {agent: result.obs[agent] for agent in agents}
+            obs_arr = np.stack([result.obs[a] for a in agents]).astype(np.float32)
 
     inference_started = time.perf_counter()
-    _, _, last_values = policy.act(obs, deterministic=True)
+    _, _, last_values = policy.act_batch(obs_arr, deterministic=True)
     infer_seconds += time.perf_counter() - inference_started
     elapsed = time.perf_counter() - started
     return {
-        "obs": np.stack(rollout["obs"]),
-        "actions": np.stack(rollout["actions"]),
-        "logprobs": np.stack(rollout["logprobs"]),
-        "values": np.stack(rollout["values"]),
-        "rewards": np.stack(rollout["rewards"]),
-        "dones": np.stack(rollout["dones"]),
-        "truncated": np.stack(rollout["truncated"]),
-        "bootstrap": np.stack(rollout["bootstrap"]),
-        "last_values": np.asarray([last_values[a] for a in agents], dtype=np.float32),
+        "obs": buf_obs,
+        "actions": buf_actions,
+        "logprobs": buf_logprobs,
+        "values": buf_values,
+        "rewards": buf_rewards,
+        "dones": buf_dones,
+        "truncated": buf_truncated,
+        "bootstrap": buf_bootstrap,
+        "last_values": last_values,
         "episodes": episodes,
         "steps": n_steps,
         "seconds": elapsed,
@@ -209,6 +204,7 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
                 seed=seed,
                 tick_skip=config.tick_skip,
                 reward_weights=weights,
+                potential_gamma=float(config.gamma) if config.discount_shaping else 1.0,
                 episode_seconds=active_episode_seconds,
                 obs_version=config.obs_version,
                 reset_mode=active_reset_mode,
@@ -355,17 +351,32 @@ class WorkerPool:
         opponent_execution: dict | None = None,
         reset_mode: str | None = None,
         episode_seconds: float | None = None,
+        opponent_names: list[str | None] | None = None,
+        opponent_states: list | None = None,
     ) -> list[dict]:
+        """Collect one rollout per worker.
+
+        ``opponent_names``/``opponent_states`` give *each worker its own*
+        opponent (sample diversity: a batch collected entirely against one
+        opponent is correlated data); when omitted, ``opponent`` /
+        ``opponent_state`` are broadcast to everyone as before.
+        """
         for index, parent in enumerate(self.parents):
             team = None if policy_teams is None else int(policy_teams[index % len(policy_teams)])
+            name = opponent if opponent_names is None else opponent_names[index % len(opponent_names)]
+            state = (
+                opponent_state
+                if opponent_states is None
+                else opponent_states[index % len(opponent_states)]
+            )
             parent.send(
                 {
                     "cmd": "collect",
                     "state_dict": state_dict,
                     "n_steps": int(n_steps),
                     "seed": int(seed),
-                    "opponent_state": opponent_state,
-                    "opponent": opponent,
+                    "opponent_state": state,
+                    "opponent": name,
                     "policy_team": team,
                     "opponent_execution": opponent_execution,
                     "reset_mode": reset_mode,

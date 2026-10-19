@@ -354,6 +354,196 @@ def test_episode_length_is_decision_steps_and_components_sum_to_return():
 # Store/report evidence
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Round 2: shot accuracy, touch anti-farming, discounted potentials
+# ---------------------------------------------------------------------------
+
+def test_shot_on_target_projection():
+    from rlai.rewards import shot_on_target
+
+    goal = [0, 5120, 321]
+    assert shot_on_target([0, 0, 93], [0, 2000, 0], goal) is True
+    assert shot_on_target([0, 0, 93], [1200, 2000, 0], goal) is False  # wide
+    assert shot_on_target([0, 4000, 93], [0, 1000, 900], goal) is False  # over
+    assert shot_on_target([0, 0, 93], [0, -2000, 0], goal) is False  # backward
+
+
+def test_off_target_power_is_counted_but_unpaid():
+    reward, state, agents, shared, blue = _reward_setup()
+    # hard drive toward the goal's half but metres wide of the post
+    state.ball.linear_velocity = np.array([1600.0, 1600.0, 0.0], dtype=np.float32)
+    state.cars[blue].ball_touches += 1
+    reward.get_rewards(agents, state, {}, {}, shared)
+    stats = shared["reward_stats_by_agent"][blue]
+    assert stats["shots"] == 0
+    assert stats["shots_off_target"] == 1
+    assert stats["shot"] == 0.0  # no shooting bonus for missing the goal
+
+
+def test_touch_cooldown_stops_tap_farming_but_not_counting():
+    from rlai.rewards import TOUCH_COOLDOWN_STEPS
+
+    reward, state, agents, shared, blue = _reward_setup(RewardWeights(touch=1.0))
+    paid_steps = 0
+    for _ in range(TOUCH_COOLDOWN_STEPS * 3):
+        state.cars[blue].ball_touches += 1
+        before = shared["reward_stats_by_agent"][blue]["touch"]
+        reward.get_rewards(agents, state, {}, {}, shared)
+        if shared["reward_stats_by_agent"][blue]["touch"] > before:
+            paid_steps += 1
+    stats = shared["reward_stats_by_agent"][blue]
+    assert stats["touches"] == TOUCH_COOLDOWN_STEPS * 3  # every contact counted
+    assert paid_steps == 3  # ...but paid at most once per cooldown
+
+
+def test_discounted_potentials_stay_bounded_in_discounted_sum():
+    env = _env()
+    reward = SoccerReward(env.spec, RewardWeights(progress=0.0, touch=0.0), potential_gamma=0.995)
+    state = copy.deepcopy(env.env.state)
+    agents = list(state.cars)
+    shared: dict = {}
+    reward.reset(agents, state, shared)
+    blue = next(a for a in agents if state.cars[a].team_num == 0)
+    goal = reward._opponent_goal(0)
+    from rlai.rewards import _distance
+
+    d0 = _distance(state.ball.position, goal)
+    discounted = 0.0
+    for t in range(400):  # nothing moves: discounted total must telescope
+        discounted += (0.995**t) * reward.get_rewards(agents, state, {}, {}, shared)[blue]
+    # sum_t gamma^t (d - gamma*d)/1000 = d * (1 - gamma^400) / 1000 exactly
+    assert discounted == pytest.approx(d0 * (1 - 0.995**400) / 1000.0, abs=1e-3)
+    env.close()
+
+
+# ---------------------------------------------------------------------------
+# Round 2: drill variety, obs v4, fast inference, per-worker opponents
+# ---------------------------------------------------------------------------
+
+def test_drill_scenarios_cover_attack_defense_and_race():
+    from collections import Counter
+
+    env = MatchEnv(
+        get_mode("soccer-1v1"), IdleOpponent(), seed=9, episode_seconds=10, reset_mode="drill"
+    )
+    seen = Counter()
+    for _ in range(60):
+        env.reset()
+        scenario = env.env.shared_info.get("drill_scenario")
+        seen[scenario] += 1
+        if scenario == "defense":
+            # ball travels at the learning (blue) goal, defender goal-side
+            assert float(env.state.ball.linear_velocity[1]) < -700.0
+            agent = env.policy_agents[0]
+            assert float(env.state.cars[agent].physics.position[1]) <= float(
+                env.state.ball.position[1]
+            ) + 1.0
+        if scenario == "race":
+            assert abs(float(env.state.ball.position[1])) <= 1200.0
+    assert seen["attack"] and seen["defense"] and seen["race"]
+    env.close()
+
+
+def test_obs_v4_orientation_block_and_mirror():
+    from rlai.obs import (
+        ACTION_START_BY_VERSION,
+        ORIENTATION_START,
+        build_observation,
+        mirror_observation,
+        obs_size,
+    )
+
+    env = _env()
+    agent = env.policy_agents[0]
+    v3 = build_observation(env.state, agent, env.spec, 5, obs_version=3)
+    v4 = build_observation(env.state, agent, env.spec, 5, obs_version=4)
+    assert obs_size(4) == 222 and v4.shape == (222,)
+    assert np.allclose(v4[: ACTION_START_BY_VERSION[3]], v3[: ACTION_START_BY_VERSION[3]])
+    assert v4[ACTION_START_BY_VERSION[4] + 5] == 1.0
+    up = v4[ORIENTATION_START : ORIENTATION_START + 3]
+    assert up[2] == pytest.approx(1.0, abs=1e-4)  # upright on the ground
+    opp_fwd = v4[ORIENTATION_START + 3 + 2 * 3 : ORIENTATION_START + 3 + 3 * 3]
+    assert np.linalg.norm(opp_fwd) == pytest.approx(1.0, abs=1e-3)  # unit forward
+    mirrored = mirror_observation(v4, obs_version=4)
+    assert mirrored[ORIENTATION_START] == -v4[ORIENTATION_START]
+    assert mirrored[ORIENTATION_START + 1] == -v4[ORIENTATION_START + 1]
+    assert mirrored[ORIENTATION_START + 2] == v4[ORIENTATION_START + 2]
+    # car-frame forwards survive the side swap unchanged
+    assert np.allclose(
+        mirrored[ORIENTATION_START + 3 : ORIENTATION_START + 18],
+        v4[ORIENTATION_START + 3 : ORIENTATION_START + 18],
+    )
+    env.close()
+
+
+def test_act_batch_matches_act_and_true_logprobs():
+    import torch
+
+    from rlai.policy import PolicyConfig, TorchPolicy
+
+    torch.manual_seed(3)
+    policy = TorchPolicy.from_config(PolicyConfig(obs_size=198, hidden=(32, 32)), device="cpu")
+    rng = np.random.default_rng(0)
+    batch = rng.normal(size=(4, 198)).astype(np.float32)
+    actions, logprobs, values = policy.act_batch(batch, deterministic=True)
+    via_dict = policy.act({str(i): batch[i] for i in range(4)}, deterministic=True)
+    assert [via_dict[0][str(i)] for i in range(4)] == actions.tolist()
+    with torch.no_grad():
+        logits, vals = policy.model(torch.as_tensor(batch))
+    expected_lp = torch.log_softmax(logits, dim=-1).gather(
+        1, torch.as_tensor(actions).unsqueeze(-1)
+    ).squeeze(-1).numpy()
+    assert np.allclose(logprobs, expected_lp, atol=1e-5)
+    assert np.allclose(values, vals.numpy(), atol=1e-6)
+
+
+def test_mixed_stage_draws_opponents_per_worker(data_root):
+    from rlai.store import Store
+    from rlai.trainer import Trainer
+
+    config = TrainingConfig(
+        run_name="unit", total_steps=8192, rollout_steps=64, n_workers=8,
+        minibatch_size=64, policy={"hidden": [16]}, device="cpu", curriculum=True,
+    )
+    trainer = Trainer(config, "unit-run", Store(data_root / "rlai.sqlite3"))
+    trainer.curriculum.index = 3  # the "mixed" stage
+    names, states, ids, stage_name, reset_mode, seconds = trainer._select_opponents()
+    assert stage_name == "mixed"
+    assert len(names) == 8 and set(names) <= {"chase", "random"}
+    assert states == [None] * 8 and ids == [None] * 8
+    assert reset_mode == "mixed" and seconds == 45.0
+
+
+def test_detect_eval_stall():
+    from rlai.trainer import detect_eval_stall
+
+    flat = [{"goal_diff": -5, "wins": 0, "touches": 10} for _ in range(4)]
+    assert detect_eval_stall(flat) is True
+    improving_touches = flat[:3] + [{"goal_diff": -5, "wins": 0, "touches": 40}]
+    assert detect_eval_stall(improving_touches) is False
+    a_win = flat[:3] + [{"goal_diff": -2, "wins": 1, "touches": 10}]
+    assert detect_eval_stall(a_win) is False
+    assert detect_eval_stall(flat[:3]) is False  # not enough history
+
+
+def test_best_pointers_are_per_protocol(data_root):
+    from rlai import checkpoints
+    from rlai.policy import PolicyConfig
+
+    models = data_root / "models"
+    policy = PolicyConfig(hidden=(16,))
+    manifest = checkpoints.save_checkpoint(
+        models, model_state=policy.build().state_dict(),
+        policy_config=policy.to_dict(), step=64, mode="soccer-1v1",
+    )
+    proto_a = {"opponent": "idle", "games": 8, "seed": 1}
+    proto_b = {"opponent": "chase", "games": 8, "seed": 1}
+    checkpoints.set_best(models, manifest["id"], 0.9, protocol=proto_a)
+    # the easy-protocol score must not act as the incumbent for the hard one
+    assert checkpoints.best_record(models, protocol=proto_b) == {}
+    assert checkpoints.best_record(models, protocol=proto_a)["score"] == pytest.approx(0.9)
+
+
 def test_episode_window_stats_compare_first_and_last(data_root):
     from rlai.store import Store
 

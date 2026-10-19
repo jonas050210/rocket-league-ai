@@ -59,19 +59,50 @@ _COMPONENTS = (
     "bump",
 )
 
-#: event counters tracked next to the (monetary) components
-_EVENT_KEYS = ("touches", "shots", "defensive_touches", "goals")
+#: event counters tracked next to the (monetary) components.  ``shots`` are
+#: on-target attempts (trajectory projected inside the posts);
+#: ``shots_off_target`` are hard goal-ward touches that would miss - the
+#: ratio is the policy's shooting accuracy.
+_EVENT_KEYS = ("touches", "shots", "shots_off_target", "defensive_touches", "goals")
 
 #: ball speed toward the goal (uu/s) above which a touch counts as a shot
 SHOT_SPEED_THRESHOLD = 800.0
 #: ball must be at most this far (uu) from the opponent goal for a shot bonus
 SHOT_DISTANCE_THRESHOLD = 6500.0
+#: goal mouth (uu); mirrored from envs so "on target" means the same here
+GOAL_HALF_WIDTH = 892.755
+GOAL_HEIGHT = 642.775
+#: Rocket League gravity (uu/s^2), for the shot trajectory projection
+BALL_GRAVITY = 650.0
 #: ball speed toward the own goal (uu/s) that makes a touch "defensive"
 DEFENSE_SPEED_THRESHOLD = 500.0
 #: ball must be at most this far (uu) from the own goal for a defense bonus
 DEFENSE_DISTANCE_THRESHOLD = 5500.0
+#: decision steps between two *paid* touch events per car.  Contacts are
+#: always counted; paying every micro-contact would reward pinning or
+#: tapping the ball in place instead of playing it somewhere useful.
+TOUCH_COOLDOWN_STEPS = 4
 
 SUPERSONIC_SPEED = 2300.0
+
+
+def shot_on_target(ball_pos, ball_vel, goal) -> bool:
+    """True when the ball's straight-line flight crosses inside the posts.
+
+    Projects to the goal line (with gravity on z, ignoring bounces): a hard
+    touch "toward the goal centre" that is actually heading two metres wide
+    must not earn a shooting bonus - accuracy is the skill being taught.
+    """
+    vy = float(ball_vel[1])
+    dy = float(goal[1]) - float(ball_pos[1])
+    if vy == 0.0 or (vy > 0.0) != (dy > 0.0):
+        return False
+    t = dy / vy
+    if t <= 0.0 or t > 4.0:
+        return False
+    x = float(ball_pos[0]) + float(ball_vel[0]) * t
+    z = float(ball_pos[2]) + float(ball_vel[2]) * t - 0.5 * BALL_GRAVITY * t * t
+    return abs(x) <= GOAL_HALF_WIDTH and z <= GOAL_HEIGHT
 
 
 def _toward(velocity, target, origin) -> float:
@@ -148,13 +179,36 @@ class _AgentMemory:
     prev_boost: float = 0.0
     prev_touches: int = 0
     prev_bump_victim: object | None = None
+    steps: int = 0
+    last_paid_touch_step: int = -(10**9)
 
 
 class SoccerReward(RewardFunction[AgentID, GameState, float]):
-    def __init__(self, spec: ModeSpec, weights: RewardWeights | None = None):
+    def __init__(
+        self,
+        spec: ModeSpec,
+        weights: RewardWeights | None = None,
+        potential_gamma: float = 1.0,
+    ):
+        """``potential_gamma`` optionally makes the potentials discount-exact.
+
+        Exact shaping pays ``F = gamma*Phi(s') - Phi(s)``.  That is
+        policy-invariant for the *discounted* objective, but at rest it
+        streams ``(1-gamma)*|Phi|`` per step, so undiscounted episode
+        returns and component means stop being interpretable (a parked car
+        "earns" ball_progress every step; only the discounted sum stays
+        bounded).  The plain difference (``gamma=1``, default) leaves a
+        residual cycle profit of order ``(1-gamma)`` per round trip, which
+        at gamma=0.995 is negligible next to the interpretability win.
+        Training only passes its ``gamma`` here when the opt-in
+        ``discount_shaping`` config flag is set.
+        """
         super().__init__()
+        if not 0.0 < float(potential_gamma) <= 1.0:
+            raise ValueError("potential_gamma must be in (0, 1]")
         self.spec = spec
         self.weights = weights or RewardWeights()
+        self.potential_gamma = float(potential_gamma)
         self._memory: dict[AgentID, _AgentMemory] = {}
 
     # -- lifecycle ---------------------------------------------------------
@@ -251,22 +305,33 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
         # first contact would turn the bonus into a constant offset), and
         # they are directional: what matters is where the ball goes *after*
         # the touch, not that contact happened.
+        mem.steps += 1
         touches = int(car.ball_touches)
         new_touches = max(touches - mem.prev_touches, 0)
+        paid = new_touches and (mem.steps - mem.last_paid_touch_step >= TOUCH_COOLDOWN_STEPS)
         if new_touches:
+            # contacts are always *counted* (curriculum evidence), but only
+            # paid outside the cooldown (anti tap-farming; see constants)
             events["touches"] = new_touches
+        if paid:
+            mem.last_paid_touch_step = mem.steps
             toward_attack = _toward(ball.linear_velocity, goal, ball.position)
             direction = max(-0.3, min(1.0, toward_attack / 1500.0))
             # 0.3 base so *any* contact is discoverable early, up to 1.0 for
             # a touch that drives the ball at the goal, ~0.09x for knocking
             # it toward the own net.
-            touch = w.touch * (0.3 + 0.7 * direction) * new_touches
-            if (
+            touch = w.touch * (0.3 + 0.7 * direction)
+            hard_shot = (
                 toward_attack > SHOT_SPEED_THRESHOLD
                 and _distance(ball.position, goal) < SHOT_DISTANCE_THRESHOLD
-            ):
+            )
+            if hard_shot and shot_on_target(ball.position, ball.linear_velocity, goal):
                 shot = w.shot * min(toward_attack / SUPERSONIC_SPEED, 1.0)
                 events["shots"] = 1
+            elif hard_shot:
+                # power without accuracy: counted for diagnostics, unpaid -
+                # the touch term above already rewarded the goal-ward drive
+                events["shots_off_target"] = 1
             elif mem.prev_ball_vel is not None:
                 was_threat = _toward(mem.prev_ball_vel, own_goal, ball.position)
                 still_threat = _toward(ball.linear_velocity, own_goal, ball.position)
@@ -287,19 +352,29 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
         # distance again would distort the scoring reward itself.
         if not state.goal_scored:
             # Task potential: ball closer to the opponent goal is better,
-            # whoever moved it.  Telescopes over the episode, so pushing the
-            # ball upfield and letting it roll back nets zero.
+            # whoever moved it.  With Phi = -distance/1000 the discounted
+            # shaping F = gamma*Phi' - Phi is (d_prev - gamma*d_new)/1000,
+            # which is policy-invariant under the learner's discount and
+            # still telescopes (pushing upfield and letting it roll back
+            # nets the discounted round trip, never a profit).
             if mem.prev_ball_pos is not None:
+                gamma = self.potential_gamma
                 ball_progress = (
                     w.ball_progress
-                    * (_distance(mem.prev_ball_pos, goal) - _distance(ball.position, goal))
+                    * (
+                        _distance(mem.prev_ball_pos, goal)
+                        - gamma * _distance(ball.position, goal)
+                    )
                     / 1000.0
                 )
                 prev_offset = mem.prev_ball_offset
                 if prev_offset is not None:
                     progress = (
                         w.progress
-                        * (_distance(prev_offset, (0.0, 0.0, 0.0)) - _distance(offset, (0.0, 0.0, 0.0)))
+                        * (
+                            _distance(prev_offset, (0.0, 0.0, 0.0))
+                            - gamma * _distance(offset, (0.0, 0.0, 0.0))
+                        )
                         / 1000.0
                     )
 

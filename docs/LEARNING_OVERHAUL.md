@@ -142,9 +142,11 @@ and if they do not, the overhaul has failed and the numbers say where:
 
 ## Known limitations
 
-* Potential differences are undiscounted (γΦ′−Φ would be exact); at
-  γ=0.995 the residual bias is small and favours moving the ball upfield
-  early. Revisit only with evidence.
+* Potential differences are undiscounted by default (γΦ′−Φ would be
+  exact); at γ=0.995 the residual bias is small and favours moving the
+  ball upfield early. Round 2 added the opt-in `discount_shaping` flag
+  for the exact form (see below); default stays off for readable
+  diagnostics.
 * `best` selection still compares win rates inside one protocol; with
   10-game suites it remains a coarse pointer, not a ranking proof.
 * Old episode rows in an existing database keep tick-based lengths;
@@ -153,6 +155,90 @@ and if they do not, the overhaul has failed and the numbers say where:
 * Stage thresholds (1.5 touches, 0.2 goals/ep, 30/40 % win rates) are
   reasoned starting points, **not measured optima**; the diagnostics now
   exist to tune them from the next run's window statistics.
-* Throughput was deliberately not re-architected: raw steps/s was already
-  high; *effective* throughput rises via drill state coverage and no
-  discarded partial episodes, which the next run's touches/hour will show.
+* Throughput was not re-architected in round 1; round 2 profiled it and
+  doubled collection speed by removing per-step distribution/dict
+  overhead (see below). Physics remains the floor.
+
+---
+
+# Round 2 — measured follow-ups (2026-10-19, no training started)
+
+Profiling on the 2-vCPU/3 GB sandbox (no CUDA) showed where time and
+learning signal were actually going; every change below is tied to a
+measurement or a demonstrated defect.
+
+## Throughput: inference was the bottleneck, not the learner
+
+A real-size PPO update costs ~0.18 s on this machine, but rollout
+collection ran at 913 steps/s/worker with `TorchPolicy.act` taking 44 % of
+wall time — of which ~40 % was `torch.distributions.Categorical` ceremony
+(dict juggling, per-agent Python loops). `act_batch` now samples via
+`log_softmax` + `multinomial` over plain arrays, and `collect_rollout`
+keeps everything in preallocated numpy buffers. Result: **1,811
+steps/s/worker** on the same probe (~2×), remaining time split between
+RocketSim and observation building. `act` keeps its exact old semantics
+(hit by evaluation/RLBot/tests); a regression test pins batch/dict parity
+and the true log-probabilities.
+
+## Accuracy & anti-farming details
+
+* `shot` now requires the ball's trajectory (with gravity) to cross the
+  goal plane *inside* the posts and under the bar; hard misses are counted
+  (`shots_off_target`) instead of paid. "Shoot accurately", not "shoot
+  hard-ish upfield".
+* Touch/shot/defense payments are rate-limited per car (one paid event
+  per 4 decisions ≈ 0.53 s); contacts are still all counted, so skill
+  gates stay honest while pin/tap farming is worthless.
+* `discount_shaping` (default off) makes both potentials discount-exact
+  (`Φ(s) − γΦ(s′)`) — the known round-1 limitation, now available as an
+  explicit opt-in because it makes "reward at rest" non-zero and the
+  diagnostics harder to read.
+
+## Curriculum transfer & sample diversity
+
+Drill resets were attack-only: the agent never practised defending in
+training but conceded 0:10 in evaluation. Drills are now 55 % attack /
+25 % defense (ball rolling at the learning team's goal with speed) /
+20 % midfield race; the `chase`/`mixed` stages train on `mixed` resets
+(kickoff + drills) instead of pure kickoffs. Every worker also draws its
+**own** opponent (mixed/self-play stages), with league results recorded
+per snapshot — one batch is no longer 100 % correlated against a single
+opponent. Custom stages can use `difficulty:<level>` opponents.
+
+## Observation v4 (222)
+
+The last orientation blind spots are closed: own up-vector (pitch/roll vs
+gravity; needed for recoveries and wall/air play) and every other car's
+forward vector in the own frame (where it can drive next — its velocity
+fails to say this at low speed). v4 is a strict superset of v3's prefix;
+all recommended configs moved to v4 before any v3 run exists. Mirror
+rules are extended and tested (world-frame up x/y flip; car-frame
+forwards invariant).
+
+## Evaluation & "best" selection had a silent comparability bug
+
+The periodic-evaluation seed included the iteration number, so **every
+evaluation was a different protocol**: a new `best-<hash>.json` pointer
+file each time, the primary best pointer frozen at the first protocol,
+and the incumbent comparison seeded from a possibly incomparable
+protocol's score. The seed is now fixed (one protocol, comparable
+kickoffs), the incumbent is loaded *per protocol* from disk, and the
+default suite grew from 4 to 8 games (4-game win rates were mostly
+noise). Three consecutive periodic evaluations without a win or any
+goal-difference/touch improvement now raise an explicit
+`evaluation stall` warning (+ `eval/stalled` metric) instead of being
+discovered in the final report.
+
+## Checked and deliberately NOT changed
+
+* **Value clipping**: a bounded synthetic experiment (goal-spike returns,
+  25 repeated updates) showed clip 0.2 / 0.5 / disabled converging
+  identically (MSE 1.247, explained variance 0.784) — it is not the
+  bottleneck, so PPO's value loss and the default are untouched.
+* Advantage normalization (per-minibatch), LR anneal tied to the run's
+  step budget, GAE/truncation semantics and the 15 Hz decision rate all
+  re-verified as sound; changing them without a failing measurement
+  would be superstition.
+* No new dependencies; no checkpoint/data deleted; no training started.
+
+Suite after round 2: **490 fast + 6 slow tests passing**, ruff clean.
