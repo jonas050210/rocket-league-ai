@@ -103,31 +103,59 @@ durchgeführt.
   eine Policy (~1 MB bei 256×256), maximal `capacity` Stück; mit
   `league_states = false` werden nur die Bilanzen gespeichert – dann meldet
   der Trainer laut, dass der Pool bis zum nächsten Snapshot leer bleibt.
-* `curriculum = true` aktiviert gestufte Gegner mit messbaren
-  Aufstiegskriterien (`src/rlai/curriculum.py`):
+* `curriculum = true` aktiviert die **Mastery-Stufen** mit unabhängig
+  gemessenen Aufstiegskriterien (`src/rlai/curriculum.py`,
+  `src/rlai/skills.py`, ausführlich in `docs/MASTERY_CURRICULUM.md`):
 
 | Modus | Stufen |
 | --- | --- |
-| 1v1 | Erster Kontakt (`idle`, Drill-Starts, 20 s) → Schießen (`idle`, gemischte Starts, 30 s) → `chase` (30 s) → gemischt (45 s) → Selbstspiel |
+| 1v1 (`mastery`, Standard) | `approach` → `control` → `shooting` → `defense` → `pressure` → `integrated` → Selbstspiel |
+| 1v1 (`legacy`) | Erster Kontakt → Schießen → `chase` → gemischt → Selbstspiel |
 | 2v2, 3v3 | Erster Kontakt → `chase` → gemischt → Selbstspiel |
 | Heatseeker 2v2 | Erster Kontakt → `chase` → Selbstspiel |
 
-Jede Stufe prüft die Fertigkeit, die sie lehrt: zuerst Ballberührungen pro
-Episode, dann Tore gegen niemanden, erst danach Siegquoten gegen aktive
-Gegner. (Die alte erste Stufe verlangte 60 % *Siege* – bei Ein-Tor-Episoden
-hieß das zuverlässiges Toreschießen ab Kaltstart; sie wurde in 2 Mio.
-Schritten nie verlassen.) Jede Stufe setzt außerdem Startverteilung und Episodenlänge. `drill`-Starts
-sind randomisierte Spielsituationen in drei Szenarien: Angriff (55 %),
-Verteidigung gegen einen aufs eigene Tor rollenden Ball (25 %) und
-Mittelfeld-Rennen (20 %); `chase`-/`mixed`-Stufen nutzen `mixed`
-(Kickoff + Drills). Jeder Worker zieht außerdem seinen eigenen Gegner
-(`mixed` = chase/random pro Worker, Selbstspiel = eigene PFSP-Losung), damit
-ein Batch nicht gegen genau einen Gegner korreliert ist. Blockierte Aufstiege nennen den exakten Grund
-(`Curriculum.status()`, im Log, Report und als Metrik
-`curriculum/blocked`); eine einstürzende Stufe kann absteigen, eine
-stagnierende meldet sich laut statt schweigend zu blockieren. Stufe,
-Zähler, das Episoden-Fenster (Beweislage) und die Pool-Bilanz stehen im
-Checkpoint und werden beim Resume fortgesetzt.
+Aufstieg entscheidet **nie** der Trainings-Reward, sondern eine unabhängige
+Messung: `rlai.skills` spielt geskriptete, geseedete Startsituationen auf
+**beiden Feldseiten** und liest den Simulatorzustand (Ballposition,
+Berührungen, Torereignisse, Auf-Vektor) – nicht die Belohnung. Probes:
+`approach`, `progress`, `shooting`, `defense`, `reengage`; die letzten beiden
+Stufen verlangen zusätzlich echte Spielserien (`match_chase`, `match_mixed`).
+
+Eine Stufe steigt erst auf, wenn
+
+1. alle Gates im Punktwert **und** in der unteren 95-%-Konfidenzgrenze
+   bestehen (ein Glückstreffer mit 4 Trials steigt nicht auf),
+2. dieselbe Messung `confirmations = 2` Mal **in Folge** bestanden wurde,
+3. `min_iterations` und `min_episodes` erreicht sind und
+4. keine früher gemeisterte Fertigkeit um mehr als 0.15 gefallen ist
+   (Retention – ein Gate misst deshalb immer auch die früheren Stufen mit).
+
+Gate-Messungen laufen alle `curriculum_gate_interval` Iterationen
+(Standard 25) mit `curriculum_gate_trials` Trials pro Probe (Standard 24,
+also 12 pro Seite). `curriculum_gate_interval = 0` wird zusammen mit einem
+gated Preset schon bei der Konfigurationsprüfung abgelehnt, weil sonst keine
+Stufe je verlassen werden könnte. Blockierte Aufstiege nennen den exakten
+Grund inklusive Messwert, Sollwert und Konfidenzintervall
+(`Curriculum.blocked_reason()`, `Curriculum.diagnostics()`, im Log, im Report
+und als Metrik `curriculum/blocked`); Regressionen werden als WARNING
+gemeldet und setzen den Bestätigungszähler zurück. Eine einstürzende Stufe
+kann absteigen, eine stagnierende meldet sich laut.
+
+Jede Stufe setzt außerdem Gegner, Startverteilung und Episodenlänge. `reach`
+(neu) startet den Lernenden 250–900 uu hinter einem ruhenden Ball – gemessen
+der entscheidende Hebel für frühe Ballkontakte
+(`docs/MASTERY_CURRICULUM.md`, Experiment 7: 1.34 statt 0.46 Berührungen pro
+Episode, 3 Seeds). `drill`-Starts sind randomisierte Spielsituationen in drei
+Szenarien: Angriff (55 %), Verteidigung gegen einen aufs eigene Tor rollenden
+Ball (25 %) und Mittelfeld-Rennen (20 %); `mixed` mischt Kickoff und Drills.
+Jeder Worker zieht außerdem seinen eigenen Gegner (`mixed` = chase/random pro
+Worker, Selbstspiel = eigene PFSP-Losung), damit ein Batch nicht gegen genau
+einen Gegner korreliert ist.
+
+Stufe, Zähler, das Episoden-Fenster (Beweislage) **und der Gate-Zustand**
+(gemessene Werte, Bestätigungszähler, Retention-Baselines) stehen im
+Checkpoint und werden beim Resume fortgesetzt; die Stufe wird dabei über
+ihren **Namen** zugeordnet, nicht über ihren Index.
 
 Der Nutzen von PFSP ist in diesem Projekt **nicht gemessen**. Der Pool ist
 implementiert, weil er die Datenverteilung im Selbstspiel kontrolliert; ob er
@@ -204,7 +232,17 @@ berichtet; der deterministische Wert ist die Deployment-Metrik.
   Evaluation (Siegquote, Wilson-Intervall in der Evaluationstabelle). Er wird
   nie schlechter und ersetzt **nicht** die stabile Promotion. Ein Checkpoint
   ohne Sieg wird nicht als „best“ markiert.
-* **Während des Trainings wird kein Routine-Checkpoint mehr geschrieben.**
+* **Während des Trainings wird kein Routine-Checkpoint mehr geschrieben.*** **`total_steps` gegen den wiederhergestellten Schritt.** `total_steps` ist
+  ein *Wunsch*-Feld: beim Resume gewinnt der konfigurierte Wert über den im
+  Checkpoint gespeicherten. Liegt das Ziel also auf oder unter dem
+  wiederhergestellten Schritt, wird **kein** einziger Schritt trainiert. Das
+  ist nicht still: `rlai.resume.plan_resume` gibt einen WARNING aus, der
+  Trainer meldet denselben Grund als Lauf-WARNING, `steps_completed` ist 0 im
+  Ergebnis, und es wird kein Checkpoint geschrieben
+  (`tests/test_trainer_gates.py::test_restored_step_beyond_total_steps_is_reported_not_silent`).
+  Wer einen abgebrochenen Lauf fortsetzt, muss `total_steps` über den
+  erreichten Schritt anheben.
+
   Es gibt genau zwei Auslöser:
   * Erreicht der Lauf regulär `total_steps`, wird **ein** `final`-Checkpoint
     geschrieben (vor der abschließenden Evaluation, damit die Gewichte auch
