@@ -127,9 +127,22 @@ class TrainingConfig(BaseModel):
     #: (see rlai.rewards.SoccerReward).
     discount_shaping: bool = False
     curriculum: bool = False
+    #: which stage list the curriculum uses.  ``mastery`` promotes only on
+    #: independently measured skill gates; ``legacy`` is the pre-mastery,
+    #: training-window-only curriculum, kept for reproducible comparisons.
+    curriculum_preset: str = "mastery"
+    #: run the independent gate evaluation every N iterations (0 = never;
+    #: the stage can then only promote on window criteria, which the mastery
+    #: stages do not have - it would block forever and say so)
+    curriculum_gate_interval: int = Field(default=25, ge=0, le=10_000)
+    #: trials per skill probe in a gate evaluation (both sides together).
+    #: 24 trials give a 95 % interval of roughly +/-0.2 at a 50 % rate; the
+    #: gate confidence bounds were chosen for this sample size.
+    curriculum_gate_trials: int = Field(default=24, ge=4, le=400)
     #: starting-state distribution when no curriculum stage overrides it:
     #: ``kickoff`` (standard), ``drill`` (randomized attacking setups that
-    #: teach ball contact far faster) or ``mixed``
+    #: teach ball contact far faster), ``reach`` (close-range starts for the
+    #: first curriculum stages) or ``mixed``
     reset_mode: str = "kickoff"
     #: let workers play on either side so the policy learns both
     side_randomization: bool = False
@@ -229,9 +242,11 @@ class TrainingConfig(BaseModel):
     @field_validator("reset_mode")
     @classmethod
     def _reset_mode_valid(cls, value: str) -> str:
+        from .envs import RESET_MODES
+
         key = str(value or "").strip().lower()
-        if key not in {"kickoff", "drill", "mixed"}:
-            raise ValueError("reset_mode must be kickoff, drill or mixed")
+        if key not in RESET_MODES:
+            raise ValueError(f"reset_mode must be one of {list(RESET_MODES)}")
         return key
 
     @field_validator("obs_version")
@@ -261,9 +276,21 @@ class TrainingConfig(BaseModel):
             # The stages are validated here, so a broken threshold is
             # reported when the configuration is checked and not in the
             # middle of a run.
-            from .curriculum import stages_for_mode
+            from .curriculum import CURRICULUM_PRESETS, stages_for_mode
 
-            stages_for_mode(self.mode)
+            if self.curriculum_preset not in CURRICULUM_PRESETS:
+                raise ValueError(
+                    f"curriculum_preset must be one of {sorted(CURRICULUM_PRESETS)}"
+                )
+            stages = stages_for_mode(self.mode, self.curriculum_preset)
+            if self.curriculum_gate_interval == 0 and any(
+                stage.gates for stage in stages[:-1]
+            ):
+                raise ValueError(
+                    "curriculum_gate_interval is 0 but this curriculum promotes on "
+                    "measured skill gates: without gate evaluations no stage could ever "
+                    "be left. Set an interval (or use curriculum_preset='legacy')."
+                )
         return self
 
     def resolved_device(self) -> str:
