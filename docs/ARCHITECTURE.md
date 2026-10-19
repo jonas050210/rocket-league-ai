@@ -7,12 +7,16 @@ Browser (HTML/CSS/JS, ui/theme)
 FastAPI (src/rlai/api/app.py)
         │
         ├── SQLite-Store (Runs, Metriken, Episoden, Logs, Modelle,
-        │                 Evaluationen, Reports, Settings)
+        │                 Evaluationen, Reports, Settings, Sessions,
+        │                 Teams, Rivalen, Spielerspeicher)
         ├── JobManager (Subprozesse: train, evaluate, live)
+        ├── Statistik (src/rlai/stats.py: eine Quelle für GUI, Report, CLI)
         └── Hardware/Diagnose (psutil, torch, Import-Checks)
                  │
                  ▼
         Trainer (src/rlai/trainer.py)
+        ├── Trainingszeit (src/rlai/timing.py: monotoner Timer, Akkumulation)
+        ├── Ressourcenplan (src/rlai/resources.py: CPU-/Speicherbudget)
         ├── Resume-Plan (src/rlai/resume.py: Kandidaten, Validierung, Fallback)
         ├── Report (src/rlai/report.py: Statistik nach jedem Lauf)
         ├── PPO-Update (src/rlai/ppo.py)
@@ -27,6 +31,9 @@ FastAPI (src/rlai/api/app.py)
                  │
                  ├── Evaluation (src/rlai/evaluation.py)
                  └── RLBot-Bot (src/rlai/rlbot/*, rlbot/bot.py)
+
+Ohne Browser, gleiche Trainings- und Checkpoint-Logik:
+CLI (src/rlai/cli.py) → Trainer → Report/Summary
 ```
 
 ## Datenfluss
@@ -58,6 +65,55 @@ FastAPI (src/rlai/api/app.py)
 9. Nach jedem Lauf – auch nach Stopp oder Fehler – schreibt der Trainer den
    Report nach `data/runs/<id>/report.json` und in die Tabelle `reports`;
    die GUI-Ansichten `#/reports` und `#/report?run=<id>` lesen ihn.
+
+## Trainingszeit
+
+`src/rlai/timing.py` trennt drei Uhren:
+
+* **UTC-Wanduhr** – *wann* etwas passiert (Start/Ende, Checkpoint-Zeit).
+  Sie darf springen und wird nie für eine Dauer verwendet.
+* **Monotone Uhr** – *wie lange* der Prozess wirklich gearbeitet hat. Nur
+  sie erzeugt Dauern.
+* **Akkumulierte Summe** – die Summe aller beendeten Sitzungen eines Laufs.
+  Sie liegt in der Datenbank und im Checkpoint, damit eine Fortsetzung den
+  Wert fortschreibt statt neu zu beginnen.
+
+Regeln: Ein Checkpoint speichert höchstens die bis dahin gemessene Zeit; die
+Zeit zwischen zwei Sitzungen (Prozess gestoppt) zählt nicht; eine Sitzung, die
+ein abgestürzter Prozess offen gelassen hat, wird beim nächsten Start als
+*interrupted* markiert und behält ihre **unbekannte** Dauer (ein Absturz kann
+die eigene Laufzeit nicht messen). Alte Checkpoints ohne Zeit-Metadaten
+bleiben ladbar und melden die historische Dauer als unbekannt.
+
+## Neue Module
+
+| Modul | Aufgabe |
+| --- | --- |
+| `src/rlai/timing.py` | Sitzungs-Timer, akkumulierte Trainingszeit, Formatierung |
+| `src/rlai/stats.py` | alle Zahlen des Stats-Tabs (GUI, Report und CLI rechnen damit gleich) |
+| `src/rlai/resources.py` | CPU-/Speicherbudget und Warnungen vor dem Start |
+| `src/rlai/botbrain.py` | Verhaltensprofil (aggressiv/defensiv/ausgewogen/adaptiv) |
+| `src/rlai/difficulty.py` | vier Schwierigkeitsstufen mit Zielwert + Mechanismus |
+| `src/rlai/team_builder.py` | Teams aus Bot-Slots, Validierung, Beschreibung |
+| `src/rlai/player_memory.py` | begrenztes Gedächtnis über Begegnungen (eigene Tabelle) |
+| `src/rlai/rivals.py` | benannte Rivalen mit Historie, Rangfolge, Engpass |
+| `src/rlai/adaptive.py` | begrenzte Anpassung des skriptgesteuerten Gegners |
+| `src/rlai/replay.py` | Match-/Episodenanalyse; meldet ehrlich, dass Replays nicht lesbar sind |
+| `src/rlai/benchmarks.py` | drei reproduzierbare Mikro-Benchmarks |
+| `src/rlai/rlbot/pad_order.py` | kanonische Boost-Pad-Reihenfolge und Remap |
+
+## Zwei Ausführungsmodi
+
+| | GUI-Modus | Headless-Modus |
+| --- | --- | --- |
+| Start | `POST /api/runs` mit `confirm=true` (der GUI-Dialog holt die Bestätigung vorher ein) | `rlai headless --config-file …` – der Aufruf *ist* die Bestätigung |
+| Webdienst | ja (`rlai serve`) | nein, kein Browser, keine GUI-Überwachung |
+| Überwachung | HTTP/SSE, konfigurierbare Intervalle | nur die essenziellen Metriken, Fehlerlogs, Checkpoints, Dauer |
+| Abschluss | Report in `data/runs/<id>/report.json` + Ansichten | kompakter Abschlussbericht `rlai-headless-summary-v1` |
+| Trainingslogik | identisch | identisch |
+
+Beide Modi benutzen denselben Trainer, denselben Checkpoint-Code und dieselbe
+Zeitmessung.
 
 ## Verzeichnisse
 
@@ -100,6 +156,10 @@ FastAPI (src/rlai/api/app.py)
 * `JobManager` startet keinen zweiten Trainingslauf, solange einer aktiv ist
   (API: 409), außer `allow_concurrent` wird bewusst gesetzt. Evaluationen
   haben eine Obergrenze für simulierte Match-Sekunden pro Anfrage.
+* `POST /api/runs` startet **nur** mit `confirm=true`. Die GUI holt die
+  Bestätigung vorher im Dialog ein; der Server weist eine unbestätigte
+  Anfrage ab. Dasselbe gilt für `POST /api/lab/run` (`execute=true`).
+* `POST /api/lab/plan` plant nur: es startet nie eine Simulation.
 * `WorkerPool` wartet nicht unbegrenzt: Start und Sammlung haben Timeouts,
   ein toter Kindprozess wird mit Exit-Code gemeldet statt als Hängen, und
   `close()` ist idempotent (terminate → kill).

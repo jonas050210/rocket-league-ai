@@ -148,71 +148,98 @@ def evaluate_policy(
         return mirrored_view
 
     played: list[dict] = []
-    for game_index in range(games):
-        game_seed = seed + game_index * 7919
-        side = side_list[game_index % len(side_list)]
-        team = SIDE_TEAM[side]
-        active = view_for(team)
-        env = MatchEnv(
-            spec,
-            _opponent_for(opponent, game_seed, view_for(1 - team), device, spec),
-            seed=game_seed,
-            episode_seconds=episode_seconds,
-            obs_version=version,
-            policy_team=team,
-        )
-        obs = env.reset(episode_seed=game_seed)
-        goals_for = 0
-        goals_against = 0
-        ticks = 0
-        touches = 0
-        previous_touches = 0
-        target_ticks = int(match_seconds * 120)
-        while ticks < target_ticks:
-            agents = env.policy_agents
-            actions, _, _ = active.act(
-                {agent: obs[agent] for agent in agents}, deterministic=not stochastic
-            )
-            result = env.step(actions)
-            ticks += env.tick_skip
-            if result.info.goal_scored:
-                if result.info.scoring_team == team:
-                    goals_for += 1
-                elif result.info.scoring_team == 1 - team:
-                    goals_against += 1
-            current_touches = sum(int(env.state.cars[a].ball_touches) for a in agents)
-            # Counters reset with the episode, so add the delta when the
-            # counter grows and add the new value when it was reset.
-            touches += (
-                current_touches - previous_touches
-                if current_touches >= previous_touches
-                else current_touches
-            )
-            previous_touches = current_touches
-            if result.done or result.truncated:
-                obs = env.reset()
-                previous_touches = 0
+    # One arena per *side* is enough: the environment is reset between games,
+    # so a fresh RocketSim arena per game is pure overhead (it dominated the
+    # evaluation cost before).  The opponent has to be rebuilt when the side
+    # changes, because the opponent controls the other team.
+    envs: dict[int, MatchEnv] = {}
+    opponents: dict[int, object] = {}
+    try:
+        for game_index in range(games):
+            game_seed = seed + game_index * 7919
+            side = side_list[game_index % len(side_list)]
+            team = SIDE_TEAM[side]
+            active = view_for(team)
+            env = envs.get(team)
+            if env is None:
+                game_opponent = _opponent_for(
+                    opponent, game_seed, view_for(1 - team), device, spec
+                )
+                env = MatchEnv(
+                    spec,
+                    game_opponent,
+                    seed=game_seed,
+                    episode_seconds=episode_seconds,
+                    obs_version=version,
+                    policy_team=team,
+                )
+                envs[team] = env
+                opponents[team] = game_opponent
             else:
-                obs = result.obs
-        if goals_for > goals_against:
-            outcome = "win"
-        elif goals_for < goals_against:
-            outcome = "loss"
-        else:
-            outcome = "draw"
-        played.append(
-            {
-                "game": game_index + 1,
-                "seed": game_seed,
-                "side": side,
-                "mirrored": bool(team != BLUE_TEAM and mirror),
-                "goals_for": goals_for,
-                "goals_against": goals_against,
-                "outcome": outcome,
-                "ticks": ticks,
-                "touches": touches,
-            }
-        )
+                # the arena is reused, but the seed and the opponent change
+                env.seed = game_seed
+                env.policy_team = team
+                env.opponent = _opponent_for(
+                    opponent, game_seed, view_for(1 - team), device, spec
+                )
+                opponents[team] = env.opponent
+            obs = env.reset(episode_seed=game_seed)
+            goals_for = 0
+            goals_against = 0
+            ticks = 0
+            touches = 0
+            previous_touches = 0
+            target_ticks = int(match_seconds * 120)
+            while ticks < target_ticks:
+                agents = env.policy_agents
+                actions, _, _ = active.act(
+                    {agent: obs[agent] for agent in agents}, deterministic=not stochastic
+                )
+                result = env.step(actions)
+                ticks += env.tick_skip
+                if result.info.goal_scored:
+                    if result.info.scoring_team == team:
+                        goals_for += 1
+                    elif result.info.scoring_team == 1 - team:
+                        goals_against += 1
+                current_touches = sum(int(env.state.cars[a].ball_touches) for a in agents)
+                # Counters reset with the episode, so add the delta when the
+                # counter grows and add the new value when it was reset.
+                touches += (
+                    current_touches - previous_touches
+                    if current_touches >= previous_touches
+                    else current_touches
+                )
+                previous_touches = current_touches
+                if result.done or result.truncated:
+                    obs = env.reset()
+                    previous_touches = 0
+                else:
+                    obs = result.obs
+            if goals_for > goals_against:
+                outcome = "win"
+            elif goals_for < goals_against:
+                outcome = "loss"
+            else:
+                outcome = "draw"
+            played.append(
+                {
+                    "game": game_index + 1,
+                    "seed": game_seed,
+                    "side": side,
+                    "mirrored": bool(team != BLUE_TEAM and mirror),
+                    "goals_for": goals_for,
+                    "goals_against": goals_against,
+                    "outcome": outcome,
+                    "ticks": ticks,
+                    "touches": touches,
+                }
+            )
+    finally:
+        for env in envs.values():
+            close = getattr(env, "close", None)
+            if callable(close):
+                close()
 
     summary = _summarise(played)
     side_results = {

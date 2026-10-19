@@ -21,6 +21,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -47,6 +48,23 @@ def _utc_stamp() -> str:
 def _slug(text: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9._-]+", "-", text).strip("-")
     return text[:48] or "model"
+
+
+def _timing_value(timing: Any, key: str) -> float | None:
+    """Read one duration out of the checkpoint timing block.
+
+    Returns ``None`` when the value was never measured, so an old
+    checkpoint stays loadable and the GUI can report "unknown".
+    """
+    if not isinstance(timing, dict):
+        return None
+    value = timing.get(key)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def new_model_id(step: int, label: str = "") -> str:
@@ -120,6 +138,11 @@ def save_checkpoint(
         "obs_version": (extra or {}).get("obs_version"),
         "has_rng": isinstance((extra or {}).get("rng"), dict),
         "parent_run": (extra or {}).get("parent_run"),
+        # training time at the moment the checkpoint was written.  Absent for
+        # checkpoints written before durations were tracked - the GUI then
+        # shows "unknown" instead of a made-up number.
+        "duration_s": _timing_value((extra or {}).get("timing"), "accumulated_s"),
+        "session_duration_s": _timing_value((extra or {}).get("timing"), "session_s"),
     }
     (directory / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
@@ -187,6 +210,9 @@ class CheckpointValidation:
     has_rng: bool = False
     has_curriculum: bool = False
     has_league: bool = False
+    has_timing: bool = False
+    duration_s: float | None = None
+    session_duration_s: float | None = None
     size_bytes: int = 0
     error: str | None = None
 
@@ -209,6 +235,9 @@ class CheckpointValidation:
             "has_rng": self.has_rng,
             "has_curriculum": self.has_curriculum,
             "has_league": self.has_league,
+            "has_timing": self.has_timing,
+            "duration_s": self.duration_s,
+            "session_duration_s": self.session_duration_s,
             "size_bytes": self.size_bytes,
             "error": self.error,
         }
@@ -287,6 +316,10 @@ def validate_checkpoint(
     result.has_rng = isinstance(extra.get("rng"), dict)
     result.has_curriculum = isinstance(extra.get("curriculum"), dict)
     result.has_league = isinstance(extra.get("league"), dict)
+    timing = extra.get("timing")
+    result.has_timing = isinstance(timing, dict)
+    result.duration_s = _timing_value(timing, "accumulated_s")
+    result.session_duration_s = _timing_value(timing, "session_s")
 
     for name, tensor in model_state.items():
         if not isinstance(tensor, torch.Tensor):

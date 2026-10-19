@@ -1,9 +1,27 @@
-"""Build RLBot-shaped packets from simulator states for adapter tests."""
+"""Build RLBot-shaped packets from simulator states for adapter tests.
+
+The fake packet has to follow the *real* RLBot conventions, otherwise the
+parity test cannot detect a mismatch between the simulator and the game:
+
+* ``boost_pads`` are ordered by y-coordinate and then x-coordinate (RLBot
+  documents this for both ``GamePacket`` and ``FieldInfo``), which is **not**
+  the order RocketSim uses;
+* every other field mirrors the shape of the flatbuffers message.
+
+Ordering the pads the way RLBot does is what makes the adapter's remap
+observable: a missing remap now fails the parity test instead of silently
+passing.
+"""
 
 from __future__ import annotations
 
 from rlgym.rocket_league.math import quat_to_euler, rotation_to_quaternion
 from rlbot import flat
+
+from rlai.rlbot.pad_order import (
+    CANONICAL_PAD_POSITIONS,
+    rlbot_order,
+)
 
 
 class Vec:
@@ -13,7 +31,7 @@ class Vec:
 
 class Rot:
     def __init__(self, values):
-        self.pitch, self.yaw, self.roll = map(float, values)
+        self.pitch, self.yaw, self.roll = values
 
 
 class Physics:
@@ -62,6 +80,14 @@ class Pad:
         self.timer = float(timer)
 
 
+class PadInfo:
+    """Static pad information as delivered in RLBot's ``FieldInfo``."""
+
+    def __init__(self, position, is_full_boost):
+        self.location = Vec(position)
+        self.is_full_boost = bool(is_full_boost)
+
+
 class Team:
     def __init__(self, team, score):
         self.team, self.score = team, score
@@ -78,12 +104,31 @@ class Packet:
     pass
 
 
+def rlbot_pad_order():
+    """RLBot's slot order (y, then x) for the standard stadium."""
+    return rlbot_order(CANONICAL_PAD_POSITIONS)
+
+
 def packet_from_env(env, scores=(0, 0), time_remaining=210.0):
     state = env.state
     packet = Packet()
     packet.players = [Player(i, car) for i, car in enumerate(state.cars.values())]
     packet.balls = [Ball(state.ball)]
-    packet.boost_pads = [Pad(timer) for timer in state.boost_pad_timers]
+    # RLBot delivers the pads in its own order, not in the simulator's.
+    order = rlbot_pad_order()
+    timers = list(state.boost_pad_timers)
+    packet.boost_pads = [Pad(timers[index]) for index in order]
     packet.teams = [Team(0, scores[0]), Team(1, scores[1])]
     packet.match_info = MatchInfo(time_remaining)
     return packet
+
+
+def field_info_from_env(env):
+    """Build an RLBot ``FieldInfo``-shaped message for the live arena."""
+    info = Packet()
+    order = rlbot_pad_order()
+    info.boost_pads = [
+        PadInfo(CANONICAL_PAD_POSITIONS[index][:3], CANONICAL_PAD_POSITIONS[index][3])
+        for index in order
+    ]
+    return info

@@ -207,7 +207,7 @@ function currentRoute() {
 
 function setActiveNav(route) {
   $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.route === route));
-  const label = { dashboard: "Dashboard", training: "Training", monitoring: "Monitoring", reports: "Reports", report: "Run report", models: "Models", evaluation: "Evaluation", live: "Live match", settings: "Settings" }[route] || "Dashboard";
+  const label = { dashboard: "Dashboard", training: "Training", stats: "Stats", monitoring: "Monitoring", reports: "Reports", report: "Run report", models: "Models", evaluation: "Evaluation", lab: "Evaluation lab", teams: "Teams & bots", memory: "Player memory", live: "Live match", settings: "Settings" }[route] || "Dashboard";
   $("#breadcrumb").textContent = label;
   document.title = `${label} · Rocket League AI`;
 }
@@ -684,6 +684,9 @@ views.training = async () => {
       payload.resume_mode = "fresh";
     }
     payload.allow_concurrent = allowConcurrent;
+    // the server refuses a start that was not confirmed; this flag is only
+    // set after the user accepted the dialog below
+    payload.confirm = true;
     const summary = [
       `Mode ${payload.mode} · ${fmtNumber(payload.total_steps)} steps · ${payload.n_workers} worker(s) · device ${payload.device}.`,
       mode === "fresh"
@@ -2040,6 +2043,35 @@ views.settings = async () => {
       button.disabled = false;
     }
   });
+};
+
+// ---------------------------------------------------------------- exports
+// The feature views (stats, team builder, player memory, rivals, lab) live
+// in their own module and attach to the shared view registry.  They need
+// the API helper, the formatting helpers and the view registry itself, so
+// those are exported here.
+window.RLAI = {
+  views,
+  api,
+  $,
+  $$,
+  esc,
+  icon,
+  chip,
+  pill,
+  emptyState,
+  lineChart,
+  downsample,
+  measured,
+  reasonList,
+  fmtNumber,
+  fmtDuration,
+  pct,
+  statusClass,
+  modelState,
+  confirmAction,
+  toast,
+  currentRoute,
 };
 
 // ---------------------------------------------------------------- bootstrap

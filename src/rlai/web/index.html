@@ -36,6 +36,10 @@
             <svg class="icon"><use href="/theme/icons.svg#icon-training" /></svg>
             <span class="nav-text">Training</span>
           </a>
+          <a class="nav-item" href="#/stats" data-route="stats">
+            <svg class="icon"><use href="/theme/icons.svg#icon-chart" /></svg>
+            <span class="nav-text">Stats</span>
+          </a>
           <a class="nav-item" href="#/monitoring" data-route="monitoring">
             <svg class="icon"><use href="/theme/icons.svg#icon-monitoring" /></svg>
             <span class="nav-text">Monitoring</span>
@@ -49,9 +53,17 @@
             <span class="nav-text">Models</span>
             <span class="nav-count" id="model-count">0</span>
           </a>
-          <a class="nav-item" href="#/evaluation" data-route="evaluation">
+          <a class="nav-item" href="#/lab" data-route="lab">
             <svg class="icon"><use href="/theme/icons.svg#icon-evaluation" /></svg>
-            <span class="nav-text">Evaluation</span>
+            <span class="nav-text">Lab</span>
+          </a>
+          <a class="nav-item" href="#/teams" data-route="teams">
+            <svg class="icon"><use href="/theme/icons.svg#icon-visualization" /></svg>
+            <span class="nav-text">Teams</span>
+          </a>
+          <a class="nav-item" href="#/memory" data-route="memory">
+            <svg class="icon"><use href="/theme/icons.svg#icon-models" /></svg>
+            <span class="nav-text">Memory</span>
           </a>
           <a class="nav-item" href="#/live" data-route="live">
             <svg class="icon"><use href="/theme/icons.svg#icon-visualization" /></svg>
@@ -130,5 +142,7 @@
     </dialog>
 
     <script type="module" src="/app.js"></script>
+    <script type="module" src="/stats.js"></script>
+    <script type="module" src="/features.js"></script>
   </body>
 </html>

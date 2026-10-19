@@ -36,11 +36,17 @@ class StartRunRequest(TrainingConfig):
     ``resume_mode`` is never inferred silently: "fresh" starts a new policy,
     "continue" restores weights/optimizer/step/RNG/curriculum from a compatible
     checkpoint and "transfer" keeps only the weights and restarts the step count.
+
+    ``confirm`` must be set by the client.  It is the server-side half of the
+    confirmation dialog: a training run is never started by a request that did
+    not explicitly ask for it.
     """
 
     resume_from: str | None = None
     resume_mode: str = "fresh"
     allow_concurrent: bool = False
+    #: the user confirmed the start (the GUI asks before it posts)
+    confirm: bool = False
 
 
 class ResumePlanRequest(BaseModel):
@@ -124,11 +130,118 @@ class LiveLaunchRequest(BaseModel):
     dry_run: bool = False
 
 
+class TeamRequest(BaseModel):
+    """A team of bots for the team builder."""
+
+    name: str = Field(min_length=1, max_length=80)
+    mode: str = "soccer-1v1"
+    description: str = ""
+    bots: list[dict] = Field(default_factory=list, min_length=1, max_length=3)
+    parent: str | None = None
+
+
+class BotSettingsRequest(BaseModel):
+    """Per-bot behaviour settings."""
+
+    difficulty: str = "medium"
+    behaviour: str = "balanced"
+    overrides: dict[str, float] = Field(default_factory=dict)
+
+
+class RivalRequest(BaseModel):
+    """A named rival."""
+
+    name: str = Field(min_length=1, max_length=80)
+    kind: str = "checkpoint"
+    reference: str = ""
+    description: str = ""
+
+
+class PlayerMemoryRequest(BaseModel):
+    """A note for a remembered player."""
+
+    name: str = Field(min_length=1, max_length=120)
+    note: str = Field(default="", max_length=500)
+
+
+class EvalLabRequest(BaseModel):
+    """A repeatable evaluation experiment."""
+
+    model_ids: list[str] = Field(default_factory=list, max_length=8)
+    opponents: list[str] = Field(default_factory=list, max_length=8)
+    games: int = Field(default=6, ge=1, le=200)
+    match_seconds: float = Field(default=30.0, ge=5, le=600)
+    seed: int = 1000
+    sides: list[str] = Field(default_factory=lambda: ["blue"], max_length=2)
+    mirror: bool = True
+    mode: str = "soccer-1v1"
+    #: run the experiment immediately; the GUI asks for a confirmation first
+    execute: bool = False
+
+
 def _settings() -> "AppSettings":
     """Validated exposure settings shared with ``rlai serve``."""
     from ..config import AppSettings
 
     return AppSettings.from_env()
+
+
+def _process_usage(pid: int | None = None) -> dict:
+    """CPU and memory of one process (default: this API process).
+
+    ``psutil.cpu_percent(interval=None)`` compares against the *previous*
+    call, so the very first call always returns 0.0.  The value is
+    therefore marked as unavailable until a second measurement exists.
+    """
+    try:
+        import psutil
+
+        process = psutil.Process(pid) if pid else psutil.Process()
+        with process.oneshot():
+            info = process.cpu_percent(interval=None)
+            rss = process.memory_info().rss
+            threads = process.num_threads()
+        return {
+            "pid": process.pid,
+            "cpu_percent": info,
+            "rss_mb": round(rss / 1024**2, 1),
+            "threads": threads,
+            "note": "cpu_percent is measured against the previous call",
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"available": False, "reason": str(exc)}
+
+
+def _gpu_process_usage() -> list[dict] | None:
+    """Per-process GPU usage via nvidia-smi (``None`` when unavailable)."""
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,used_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        rows = []
+        for line in result.stdout.strip().splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                rows.append({"pid": int(parts[0]), "used_memory_mb": float(parts[1])})
+            except ValueError:
+                continue
+        return rows
+    except Exception:
+        return None
 
 
 def create_app(store_path: Path | None = None) -> FastAPI:
@@ -196,6 +309,14 @@ def create_app(store_path: Path | None = None) -> FastAPI:
 
     @app.get("/api/system/resources")
     def resources():
+        """Live resource usage.
+
+        The numbers describe the *machine*; the training process itself is
+        reported separately, because the trainer runs in its own process
+        and the API process never holds the model.  Reporting the API
+        process' GPU memory as "the training's GPU memory" was misleading,
+        so the trainer's own usage is measured through its process id.
+        """
         memory = psutil.virtual_memory()
         payload = {
             "cpu_percent": psutil.cpu_percent(interval=None),
@@ -205,6 +326,7 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             "memory_total_gb": round(memory.total / 1024**3, 2),
             "active_run": store.latest_active_run(),
         }
+        payload["process"] = _process_usage()
         try:
             import torch
 
@@ -214,9 +336,14 @@ def create_app(store_path: Path | None = None) -> FastAPI:
                 payload["gpu"] = {
                     "name": properties.name,
                     "memory_total_mb": round(properties.total_memory / 1024**2, 1),
-                    "memory_allocated_mb": round(torch.cuda.memory_allocated(idx) / 1024**2, 1),
-                    "source": "torch (training runs in a subprocess, so allocated memory is not live)",
+                    "source": "the GPU of this machine",
                 }
+                # nvidia-smi knows the real per-process usage; torch cannot
+                # see the trainer's allocation because it lives in another
+                # process.
+                usage = _gpu_process_usage()
+                if usage is not None:
+                    payload["gpu"]["processes"] = usage
         except Exception:
             pass
         return payload
@@ -249,12 +376,11 @@ def create_app(store_path: Path | None = None) -> FastAPI:
 
     @app.post("/api/config/validate", dependencies=[Depends(require_auth)])
     def validate_config(config: TrainingConfig):
+        from ..resources import plan_resources
+
         warnings: list[str] = []
-        cores = os.cpu_count() or 1
-        if config.n_workers > cores:
-            warnings.append(
-                f"{config.n_workers} workers on {cores} logical cores will oversubscribe the CPU."
-            )
+        plan = plan_resources(config.n_workers)
+        warnings.extend(plan.warnings)
         if config.device == "cuda":
             try:
                 import torch
@@ -267,7 +393,18 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             warnings.append(
                 "Self-play needs many steps to be meaningful; this budget is very small."
             )
-        return {"valid": True, "config": config.to_dict(), "warnings": warnings}
+        if config.minibatch_size >= config.rollout_steps * config.n_workers:
+            warnings.append(
+                "minibatch_size covers the whole rollout: the policy is updated only "
+                "once per iteration.  A smaller minibatch gives the learner more "
+                "gradient steps per collected step."
+            )
+        return {
+            "valid": True,
+            "config": config.to_dict(),
+            "warnings": warnings,
+            "resources": plan.to_dict(),
+        }
 
     @app.get("/api/runs")
     def list_runs(limit: int = 50):
@@ -298,6 +435,17 @@ def create_app(store_path: Path | None = None) -> FastAPI:
 
     @app.post("/api/runs", dependencies=[Depends(require_auth)])
     def start_run(request: StartRunRequest):
+        if not request.confirm:
+            # The GUI asks the user before it posts; the server refuses a
+            # start that was not confirmed, so a stray request can never
+            # begin a training run.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "the training start was not confirmed; set confirm=true to start "
+                    "the run (the GUI asks the user first)"
+                ),
+            )
         resume_from = request.resume_from
         resume_mode = request.resume_mode or "fresh"
         if resume_mode not in ("fresh", "continue", "transfer"):
@@ -305,7 +453,7 @@ def create_app(store_path: Path | None = None) -> FastAPI:
         if resume_mode == "fresh":
             resume_from = None
         stored = request.model_dump(
-            exclude={"resume_from", "resume_mode", "allow_concurrent"}
+            exclude={"resume_from", "resume_mode", "allow_concurrent", "confirm"}
         )
         config = TrainingConfig.model_validate(stored)
         if resume_from:
@@ -655,6 +803,367 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+    # -- statistics --------------------------------------------------------
+    @app.get("/api/stats")
+    def get_stats(run_id: str | None = None, since_step: int = 0):
+        """Everything the Stats tab shows.
+
+        Without a run id the most recent run is used, so the tab always has
+        something to show.  Values that were never measured are reported as
+        unavailable - never as a zero.
+        """
+        from ..stats import build_stats
+
+        target = run_id
+        if not target:
+            runs = store.list_runs(limit=1)
+            if not runs:
+                return {
+                    "available": False,
+                    "reason": "no run has been recorded yet",
+                }
+            target = runs[0]["id"]
+        _require_run(store, target)
+        return build_stats(
+            store,
+            target,
+            models_dir=paths["models"],
+            resources=resources(),
+            since_step=since_step,
+        )
+
+    @app.get("/api/stats/overview")
+    def stats_overview(limit: int = 20):
+        """A compact overview of every run, for the history table."""
+        from ..stats import timing_block
+
+        rows = []
+        for run in store.list_runs(limit=limit):
+            timing = timing_block(store, run)
+            rows.append(
+                {
+                    "id": run["id"],
+                    "name": run.get("name"),
+                    "mode": run.get("mode"),
+                    "status": run.get("status"),
+                    "step": run.get("step"),
+                    "total_steps": run.get("total_steps"),
+                    "created_at": run.get("created_at"),
+                    "started_at": run.get("started_at"),
+                    "ended_at": run.get("ended_at"),
+                    "accumulated_s": timing.get("accumulated_s"),
+                    "accumulated_human": timing.get("accumulated_human"),
+                    "session_count": timing.get("session_count"),
+                    "interrupted_count": timing.get("interrupted_count"),
+                    "last_checkpoint_at": run.get("last_checkpoint_at"),
+                    "last_checkpoint_id": run.get("last_checkpoint_id"),
+                }
+            )
+        return {"runs": rows, "count": len(rows)}
+
+    # -- team builder ------------------------------------------------------
+    @app.get("/api/teams")
+    def list_teams_endpoint():
+        from ..team_builder import describe_team, team_from_any
+
+        teams = []
+        for row in store.list_teams():
+            try:
+                team = team_from_any(row.get("team") or {})
+            except Exception:
+                continue
+            described = describe_team(team)
+            described["updated_at"] = row.get("updated_at")
+            teams.append(described)
+        return {"teams": teams, "count": len(teams)}
+
+    @app.post("/api/teams", dependencies=[Depends(require_auth)])
+    def save_team(request: TeamRequest):
+        from ..team_builder import describe_team, validate_team
+
+        try:
+            team = validate_team(request.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        store.save_team(team.name, describe_team(team), mode=team.mode)
+        return describe_team(team)
+
+    @app.get("/api/teams/{name}")
+    def get_team_endpoint(name: str):
+        row = store.get_team(name)
+        if not row:
+            raise HTTPException(status_code=404, detail=f"unknown team {name!r}")
+        return row
+
+    @app.delete("/api/teams/{name}", dependencies=[Depends(require_auth)])
+    def delete_team_endpoint(name: str):
+        deleted = store.delete_team(name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"unknown team {name!r}")
+        return {"deleted": name}
+
+    @app.get("/api/difficulties")
+    def list_difficulties():
+        from ..difficulty import describe_all
+
+        return describe_all()
+
+    @app.get("/api/bot-behaviour")
+    def list_bot_behaviour():
+        from ..botbrain import available_profiles
+
+        return {"profiles": available_profiles()}
+
+    @app.post("/api/bot-behaviour/preview", dependencies=[Depends(require_auth)])
+    def preview_bot_behaviour(request: BotSettingsRequest):
+        """Show what a bot would decide in a given situation."""
+        from ..botbrain import BotBrain, BrainContext
+        from ..difficulty import brain_parameters
+
+        try:
+            parameters = brain_parameters(request.difficulty, request.behaviour)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if request.overrides:
+            from ..botbrain import merge_overrides
+
+            parameters = merge_overrides(parameters, request.overrides)
+        brain = BotBrain(profile=request.behaviour, parameters=parameters)
+        context = BrainContext()
+        decision = brain.decide(context)
+        return {
+            "brain": brain.to_dict(),
+            "decision": decision.to_dict(),
+            "note": "the context is the default one; the live bot uses the real state",
+        }
+
+    # -- player memory -----------------------------------------------------
+    @app.get("/api/player-memory")
+    def get_player_memory():
+        from ..player_memory import memory_from_rows
+
+        memory = memory_from_rows(store.list_player_memory())
+        return {
+            "summary": memory.summary(),
+            "players": memory.to_dict()["players"],
+            "note": (
+                "the player memory is data about past encounters; it is never part "
+                "of a checkpoint and never influences the policy weights"
+            ),
+        }
+
+    @app.post("/api/player-memory/note", dependencies=[Depends(require_auth)])
+    def set_player_note(request: PlayerMemoryRequest):
+        from ..player_memory import memory_from_rows, rows_from_memory
+
+        memory = memory_from_rows(store.list_player_memory())
+        try:
+            memory.set_note(request.name, request.note)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        store.replace_player_memory(rows_from_memory(memory))
+        return {"ok": True, "name": request.name}
+
+    @app.post("/api/player-memory/reset", dependencies=[Depends(require_auth)])
+    def reset_player_memory():
+        deleted = store.delete_player_memory()
+        return {"deleted": deleted}
+
+    @app.delete("/api/player-memory/{name}", dependencies=[Depends(require_auth)])
+    def delete_player(name: str):
+        deleted = store.delete_player_memory(name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"unknown player {name!r}")
+        return {"deleted": name}
+
+    @app.get("/api/player-memory/export")
+    def export_player_memory():
+        from ..player_memory import memory_from_rows
+
+        memory = memory_from_rows(store.list_player_memory())
+        return memory.export()
+
+    # -- rivals ------------------------------------------------------------
+    @app.get("/api/rivals")
+    def list_rivals():
+        from ..rivals import RivalRegistry
+
+        registry = RivalRegistry()
+        for row in store.list_rivals():
+            data = row.get("rival") or {}
+            registry.register(
+                row["name"],
+                kind=row.get("kind") or data.get("kind") or "checkpoint",
+                reference=row.get("reference") or data.get("reference") or row["name"],
+                description=row.get("description") or data.get("description") or "",
+            )
+        # merge the measured history from the evaluations
+        registry.build_from_evaluations(store.list_evaluations(limit=500))
+        for rival in registry.rivals.values():
+            store.save_rival(rival.name, rival.to_dict())
+        return registry.to_dict()
+
+    @app.post("/api/rivals", dependencies=[Depends(require_auth)])
+    def save_rival(request: RivalRequest):
+        from ..rivals import RivalRegistry
+
+        registry = RivalRegistry()
+        registry.register(
+            request.name,
+            kind=request.kind,
+            reference=request.reference or request.name,
+            description=request.description,
+        )
+        rival = registry.get(request.name)
+        assert rival is not None
+        store.save_rival(rival.name, rival.to_dict())
+        return rival.to_dict()
+
+    @app.delete("/api/rivals/{name}", dependencies=[Depends(require_auth)])
+    def delete_rival(name: str):
+        deleted = store.delete_rival(name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"unknown rival {name!r}")
+        return {"deleted": name}
+
+    @app.get("/api/rivals/{name}/trend")
+    def rival_trend(name: str):
+        from ..rivals import RivalRegistry
+
+        registry = RivalRegistry().build_from_evaluations(store.list_evaluations(limit=500))
+        return registry.trend(name)
+
+    # -- match analysis ----------------------------------------------------
+    @app.get("/api/analysis")
+    def match_analysis(run_id: str | None = None):
+        from ..replay import analyze_matches
+
+        return analyze_matches(store, run_id, models_dir=paths["models"])
+
+    # -- bot evaluation lab ------------------------------------------------
+    @app.get("/api/lab")
+    def lab_overview():
+        """The Bot Evaluation Lab: what can be measured right now."""
+        from ..evaluation import DIAGNOSTIC_OPPONENTS, STRENGTH_OPPONENTS
+
+        models = enrich_models(store, paths["models"])
+        return {
+            "models": [
+                {
+                    "id": model.get("id"),
+                    "step": model.get("step"),
+                    "created_at": model.get("created_at"),
+                    "eval_score": model.get("eval_score"),
+                    "duration_s": model.get("duration_s"),
+                    "duration_human": model.get("duration_human"),
+                    "state": model.get("state"),
+                }
+                for model in models
+            ],
+            "opponents": {
+                "strength": list(STRENGTH_OPPONENTS),
+                "diagnostic": list(DIAGNOSTIC_OPPONENTS),
+            },
+            "recent_evaluations": store.list_evaluations(limit=25),
+            "note": (
+                "an experiment is only executed when the GUI asks for a "
+                "confirmation; planning it never starts a simulation"
+            ),
+        }
+
+    @app.post("/api/lab/plan", dependencies=[Depends(require_auth)])
+    def lab_plan(request: EvalLabRequest):
+        """Plan a repeatable experiment.  Never starts a simulation."""
+        from ..evaluation import classify_opponent
+
+        opponents = request.opponents or ["chase"]
+        unknown = []
+        for name in opponents:
+            try:
+                from ..opponents import validate_opponent_name
+
+                validate_opponent_name(name)
+            except ValueError as exc:
+                unknown.append(str(exc))
+        if unknown:
+            raise HTTPException(status_code=400, detail="; ".join(unknown))
+        model_ids = []
+        for model_id in request.model_ids:
+            _validate_model_id(model_id)
+            try:
+                checkpoints.get_model(paths["models"], model_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            model_ids.append(model_id)
+        sides = [side for side in request.sides if side]
+        games = request.games * max(1, len(sides))
+        projected = games * len(opponents) * request.match_seconds
+        return {
+            "models": model_ids,
+            "opponents": opponents,
+            "opponent_classes": {name: classify_opponent(name) for name in opponents},
+            "games_per_model": games,
+            "total_games": games * len(opponents) * max(1, len(model_ids)),
+            "projected_sim_seconds": projected,
+            "projected_sim_minutes": round(projected / 60.0, 1),
+            "mode": request.mode,
+            "seed": request.seed,
+            "sides": sides,
+            "mirror": request.mirror,
+            "executed": False,
+            "note": "planning an experiment never starts a simulation",
+        }
+
+    @app.post("/api/lab/run", dependencies=[Depends(require_auth)])
+    def lab_run(request: EvalLabRequest):
+        """Execute a planned experiment (only after an explicit confirmation)."""
+        from ..evaluation import evaluate_model
+
+        if not request.execute:
+            raise HTTPException(
+                status_code=400,
+                detail="the experiment was not confirmed; set execute=true to run it",
+            )
+        if not request.model_ids:
+            raise HTTPException(status_code=400, detail="no checkpoint selected")
+        if not request.opponents:
+            raise HTTPException(status_code=400, detail="no opponent selected")
+        results = []
+        for model_id in request.model_ids:
+            _validate_model_id(model_id)
+            try:
+                manifest = checkpoints.get_model(paths["models"], model_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            path = paths["models"] / manifest["path"]
+            for opponent in request.opponents:
+                result = evaluate_model(
+                    path,
+                    mode=request.mode,
+                    opponent=opponent,
+                    games=request.games,
+                    seed=request.seed,
+                    match_seconds=request.match_seconds,
+                    device="cpu",
+                    sides=tuple(request.sides),
+                    mirror=request.mirror,
+                )
+                result["model_id"] = model_id
+                result["phase"] = "lab"
+                store.add_evaluation(result)
+                results.append(
+                    {
+                        "model_id": model_id,
+                        "opponent": opponent,
+                        "games": result.get("games"),
+                        "wins": result.get("wins"),
+                        "losses": result.get("losses"),
+                        "draws": result.get("draws"),
+                        "win_rate": result.get("win_rate"),
+                        "win_rate_ci95": result.get("win_rate_ci95"),
+                    }
+                )
+        return {"executed": True, "results": results, "count": len(results)}
 
     # -- static GUI --------------------------------------------------------
     web_dir = Path(__file__).resolve().parents[1] / "web"

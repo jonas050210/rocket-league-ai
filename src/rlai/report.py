@@ -135,6 +135,78 @@ def _downsample(points: list[dict], limit: int = MAX_CURVE_POINTS) -> list[dict]
     return sampled
 
 
+def _timing_section(store: Store, run: dict, wall_duration: float | None) -> dict:
+    """The training-time block of the report.
+
+    ``accumulated_s`` is the sum of the measured sessions of the run - the
+    time the trainer actually worked.  ``wall_clock_s`` is the difference
+    between the run's start and end timestamps; it includes the time the
+    process was stopped or the machine was busy, so it is reported
+    separately and never used as the training time.
+    """
+    from .timing import format_duration
+
+    totals = store.session_totals(run.get("id", "")) if run.get("id") else {}
+    sessions = totals.get("sessions") or []
+    accumulated = totals.get("accumulated_s")
+    session_count = int(totals.get("finished_count") or 0)
+    has_sessions = bool(sessions)
+
+    if not has_sessions:
+        # No session rows: an old run written before the session tracking.
+        accumulated = None
+        note = "this run predates session tracking; the training time is unknown"
+    else:
+        note = None
+
+    current = None
+    for row in sessions:
+        if row.get("duration_s") is None and row.get("status") == "running":
+            current = row
+            break
+
+    interrupted = [row for row in sessions if row.get("status") == "interrupted"]
+    return {
+        "available": has_sessions,
+        "accumulated_s": accumulated,
+        "accumulated_human": format_duration(accumulated),
+        "session_count": session_count,
+        "sessions": [
+            {
+                "started_at": row.get("started_at"),
+                "ended_at": row.get("ended_at"),
+                "duration_s": row.get("duration_s"),
+                "duration_human": format_duration(row.get("duration_s")),
+                "status": row.get("status"),
+                "start_step": row.get("start_step"),
+                "end_step": row.get("end_step"),
+                "note": row.get("note") or "",
+            }
+            for row in sessions
+        ],
+        "last_session_s": (
+            sessions[0].get("duration_s") if sessions else None
+        ),
+        # the session that is running right now: its duration is not
+        # measured yet, so it stays unknown until the session is closed
+        "current_session_s": current.get("duration_s") if current else None,
+        "current_session_human": format_duration(
+            current.get("duration_s") if current else None
+        ),
+        "current_session_started_at": current.get("started_at") if current else None,
+        "interrupted_sessions": len(interrupted),
+        "unfinished_sessions": int(totals.get("unfinished_count") or 0),
+        "wall_clock_s": wall_duration,
+        "wall_clock_human": format_duration(wall_duration),
+        "started_at": run.get("started_at"),
+        "ended_at": run.get("ended_at"),
+        "last_checkpoint_at": run.get("last_checkpoint_at"),
+        "last_checkpoint_id": run.get("last_checkpoint_id"),
+        "note": note,
+        "basis": "sum of the sessions measured with a monotonic clock",
+    }
+
+
 def hardware_section(device: str | None, workers: int | None) -> dict:
     """Device, worker count and machine facts, measured - never assumed."""
     import os
@@ -416,6 +488,11 @@ def build_run_report(
             "duration could not be computed: the run has no started_at/ended_at pair"
         )
 
+    # The measured training time (monotonic clock, summed over the
+    # sessions) is the authoritative duration.  The wall-clock difference
+    # above is only a fallback for runs that predate the session tracking.
+    timing_section = _timing_section(store, run, duration)
+
     steps_per_second = completed / duration if duration else None
 
     optimisation = {}
@@ -584,6 +661,7 @@ def build_run_report(
         "started_at": run.get("started_at"),
         "ended_at": run.get("ended_at"),
         "duration_s": duration,
+        "timing": timing_section,
         "steps": {
             "start": resumed_step,
             "end": end_step,

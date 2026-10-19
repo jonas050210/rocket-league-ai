@@ -17,6 +17,7 @@ from rlgym.rocket_league.math import euler_to_rotation
 
 from ..modes import ModeSpec, get_mode
 from ..obs import OBS_VERSION, build_observation
+from .pad_order import CANONICAL_PAD_COUNT, remap_pad_timers
 
 
 def _vec(v: Any) -> np.ndarray:
@@ -121,12 +122,22 @@ def packet_to_game_state(packet: Any, self_index: int) -> tuple[GameState, str, 
         )
     state.ball = ball
 
-    timers = np.zeros(34, dtype=np.float32)
-    for index, pad in enumerate(packet.boost_pads[:34]):
-        timers[index] = (
-            0.0 if getattr(pad, "is_active", False) else float(getattr(pad, "timer", 0.0))
+    raw = [
+        0.0 if getattr(pad, "is_active", False) else float(getattr(pad, "timer", 0.0))
+        for pad in packet.boost_pads
+    ]
+    if len(raw) != CANONICAL_PAD_COUNT:
+        raise ValueError(
+            f"the game reports {len(raw)} boost pads, but the policy was trained on the "
+            f"standard stadium with {CANONICAL_PAD_COUNT}; the observation layout cannot "
+            "be matched and the bot must not drive"
         )
-    state.boost_pad_timers = timers
+    # RLBot orders the pads by y and then x, RocketSim does not: the four
+    # slots around the centre circle are swapped.  Without this remap the
+    # policy would read the timer of a different pad in those slots.
+    state.boost_pad_timers = np.asarray(
+        remap_pad_timers(raw), dtype=np.float32
+    )
     return state, own_agent, own_team
 
 

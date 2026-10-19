@@ -99,6 +99,8 @@ def _config_from(client, **overrides) -> dict:
         n_workers=1,
         minibatch_size=256,
         mode="soccer-1v1",
+        # a training run is only started after an explicit confirmation
+        confirm=True,
     )
     payload.update(overrides)
     return payload
@@ -122,6 +124,7 @@ def test_run_lifecycle(client, monkeypatch):
         n_workers=1,
         minibatch_size=256,
         mode="soccer-1v1",
+        confirm=True,
     )
     response = client.post("/api/runs", json=payload)
     assert response.status_code == 200, response.text
@@ -142,6 +145,45 @@ def test_run_lifecycle(client, monkeypatch):
     bad = dict(payload, resume_from="not-a-model", resume_mode="continue")
     assert client.post("/api/runs", json=bad).status_code == 400
     assert client.post("/api/runs", json=dict(payload, resume_mode="sideways")).status_code == 400
+
+
+def test_the_event_stream_is_a_streaming_response(client):
+    """The SSE endpoint must return a stream, not an empty body."""
+    import asyncio
+
+    from fastapi.responses import StreamingResponse
+
+    endpoint = next(
+        route.endpoint
+        for route in client.app.routes
+        if getattr(route, "path", None) == "/api/events"
+    )
+
+    class _Disconnected:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    response = asyncio.run(endpoint(_Disconnected(), None, 0))
+    assert isinstance(response, StreamingResponse)
+    assert response.media_type == "text/event-stream"
+    assert response.headers["cache-control"] == "no-cache"
+
+
+def test_start_run_needs_an_explicit_confirmation(client, monkeypatch):
+    """A training run is never started by an unconfirmed request."""
+    started = {}
+
+    def fake_start(config, run_id, resume_from=None, **kwargs):
+        started["run_id"] = run_id
+
+    monkeypatch.setattr(client.app.state.jobs, "start_training", fake_start)
+    payload = _config_from(client, confirm=False)
+    response = client.post("/api/runs", json=payload)
+    assert response.status_code == 400, response.text
+    assert "not confirmed" in response.json()["detail"]
+    # nothing was started and no run row was created
+    assert started == {}
+    assert client.get("/api/runs").json() == []
 
 
 def test_start_run_refuses_a_second_training_run(client, monkeypatch):

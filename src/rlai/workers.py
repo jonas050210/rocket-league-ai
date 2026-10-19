@@ -21,7 +21,25 @@ from .opponents import ModelOpponent, build_opponent
 from .policy import PolicyConfig, TorchPolicy
 from .rewards import RewardWeights
 
-torch.set_num_threads(1)
+#: Torch thread count used inside a worker process.  A worker only ever runs
+#: one tiny MLP, so more than one thread costs more than it saves.
+WORKER_TORCH_THREADS = 1
+
+
+def limit_worker_threads(threads: int = WORKER_TORCH_THREADS) -> int:
+    """Pin Torch to ``threads`` threads *in this process only*.
+
+    This used to run at import time, which meant that importing
+    :mod:`rlai.workers` anywhere - including the trainer, which imports
+    :class:`WorkerPool` - silently reduced the trainer to a single Torch
+    thread.  The limit is now applied where it belongs: inside the worker
+    process itself.
+    """
+    try:
+        torch.set_num_threads(max(1, int(threads)))
+    except Exception:  # pragma: no cover - platform specific
+        pass
+    return max(1, int(threads))
 
 
 def _empty_rollout() -> dict[str, np.ndarray]:
@@ -146,13 +164,19 @@ def collect_rollout(env: MatchEnv, policy: TorchPolicy, n_steps: int, seed: int)
 
 def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None:
     try:
-        torch.set_num_threads(1)
+        limit_worker_threads()
         from .config import TrainingConfig
 
         config = TrainingConfig.model_validate(config_dict)
         spec = get_mode(config.mode)
         weights = RewardWeights.from_dict(config.reward.to_dict())
         opponent_name = "chase" if config.self_play else config.opponent
+        if opponent_name == "self":
+            # "self" needs a pool snapshot, which the worker does not have.
+            # The trainer normally resolves this before it starts the workers;
+            # falling back here keeps a misconfigured run from dying with an
+            # opaque "unknown opponent" error.
+            opponent_name = "chase"
         active_opponent = opponent_name
         env = MatchEnv(
             spec,
@@ -186,9 +210,23 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
                 active_opponent = "self"
             else:
                 requested = message.get("opponent") or active_opponent
+                execution = message.get("opponent_execution")
                 if requested != active_opponent:
-                    env.opponent = build_opponent(requested, seed=seed, device="cpu")
+                    # the execution override belongs to a difficulty level;
+                    # a plain scripted opponent keeps its own behaviour
+                    env.opponent = build_opponent(
+                        requested,
+                        seed=seed,
+                        device="cpu",
+                        execution=execution if requested.startswith("difficulty:") else None,
+                    )
                     active_opponent = requested
+                elif execution:
+                    # the adaptive match dynamics changed the opponent's
+                    # execution parameters without changing its behaviour
+                    apply_execution = getattr(env.opponent, "apply_execution", None)
+                    if apply_execution is not None:
+                        apply_execution(execution)
             # Every worker gets its own deterministic episode seed; otherwise
             # all workers would replay the identical kickoff sequence.
             rollout = collect_rollout(
@@ -266,6 +304,7 @@ class WorkerPool:
         opponent_state=None,
         opponent: str | None = None,
         policy_teams: list[int] | None = None,
+        opponent_execution: dict | None = None,
     ) -> list[dict]:
         for index, parent in enumerate(self.parents):
             team = None if policy_teams is None else int(policy_teams[index % len(policy_teams)])
@@ -278,6 +317,7 @@ class WorkerPool:
                     "opponent_state": opponent_state,
                     "opponent": opponent,
                     "policy_team": team,
+                    "opponent_execution": opponent_execution,
                 }
             )
         results = []
