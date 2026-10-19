@@ -75,6 +75,19 @@ def wilson_interval(wins: int, games: int, z: float = 1.96) -> tuple[float, floa
     return (max(0.0, centre - margin), min(1.0, centre + margin))
 
 
+def count_touches(env: MatchEnv, agents) -> int:
+    """Ball contacts recorded during the step that was just played.
+
+    RLGym defines ``Car.ball_touches`` as the number of touches *since the
+    last state was sent*; the simulator engine zeroes the counter after every
+    state read.  The value is therefore already a per-step delta and must be
+    added as-is.  The previous implementation treated it as a cumulative
+    counter and only added the difference when the value grew, so a contact
+    that followed another contact on the previous decision step was dropped.
+    """
+    return sum(int(env.state.cars[agent].ball_touches) for agent in agents)
+
+
 def _opponent_for(name: str, seed: int, policy, device: str, spec: ModeSpec):
     """Build the opponent.  ``policy`` is already the view it should use."""
     if name == "self":
@@ -188,7 +201,6 @@ def evaluate_policy(
             goals_against = 0
             ticks = 0
             touches = 0
-            previous_touches = 0
             target_ticks = int(match_seconds * 120)
             while ticks < target_ticks:
                 agents = env.policy_agents
@@ -202,18 +214,9 @@ def evaluate_policy(
                         goals_for += 1
                     elif result.info.scoring_team == 1 - team:
                         goals_against += 1
-                current_touches = sum(int(env.state.cars[a].ball_touches) for a in agents)
-                # Counters reset with the episode, so add the delta when the
-                # counter grows and add the new value when it was reset.
-                touches += (
-                    current_touches - previous_touches
-                    if current_touches >= previous_touches
-                    else current_touches
-                )
-                previous_touches = current_touches
+                touches += count_touches(env, agents)
                 if result.done or result.truncated:
                     obs = env.reset()
-                    previous_touches = 0
                 else:
                     obs = result.obs
             if goals_for > goals_against:

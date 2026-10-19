@@ -177,7 +177,6 @@ class _AgentMemory:
     prev_ball_pos: np.ndarray | None = None
     prev_ball_vel: np.ndarray | None = None
     prev_boost: float = 0.0
-    prev_touches: int = 0
     prev_bump_victim: object | None = None
     steps: int = 0
     last_paid_touch_step: int = -(10**9)
@@ -226,7 +225,6 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
             mem.prev_ball_pos = initial_state.ball.position.copy()
             mem.prev_ball_vel = initial_state.ball.linear_velocity.copy()
             mem.prev_boost = float(car.boost_amount)
-            mem.prev_touches = int(car.ball_touches)
             mem.prev_bump_victim = car.bump_victim_id
 
     def get_rewards(self, agents, state, is_terminated, is_truncated, shared_info):
@@ -306,9 +304,16 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
         # they are directional: what matters is where the ball goes *after*
         # the touch, not that contact happened.
         mem.steps += 1
-        touches = int(car.ball_touches)
-        new_touches = max(touches - mem.prev_touches, 0)
-        paid = new_touches and (mem.steps - mem.last_paid_touch_step >= TOUCH_COOLDOWN_STEPS)
+        # RLGym defines ``Car.ball_touches`` as the number of contacts *since
+        # the last state was sent*, and the simulator engine zeroes the
+        # counter after every state read.  It is therefore already a per-step
+        # delta.  The old code treated it as a cumulative counter and
+        # subtracted the previous step's value, which silently dropped the
+        # second of two contacts that happened on consecutive decision steps.
+        new_touches = int(car.ball_touches)
+        paid = bool(new_touches) and (
+            mem.steps - mem.last_paid_touch_step >= TOUCH_COOLDOWN_STEPS
+        )
         if new_touches:
             # contacts are always *counted* (curriculum evidence), but only
             # paid outside the cooldown (anti tap-farming; see constants)
@@ -343,7 +348,6 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
                     stopped = min((was_threat - still_threat) / SUPERSONIC_SPEED, 1.0)
                     defense = w.defense * stopped
                     events["defensive_touches"] = 1
-        mem.prev_touches = touches
 
         offset = ball.position - pos
 

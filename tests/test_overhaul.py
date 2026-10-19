@@ -75,14 +75,21 @@ def test_ball_moving_toward_goal_is_the_dense_signal():
 
 
 def test_touch_pays_for_direction_and_counts_shots():
+    from rlai.rewards import TOUCH_COOLDOWN_STEPS
+
     reward, state, agents, shared, blue = _reward_setup()
-    # hard touch straight at the orange goal from midfield
+    # hard touch straight at the orange goal from midfield.  ``ball_touches``
+    # is a per-step counter that the engine zeroes after every state read.
     state.ball.linear_velocity = np.array([0.0, 2000.0, 0.0], dtype=np.float32)
-    state.cars[blue].ball_touches += 1
+    state.cars[blue].ball_touches = 1
     good = reward.get_rewards(agents, state, {}, {}, shared)[blue]
-    # same contact, ball fired at the own goal instead
+    state.cars[blue].ball_touches = 0
+    # let the anti-tap cooldown elapse without a contact in between
+    for _ in range(TOUCH_COOLDOWN_STEPS):
+        reward.get_rewards(agents, state, {}, {}, shared)
+    # a second contact, ball fired at the own goal instead
     state.ball.linear_velocity = np.array([0.0, -2000.0, 0.0], dtype=np.float32)
-    state.cars[blue].ball_touches += 1
+    state.cars[blue].ball_touches = 1
     bad = reward.get_rewards(agents, state, {}, {}, shared)[blue]
     assert good > 0.5 > bad
     stats = shared["reward_stats_by_agent"][blue]
@@ -386,11 +393,14 @@ def test_touch_cooldown_stops_tap_farming_but_not_counting():
     reward, state, agents, shared, blue = _reward_setup(RewardWeights(touch=1.0))
     paid_steps = 0
     for _ in range(TOUCH_COOLDOWN_STEPS * 3):
-        state.cars[blue].ball_touches += 1
+        # one contact during this decision step; the engine zeroes the
+        # counter after every state read, so each step starts from zero
+        state.cars[blue].ball_touches = 1
         before = shared["reward_stats_by_agent"][blue]["touch"]
         reward.get_rewards(agents, state, {}, {}, shared)
         if shared["reward_stats_by_agent"][blue]["touch"] > before:
             paid_steps += 1
+        state.cars[blue].ball_touches = 0
     stats = shared["reward_stats_by_agent"][blue]
     assert stats["touches"] == TOUCH_COOLDOWN_STEPS * 3  # every contact counted
     assert paid_steps == 3  # ...but paid at most once per cooldown

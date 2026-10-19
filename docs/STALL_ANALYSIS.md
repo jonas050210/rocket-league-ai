@@ -1,0 +1,339 @@
+# Training-stall analysis (2026-10-19)
+
+Reproduction and root-cause report for the reported stall: resumed run,
+`obs_version=2`, evaluation stuck at `0W 9L 1D` (goals ~0:25), curriculum
+stuck on `first-touch`, very low touch rate, `evaluation stall` warning,
+PPO KL ~0.001–0.01, training return swinging without evaluation progress.
+
+Nothing in this document changes reward weights, curriculum thresholds,
+observation versions or PPO hyperparameters.  No existing checkpoint, run
+row or training log was modified or deleted.
+
+## Method
+
+The live training process was not touched, stopped or restarted, and no
+experiment ran against the user's data directory.  Every measurement below
+comes from an isolated `RLAI_DATA_DIR` under `/tmp`:
+
+| run | config | result |
+| --- | --- | --- |
+| `diag1` | 40k steps, rollout 512, 1 worker, 20 s episodes, obs v2, curriculum, drill resets, idle opponent, eval every 10 iterations × 2 games | reproduced the stall signature exactly (see below), 9 checkpoints (old behaviour) |
+| `diag2` | identical to `diag1`, run again after the fixes | same stall signature, 1 checkpoint (new behaviour); reported touches 41 → 67 (not a controlled comparison: the reward change alters the updates) |
+| `learn1` | 400k steps, 1 worker, same reward, no evaluation | policy still nearly uniform |
+| `term1` | 200k steps, hidden 32×32, 2 epochs, no curriculum | policy still nearly uniform |
+| probes | direct `MatchEnv` rollouts, `ppo_update`, `evaluate_policy` | used for the mechanism measurements |
+
+Machine: 2 vCPU, no GPU, Torch CPU.  Throughput ~1,900 steps/s per worker.
+
+## Confirmed code defects and fixes
+
+### 1. `ball_touches` was treated as a cumulative counter (3 places)
+
+RLGym defines `Car.ball_touches` as *"number of ball touches since last state
+was sent"* (`rlgym/rocket_league/api/car.py`), and the simulator engine
+assigns it to the car and immediately zeroes its own counter
+(`rlgym/rocket_league/sim/rocketsim_engine.py`, `_get_state`).  It is
+therefore already a **per-step delta**.  Measured directly: a contact step
+reports `2`, every following step reports `0`.
+
+The project subtracted the previous step's value anyway:
+
+* `src/rlai/rewards.py` (`SoccerReward._reward_full`):
+  `new_touches = max(touches - mem.prev_touches, 0)`.
+  Consequence: if two decision steps in a row report a contact, the second
+  one is dropped (`1 - 1 = 0`).  The same value feeds
+  `StepInfo.reward_events["touches"]`, the episode row, `charts/touches`,
+  the curriculum window and the run report.
+* `src/rlai/evaluation.py`: the same "add the difference when the counter
+  grew" logic, with an extra reset heuristic.  Evaluation touch totals were
+  therefore undercounted in exactly the same situations.
+* `src/rlai/envs.py` (`MatchEnv._touch_cache`): cached per-car values were
+  only refreshed when the **sum** over cars changed.  With two cars, a blue
+  touch followed by an orange touch has the same total, so the old per-car
+  dict was kept and the second touch was attributed to the first car.
+  `StepInfo.touches` is consumed by `benchmarks.py` (opponent touch rate).
+
+Measured undercount (30 drill episodes, per-step touch events counted
+independently):
+
+| policy | raw contacts | reported before fix | undercount | episodes affected |
+| --- | --- | --- | --- | --- |
+| scripted chase | 197 | 184 | 6.6 % | 13/30 |
+| uniform random | 13 | 11 | 15.4 % | 2/30 |
+
+Fix:
+
+* `rewards.py`: the per-step value is used as-is; `_AgentMemory.prev_touches`
+  is gone.  The anti-tap-farming cooldown is unchanged and still pays at most
+  once per `TOUCH_COOLDOWN_STEPS` decision steps.
+* `evaluation.py`: new `count_touches(env, agents)` helper that adds the
+  per-step values, used by the evaluation loop.
+* `envs.py`: new `touch_snapshot(state)` helper; the cache compares per car
+  and returns a copy, so a stored `StepInfo` cannot change later.
+
+Verification after the fix, same scripted chase episode: raw sum `20`,
+`reward_events["touches"] == 20` (before: 184 vs 197 over 30 episodes).
+
+### 2. Checkpoint policy (task 7)
+
+Before: one checkpoint every `checkpoint_interval` iterations, and one more
+after every periodic evaluation.  `diag1` wrote 9 checkpoint directories for
+40k steps; a 50M-step run would write ~10,000 directories (and `keep` only
+prunes within the run).
+
+After:
+
+* no routine periodic checkpoints in the training loop;
+* one `final` checkpoint when `total_steps` is reached (written **before**
+  the closing evaluation, so the weights are on disk even if the evaluation
+  is interrupted);
+* one `interrupt` checkpoint on a stop request (`control.json`), Ctrl+C
+  (`SIGINT`) **and now also `SIGTERM`**;
+* a stop request no longer runs the closing evaluation first — the
+  supervisor waits a bounded time for the process and a multi-minute
+  evaluation could otherwise be killed before the save;
+* periodic evaluations keep their metrics but are recorded without a model
+  id; only the closing evaluation of a completed run is linked to the
+  `final` checkpoint (and only that one can update `best.json`);
+* `_save` still de-duplicates a save at the same step by relabelling the
+  existing manifest instead of writing a second identical model, and writes
+  remain atomic (`model.pt` + `fsync` + `os.replace` + manifest).  Existing
+  checkpoints are never overwritten or removed; `prune_candidates` still
+  protects stable/best/latest/final/interrupt and only considers the same
+  run.
+
+`checkpoint_interval` remains in the configuration (old config files and
+checkpoint payloads still validate) but no longer has an effect; this is
+documented in `config.py` and `docs/TRAINING.md`.
+
+End-to-end checks (all in `/tmp`):
+
+* 4,096-step run with `checkpoint_interval: 1` and eval every 4 iterations
+  → exactly one checkpoint, `…-final`, step 4096, written before
+  `eval[after]`;
+* auto-resume at `total_steps` → no new checkpoint, no duplicate;
+* stop request during a 200k-step run → exactly one `…-interrupt`
+  checkpoint at the current step, status `stopped`, `resumable: true`;
+* `SIGTERM` on a running process → exit 0, `interrupt` checkpoint
+  (`terminated request (SIGTERM)`), resumable; resuming from that
+  checkpoint continued at the right step and later wrote the `final`
+  checkpoint.
+
+## Audits that came back healthy
+
+### Touch detection chain (task 1)
+
+`RocketSim` touch callback → `RocketSimEngine._ball_touch_callback`
+(`_touches[car] += 1`) → `_get_state` copies to `Car.ball_touches` and
+zeroes the counter → `SoccerReward` counts events → `MatchEnv.reward_events`
+sums the learning team only → `workers.collect_rollout` stores them in the
+episode row → `Store.log_episode` → `charts/touches`, the curriculum window
+and the report.  The custom `ModeRocketSimEngine` re-registers the callback
+on its own arena, and the runtime probe confirmed callbacks fire.  Only the
+counting arithmetic was wrong.
+
+The curriculum window uses the same episode rows, so it inherited the same
+undercount — fixed with the reward change, without touching the thresholds.
+
+### Reward components (task 2)
+
+`diag1`/`diag2` reward components are dominated by `progress`,
+`ball_progress` and `concede`, exactly as documented.  Both are
+potential-difference terms (`gamma = 1` by default), so they telescope:
+a parked car earns 0, oscillation nets ~0
+(`test_parked_car_facing_ball_earns_nothing`,
+`test_ball_oscillation_nets_zero_ball_progress`).  `concede` is negative and
+only fires on a goal.  No component was found that pays a positive return
+without ball interaction in an unbounded way.  `ball_progress` does pay for
+ball motion the policy did not cause (including the opponent's), but because
+it is a potential this cannot be farmed and it does not change the optimum.
+
+### Evaluation (task 4)
+
+* The trainer evaluates the **live model** (`TorchPolicy(self.model)`); the
+  weights are the ones just trained.  `obs_version` is the run's version and
+  `MatchEnv` builds the same observation layout as training.
+* Checkpoint/observation compatibility is validated before resuming
+  (`validate_checkpoint` compares the checkpoint `PolicyConfig` with the
+  requested architecture **and** `saved_config.obs_size` with
+  `obs_size(requested obs_version)`); the resume merge inherits
+  `obs_version` from the checkpoint.
+* A hand-written chase policy routed through `evaluate_policy` won 1, drew 1
+  and scored 2:0 with 23 touches in 2 games — resets, goal detection, side
+  balancing, touch counting and aggregation all work.
+* The observed `0W … 0:0` evaluations against `idle` are real: with a fresh
+  (near-uniform) policy, 20 kickoff games produce 0–2 touches and no goals.
+  A random policy therefore reports `eval/touches = 0` for small suites; it
+  is not a counting failure.
+* Only defect found here: the per-step touch arithmetic above.
+
+### PPO diagnostics (task 5)
+
+`ppo_update` itself is healthy.  A synthetic batch with a clear signal moved
+every parameter (max |Δ| ≈ 2 × 10⁻³) and drove the probability of the
+rewarded action from 0.011 to 0.999 in 100 updates.  In the real runs the
+losses are finite, the critic learns (`explained_variance` −0.16 → 0.5–0.9),
+`clipfrac = 0`, gradient norm 0.1–0.6 and KL is small.  KL is *not* evidence
+of a dead optimiser; it is small because the effective step is small.
+
+## Why the curriculum is stuck (confirmed mechanism)
+
+This is the important finding, and it is **not** a code bug:
+
+1. On the first-touch stage the policy is still essentially uniform
+   (`entropy 4.49981 → 4.49852` after **200,192** steps; `ln 90 = 4.49981`).
+2. It touches the ball in 35 of 668 episodes (0.11–0.29 touches/episode in
+   the 40k runs).  A scripted chase policy at the same resets gets
+   7.9 touches/episode, so the gate (1.5) is reachable — just not by this
+   policy.
+3. At this policy the policy gradient is indistinguishable from noise:
+   two independent 1,536-sample batches give gradient cosine **−0.008**;
+   two 3,072-sample batches (≈ one full multi-worker iteration) give
+   **−0.030**.  Over 10,240 samples, the mean GAE advantage of
+   "throttle + boost" is +0.021 (no-op +0.051, standard error 0.094); the
+   apparent "best" actions are within the noise band of 90 samples.
+   In other words, at a uniform policy one decision barely changes the
+   20 s return: the per-step reward is ~0.02 while the return is dominated
+   by ball motion the policy did not cause.
+4. Curriculum promotion requires 1.5 touches/episode over ≥30 episodes and
+   ≥3 iterations.  With the measured 0.11–0.8 this is blocked, and it stays
+   blocked because PPO has no consistent gradient with which to leave the
+   uniform policy.  Lowering the threshold would only hide that.
+
+The measurement bug made the reported touch rate smaller than reality, but
+even the corrected rate (6–15 % higher) is far below 1.5, so it was not the
+cause of the stall — only a bias that worked in the same direction.
+
+The same mechanism explains the evaluation picture: the model never learns
+to reach the ball, so it neither scores nor concedes against an idle
+opponent and the stall warning fires on every window.
+
+## Measured learning and evaluation after the fixes
+
+A fresh end-to-end run with the repository's own smoke configuration
+(`configs/learning-smoke-1v1.json`: 150,528 steps, obs v4, 2 workers,
+tanh 256×256, drill resets, idle opponent, run `ls1`, data directory
+`/tmp/rlai-ls`, 131 s) gives:
+
+| metric | value |
+| --- | --- |
+| episodes | 540 |
+| episodes with at least one touch | 114 (21.1 %) |
+| touches per episode | **0.548** (uniform random 0.433, idle 0.067) |
+| touches per episode by quarter | 0.400 → 0.541 → 0.793 → 0.459 |
+| training goals for:against | 13:51 |
+| wins | 13 |
+| policy entropy | 4.34 → 4.15 |
+| explained variance | 0.54–0.91 |
+| evaluation before / after | 0W 0L 4D, 0:0 / 0W 0L 4D, 0:0 |
+| 19 periodic evaluations | **2W 0L 74D, 2:0 goals** |
+| checkpoints written | 1 (`final`) |
+
+The periodic evaluations are the first non-zero evaluation goals measured
+after the fixes (every earlier reproduction reported `0:0`).  This is
+credible evidence that the initial policy *can* acquire useful ball
+interaction, but it is weak evidence: 2 goals in 76 evaluation games has a
+wide confidence interval, the training goal rate is close to the historical
+pre-fix smoke run, the run is short and single-seeded, and the curriculum
+still does not promote.  It shows the fixed measurement is no longer blind
+to progress; it does not show that 50M steps will solve the task.
+
+## Harness validation probes
+
+To separate "the trainer cannot learn" from "this task is a slow, noisy
+exploration problem", the same `MatchEnv` → `collect_rollout` → `ppo_update`
+path was run with rewards that are still driven by real simulator steps but
+carry an unambiguous learning signal:
+
+| probe | reward | result |
+| --- | --- | --- |
+| pure bandit | +1 for action 18, independent of state | sampled P(18) 0.012 → 0.991 in 150k steps; entropy 4.50 → 0.10 |
+| contextual bandit | +1 for action 18 when `ball.y > 0`, action 8 otherwise | success rate 0.023 → 0.869; entropy 4.50 → 0.40 |
+| dense proximity | +1 per decision step within 600 units of the ball | no trend (12.2 vs 13.1 reward in the first quarter) |
+| `tick_skip=16` | unchanged soccer reward | 0.353 touches/episode vs 0.42–0.55 at tick 8; no improvement |
+
+The two bandit probes show that rollout storage, the observation path,
+advantage computation, `ppo_update` and the action parser all transmit a
+learnable signal.  The soccer task is not stalled because gradients never
+reach the network; at a near-uniform policy the advantage of any single
+action is small relative to the episode-level variance (independent-batch
+gradient cosine −0.01 to −0.03; even 61,440 samples only separate
+no-op/throttle at z ≈ 3).
+
+The dense-proximity probe is inconclusive rather than negative: with drill
+resets the car already starts 700–2600 units from the ball, so the reward
+mostly reflects the reset distribution rather than the policy's behaviour.
+Raising the learning rate (3 × 10⁻³) did not produce a trend either.  None
+of these probes is a substitute for a controlled A/B run of a real reward
+change on the user's 50M-step budget.
+
+## What was deliberately not changed
+
+* reward weights (`goal`, `touch`, `ball_progress`, `progress`, …),
+* curriculum stages, thresholds and promotion windows,
+* PPO hyperparameters (CLIP, KL target, entropy coefficient, learning rate),
+* observation layout/version, action table, evaluation protocol,
+* existing checkpoints, run rows, logs or the user's data directory.
+
+## Remaining uncertainties
+
+* The positive post-fix evidence above is a single 150k-step smoke run.  It
+  is enough to show that ball interaction is measurable and can improve, but
+  not enough to estimate a learning curve or time-to-first-touch-gate.
+  A longer run on the same configuration is the next honest measurement;
+  it was not started here because it would compete with the user's training.
+* The user's run reports KL 0.001–0.01, i.e. a policy that moves more than
+  the fresh-policy reproductions here (KL ≈ 2 × 10⁻⁵).  That is consistent
+  with a checkpoint that is not uniform, but it could not be inspected
+  without the user's data directory.  If that policy still never wins, the
+  next measurement to take is the gradient cosine on *that* checkpoint
+  (same probe) — it separates "no signal" from "signal but wrong objective".
+* The closed-loop signal-to-noise problem above is only mitigated by
+  design changes that were out of scope here (e.g. a stronger early
+  approach potential, shorter first-touch episodes, or a smaller action
+  space for the first stage).  Such a change needs a controlled A/B run,
+  not a speculative edit.
+* A hard crash (uncaught exception, SIGKILL) leaves no checkpoint by design
+  under the new policy; graceful stop, Ctrl+C, SIGTERM and normal
+  completion are covered.  If crash protection is wanted again, the
+  smallest safe option is an opt-in interval that is explicitly documented
+  as a recovery net.
+
+## Files changed
+
+| file | change |
+| --- | --- |
+| `src/rlai/rewards.py` | per-step touch counting; removed `prev_touches` |
+| `src/rlai/evaluation.py` | `count_touches()` per-step helper, used by the eval loop |
+| `src/rlai/envs.py` | `touch_snapshot()`; per-car touch cache, snapshot copy |
+| `src/rlai/trainer.py` | no periodic/eval checkpoints; final at target; interrupt on stop/Ctrl+C/SIGTERM; eval/model linkage |
+| `src/rlai/config.py` | `checkpoint_interval` documented as compatibility-only |
+| `docs/TRAINING.md` | checkpoint/resume section rewritten for the new policy |
+| `docs/TESTING.md` | test counts updated |
+| `tests/test_rewards.py`, `tests/test_overhaul.py` | per-step touch contract; consecutive-contact regression |
+| `tests/test_evaluation_v2.py` | `count_touches` regression |
+| `tests/test_env_modes.py` | per-car touch snapshot regression |
+| `tests/test_trainer.py` | no periodic checkpoints, stop → interrupt, SIGTERM reason, Ctrl+C during final save |
+
+## Tests and lint
+
+```
+ruff check src tests rlbot        # All checks passed
+pytest -q                         # 527 passed, 1 skipped (jsdom) — 104 s
+```
+
+(The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by
+design when node/jsdom are unavailable.)
+
+## Reproduction commands (isolated data)
+
+```bash
+RLAI_DATA_DIR=/tmp/rlai-diag2 python -m rlai.cli headless \
+  --config-file /tmp/diag.json --run-id diag2
+RLAI_DATA_DIR=/tmp/rlai-ls python -m rlai.cli headless \
+  --config-file configs/learning-smoke-1v1.json --run-id ls1
+```
+
+`/tmp/diag.json` is the 40k-step diagnostic config (2 workers are reduced to
+1 on a 2-core machine, 20 s episodes, obs v2, curriculum, drill resets, idle
+opponent, eval every 10 iterations).

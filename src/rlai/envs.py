@@ -216,6 +216,15 @@ def build_rlgym_env(
     )
 
 
+def touch_snapshot(state) -> dict[str, int]:
+    """Per-car touch counters of the state that was just produced.
+
+    RLGym resets ``Car.ball_touches`` after every state read, so these values
+    describe the decision step that produced the state and nothing else.
+    """
+    return {agent: int(state.cars[agent].ball_touches) for agent in state.cars}
+
+
 @dataclass(slots=True)
 class StepInfo:
     tick_count: int
@@ -297,7 +306,6 @@ class MatchEnv:
         self.episode_goals_against = 0
         self.last_goal_team: int | None = None
         self._observations: dict[str, np.ndarray] = {}
-        self._touch_total = -1
         self._touches: dict[str, int] = {}
         #: per-episode accumulators owned by the env (not by a rollout), so an
         #: episode that spans two rollout collections still reports its full
@@ -401,19 +409,26 @@ class MatchEnv:
         self.episode_reward_total = {}
         self.episode_decisions = 0
         self.last_goal_team = None
-        self._touch_total = -1
+        self._touches = {}
         self._observations = obs
         self.opponent.reset(self)
         self._sync_clock()
         return obs
 
     def _touch_cache(self, state) -> dict[str, int]:
-        """Reuse the touch dict unless a ball touch actually happened."""
-        total = sum(int(state.cars[a].ball_touches) for a in state.cars)
-        if total != getattr(self, "_touch_total", -1):
-            self._touch_total = total
-            self._touches = {a: int(state.cars[a].ball_touches) for a in state.cars}
-        return self._touches
+        """Snapshot of every car's touch counter for this decision step.
+
+        Comparing per car rather than the sum matters: with two cars, one
+        car's touch and the other car's touch on the next step can produce
+        the same total, and the old cache then kept reporting the previous
+        step's per-car values (misattributing a touch to the other car).  A
+        copy is returned because the caller stores it in a :class:`StepInfo`
+        that must not change when the next step arrives.
+        """
+        current = touch_snapshot(state)
+        if current != self._touches:
+            self._touches = current
+        return dict(self._touches)
 
     def _sync_clock(self) -> None:
         elapsed = (self.env.state.tick_count - self.start_tick) / 120.0

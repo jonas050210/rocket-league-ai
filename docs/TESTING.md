@@ -57,9 +57,9 @@ python -m pytest -q
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
 | Exposure-Settings: Loopback-Standard, Host-/Port-/CORS-Validierung, Token-Warnung, `serve` | `test_app_settings.py` | bestanden |
 
-**Gesamt: 522 passed, 0 failed, 0 skipped** (ca. 2 min, 2 vCPU, mit
+**Gesamt: 528 passed, 0 failed, 0 skipped** (ca. 2 min, 2 vCPU, mit
 installiertem jsdom für den GUI-Smoke-Test), `ruff check src tests rlbot`
-sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (521 passed,
+sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (527 passed,
 1 skipped). Die einzige Warnung stammt aus `starlette`/`anyio`
 (Drittanbieter), nicht aus diesem Projekt.
 
