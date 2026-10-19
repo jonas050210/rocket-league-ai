@@ -32,9 +32,12 @@ Gewichte, sammelt die Rollouts ein und trainiert zentral.
 
 * Entscheidungsintervall: `tick_skip = 8` Ticks = 66,7 ms bei 120 Hz.
 * Aktionen werden pro Entscheidung wiederholt (RLBot-kompatibel).
-* Der Beobachtungsvektor ist 198-dimensional (Version 2), die Aktion diskret
-  (90). Checkpoints mit der alten 190er-Beobachtung bleiben über
-  `obs_version = 1` nutzbar.
+* Der Beobachtungsvektor ist 198-dimensional (Version 2, Standard), die Aktion
+  diskret (90). Version 3 (204 Werte, `obs_version = 3`) ergänzt die eigene
+  Linear- und Winkelgeschwindigkeit – ohne sie ist die eigene Geschwindigkeit
+  für die gedächtnislose Policy nicht beobachtbar. Checkpoints mit der alten
+  190er-Beobachtung bleiben über `obs_version = 1` nutzbar; ein Resume mischt
+  keine Versionen (die Validierung lehnt das mit Begründung ab).
 * `n_workers` sollte die Anzahl physischer Kerne nicht überschreiten.
   Auf einer 2-vCPU-Maschine sind 2–3 Worker sinnvoll, nicht 8.
 
@@ -43,7 +46,9 @@ Gewichte, sammelt die Rollouts ein und trainiert zentral.
 | Version | Größe | Inhalt | Verwendung |
 | --- | --- | --- | --- |
 | 1 | 190 | nur relative Merkmale | alte Checkpoints, Vergleich |
-| 2 (Standard) | 198 | zusätzlich 8 Werte Feldrahmen (Position, Blickrichtung, Ballposition, Torausrichtung, Tordistanz) | neue Läufe |
+| 2 (Standard) | 198 | zusätzlich 8 Werte Feldrahmen (Position, Blickrichtung, Ballposition, Torausrichtung, Tordistanz) | bestehende Checkpoints |
+| 3 | 204 | zusätzlich eigene Linear-/Winkelgeschwindigkeit (Auto-Rahmen) | Übergang |
+| 4 | 222 | zusätzlich eigener Up-Vektor (Welt) + Blickrichtung aller anderen Autos (Auto-Rahmen) | **neue Läufe** (`configs/1v1-curriculum.json`) |
 
 Die Feldrahmen-Werte sind keine Lerntheorie, sondern notwendige Information:
 Die Tore stehen an festen Weltkoordinaten, die relativen Blöcke enthalten
@@ -52,6 +57,31 @@ nicht rekonstruieren. Ein Kurzlauf belegt die Funktion der Pipeline, nicht
 einen Spielstärkegewinn; ein belastbarer Vergleich von Version 1 und 2 würde
 deutlich längere, mehrfach gesäte Läufe erfordern und wurde hier nicht
 durchgeführt.
+
+## Belohnung
+
+`src/rlai/rewards.py`, neu gefasst nach dem Stillstand über 2 Mio. Schritte
+(Analyse: `docs/LEARNING_OVERHAUL.md`):
+
+* **Aufgabe zuerst.** Tore/Gegentore (±10) dominieren; das stärkste dichte
+  Signal ist `ball_progress` – die Potentialdifferenz der Distanz
+  Ball→Gegnertor. `progress` (Auto→Ball) ist nur noch ein schwacher
+  Frühgradient.
+* **Potentiale statt Zustände.** Alle dichten Terme sind Differenzen; sie
+  teleskopieren über die Episode, sodass Stillstehen, Kreisen und Pendeln
+  netto ~0 ergeben – und ein frühes Tor keine Bonus-Einnahmen mehr kostet.
+  Die alten Zustandsboni `alignment`/`approach` (Ball ansehen / darauf
+  zufahren wurde pro Schritt bezahlt; Optimum: parken und schauen, 94 %
+  des Alignment-Maximums bei ~0,06 Berührungen/Episode) stehen auf 0 und
+  existieren nur noch, damit alte Konfigurationen ihr Verhalten exakt
+  reproduzieren.
+* **Ereignisse mit Richtung und Treffergenauigkeit.** Eine Berührung zahlt
+  nach der Ballgeschwindigkeit Richtung Gegnertor; `shot` gibt es nur, wenn
+  die Flugbahn-Projektion (mit Gravitation) auch zwischen Pfosten/Querlatte
+  landet — Fehlschüsse zählen als `shots_off_target`, bleiben aber unbezahlt.
+  Eine Cooldown von 4 Entscheidungen pro Auto verhindert Tipp-Farming an
+  langsamen Bällen (gezählt werden weiterhin alle Kontakte). Komponenten und Ereigniszähler werden pro Agent geführt; der
+  Report zeigt nur das Lernteam (früher wurden beide Teams summiert).
 
 ## Liga, Gegnerpool und Curriculum
 
@@ -78,15 +108,26 @@ durchgeführt.
 
 | Modus | Stufen |
 | --- | --- |
-| 1v1 | Ballkontrolle (`idle`) → `chase` → gemischt (`chase`/`random`) → Selbstspiel |
-| 2v2, 3v3 | `chase` → gemischt → Selbstspiel |
-| Heatseeker 2v2 | Ballkontrolle → `chase` → Selbstspiel |
+| 1v1 | Erster Kontakt (`idle`, Drill-Starts, 20 s) → Schießen (`idle`, gemischte Starts, 30 s) → `chase` (30 s) → gemischt (45 s) → Selbstspiel |
+| 2v2, 3v3 | Erster Kontakt → `chase` → gemischt → Selbstspiel |
+| Heatseeker 2v2 | Erster Kontakt → `chase` → Selbstspiel |
 
-Aufgestiegen wird nur, wenn über ein Fenster abgeschlossener Episoden die
-Ziel-Siegquote erreicht ist und Mindestiterationen sowie Mindestepisoden
-erfüllt sind. Die Kriterien sind bewusst kurz; sie sind ein Startpunkt und
-keine empirisch optimierten Schwellen. Die Stufe, die Iterationszähler und
-die Pool-Bilanz stehen im Checkpoint und werden beim Resume fortgesetzt.
+Jede Stufe prüft die Fertigkeit, die sie lehrt: zuerst Ballberührungen pro
+Episode, dann Tore gegen niemanden, erst danach Siegquoten gegen aktive
+Gegner. (Die alte erste Stufe verlangte 60 % *Siege* – bei Ein-Tor-Episoden
+hieß das zuverlässiges Toreschießen ab Kaltstart; sie wurde in 2 Mio.
+Schritten nie verlassen.) Jede Stufe setzt außerdem Startverteilung und Episodenlänge. `drill`-Starts
+sind randomisierte Spielsituationen in drei Szenarien: Angriff (55 %),
+Verteidigung gegen einen aufs eigene Tor rollenden Ball (25 %) und
+Mittelfeld-Rennen (20 %); `chase`-/`mixed`-Stufen nutzen `mixed`
+(Kickoff + Drills). Jeder Worker zieht außerdem seinen eigenen Gegner
+(`mixed` = chase/random pro Worker, Selbstspiel = eigene PFSP-Losung), damit
+ein Batch nicht gegen genau einen Gegner korreliert ist. Blockierte Aufstiege nennen den exakten Grund
+(`Curriculum.status()`, im Log, Report und als Metrik
+`curriculum/blocked`); eine einstürzende Stufe kann absteigen, eine
+stagnierende meldet sich laut statt schweigend zu blockieren. Stufe,
+Zähler, das Episoden-Fenster (Beweislage) und die Pool-Bilanz stehen im
+Checkpoint und werden beim Resume fortgesetzt.
 
 Der Nutzen von PFSP ist in diesem Projekt **nicht gemessen**. Der Pool ist
 implementiert, weil er die Datenverteilung im Selbstspiel kontrolliert; ob er
@@ -106,10 +147,12 @@ Der Trainer schreibt pro Iteration:
 | `charts/goals_for`, `charts/goals_against` | Tore pro Episode |
 | `eval/win_rate`, `eval/win_rate_low`, `eval/win_rate_high`, `eval/goal_diff` | periodische Evaluation mit 95-%-Wilson-Intervall |
 | `eval/touches`, `eval/draw_rate` | Ballberührungen und Remis-Anteil der Evaluation |
+| `charts/touches`, `charts/shots` | Ballberührungen und Schüsse pro Episode (Lernteam) |
 | `curriculum/stage`, `curriculum/window_win_rate` | aktuelle Stufe und Fenster-Siegquote |
+| `curriculum/window_touches`, `curriculum/window_goals_for`, `curriculum/blocked` | Fenster-Kriterien der Stufe und ob der Aufstieg blockiert ist |
 | `league/agent_elo`, `league/pool_size` | Elo des Lernenden, Poolgröße |
 | `time/sps` | Umgebungsschritte pro Sekunde |
-| `episodes/*` | Länge, Tore, Ergebnis pro Episode (SQLite-Tabelle) |
+| `episodes/*` | Länge (**Entscheidungsschritte**, nicht Ticks), Tore, Berührungen, Schüsse, Ergebnis pro Episode (SQLite-Tabelle) |
 
 Das Dashboard liest diese Werte über SQLite und SSE. Es gibt keine
 synthetischen Kurven; wenn keine Daten existieren, zeigt die Oberfläche
@@ -166,7 +209,21 @@ python -m rlai.cli train --config-file ... --auto-resume --run-id <kind> --max-s
 # explizit, oder bewusst nur Gewichte
 python -m rlai.cli train --config-file ... --resume-from <model-id> --resume-mode continue
 python -m rlai.cli train --config-file ... --resume-from <model-id> --resume-mode transfer
+
+# neue Phase auf denselben Gewichten: geerbte Felder bewusst ändern
+python -m rlai.cli train --config-file ... --auto-resume --override-config reward
 ```
+
+Betriebsparameter (`episode_seconds`, `rollout_steps`, `total_steps`, Worker,
+Evaluation, `reset_mode`) folgen immer der Anfrage; lernkritische Felder
+(`reward`, PPO-Hyperparameter, …) kommen standardmäßig aus dem Checkpoint,
+damit die Fortsetzung vergleichbar bleibt. Der Plan zeigt **vor** dem Start
+jede Abweichung mit dem tatsächlich verwendeten Wert (`overrides`,
+`effective_config`) – nichts wird still ersetzt. Wer ein geerbtes Feld
+bewusst ändern will (z. B. eine korrigierte Belohnung auf einen bestehenden
+Checkpoint anwenden), nennt es in `--override-config`; das wird als
+Phasenwechsel protokolliert (Log, Plan, Report), inklusive des Hinweises,
+dass Wertfunktion und Optimizer-Momente noch auf den alten Werten beruhen.
 
 Regeln, die `src/rlai/resume.py` durchsetzt:
 

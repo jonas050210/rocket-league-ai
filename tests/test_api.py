@@ -62,7 +62,9 @@ def test_validate_accepts_and_rejects(client):
     assert client.post("/api/config/validate", json=config).status_code == 200
     bad = dict(config, mode="hoops")
     assert client.post("/api/config/validate", json=bad).status_code == 422
-    assert client.post("/api/config/validate", json=dict(config, obs_version=3)).status_code == 422
+    # obs v3 (own-velocity block) is a real layout now; unknown ones still fail
+    assert client.post("/api/config/validate", json=dict(config, obs_version=3)).status_code == 200
+    assert client.post("/api/config/validate", json=dict(config, obs_version=99)).status_code == 422
     assert client.post("/api/config/validate", json=dict(config, eval_interval=-1)).status_code == 422
     legacy = dict(config, obs_version=1, reward={**config["reward"], "demo": 0.4})
     legacy["reward"].pop("bump", None)

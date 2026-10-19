@@ -1,6 +1,6 @@
 """Canonical observation layout.
 
-Two layouts are supported and both are produced by this module:
+Three layouts are supported and all are produced by this module:
 
 ``v1`` (190 values, legacy)
     Egocentric features only.  The car knows where the ball and the other
@@ -8,11 +8,26 @@ Two layouts are supported and both are produced by this module:
     cannot know where either goal is.  Kept so existing checkpoints stay
     usable for evaluation and deployment.
 
-``v2`` (198 values, default)
+``v2`` (198 values)
     Adds an 8-value field block: own position, own forward vector, ball world
     position, alignment of the ball with the opponent goal and the remaining
     distance to that goal.  Without these features scoring is not learnable;
     a network cannot infer a fixed goal position from relative vectors alone.
+
+``v3`` (204 values)
+    Adds the car's own linear and angular velocity in its own frame
+    (6 values).  v1/v2 contain only *relative* velocities, so with a
+    single-frame memoryless policy the car's own speed is unobservable:
+    braking before the ball, shot power and recovery all depend on it.
+
+``v4`` (222 values, recommended for new runs)
+    Adds an 18-value orientation block: the car's own *up* vector (world
+    frame - pitch/roll vs gravity, needed for recoveries and any air/wall
+    play; the field block only carries the 2D forward) and every other
+    car's *forward* vector in the own car frame (where an opponent can
+    actually drive next - its velocity alone does not say that when it is
+    slow, drifting or turning in place).  Existing checkpoints keep working
+    with their own layout; the resume validation refuses to mix layouts.
 
 Teams are padded to three cars so a 1v1, 2v2 and 3v3 checkpoint share the same
 input shape.  Rotated features are expressed in the agent's own car frame,
@@ -47,6 +62,12 @@ OPPONENT_SLOTS = 3
 PAD_FEATURES = 34
 GLOBAL_FEATURES = 4
 FIELD_FEATURES = 8
+#: own linear velocity (3) + own angular velocity (3), car frame; v3+
+VELOCITY_FEATURES = 6
+ANG_VEL_SCALE = 5.5
+#: own up vector, world frame (3) + forward of every other car slot in the
+#: own car frame (5 slots x 3); v4 only
+ORIENTATION_FEATURES = 3 + (2 + 3) * 3
 
 SELF_START = 0
 BALL_START = SELF_START + SELF_FEATURES
@@ -55,17 +76,32 @@ OPPONENTS_START = TEAMMATES_START + TEAMMATE_SLOTS * CAR_FEATURES
 PADS_START = OPPONENTS_START + OPPONENT_SLOTS * CAR_FEATURES
 GLOBAL_START = PADS_START + PAD_FEATURES
 FIELD_START = GLOBAL_START + GLOBAL_FEATURES
+VELOCITY_START = FIELD_START + FIELD_FEATURES
+ORIENTATION_START = VELOCITY_START + VELOCITY_FEATURES
 ACTION_START_V1 = FIELD_START
 ACTION_START_V2 = FIELD_START + FIELD_FEATURES
+ACTION_START_V3 = VELOCITY_START + VELOCITY_FEATURES
+ACTION_START_V4 = ORIENTATION_START + ORIENTATION_FEATURES
+ACTION_START_BY_VERSION = {
+    1: ACTION_START_V1, 2: ACTION_START_V2, 3: ACTION_START_V3, 4: ACTION_START_V4
+}
 
 OBS_SIZE_V1 = ACTION_START_V1 + ACTION_COUNT
 OBS_SIZE_V2 = ACTION_START_V2 + ACTION_COUNT
-OBS_SIZE_BY_VERSION = {1: OBS_SIZE_V1, 2: OBS_SIZE_V2}
+OBS_SIZE_V3 = ACTION_START_V3 + ACTION_COUNT
+OBS_SIZE_V4 = ACTION_START_V4 + ACTION_COUNT
+OBS_SIZE_BY_VERSION = {1: OBS_SIZE_V1, 2: OBS_SIZE_V2, 3: OBS_SIZE_V3, 4: OBS_SIZE_V4}
+# Default layout.  Deliberately still v2: every existing configuration file
+# that omits ``obs_version`` must keep meaning the layout its checkpoints were
+# trained with.  New runs opt into v3 explicitly (see the example configs);
+# the resume validation refuses to mix layouts either way.
 OBS_VERSION = 2
 OBS_SIZE = OBS_SIZE_BY_VERSION[OBS_VERSION]
 
 assert OBS_SIZE_V1 == 10 + 7 + 18 + 27 + 34 + 4 + 90 == 190
 assert OBS_SIZE_V2 == 190 + 8 == 198
+assert OBS_SIZE_V3 == 198 + 6 == 204
+assert OBS_SIZE_V4 == 204 + 18 == 222
 
 GOAL_CENTERS = {
     BLUE_TEAM: np.asarray(ORANGE_GOAL_CENTER, dtype=np.float32),
@@ -125,6 +161,11 @@ def mirror_observation(obs: np.ndarray, obs_version: int = OBS_VERSION) -> np.nd
       ``forward_y``, ``ball_x`` and ``ball_y`` all flip sign, while goal
       alignment and goal distance stay the same;
     * boost pads: the block is reversed (RLGym's ``inverted_boost_pad_timers``);
+    * own velocity block (v3): **invariant** - it is expressed in the car's
+      own frame and the car rotates with the world;
+    * orientation block (v4): the own *up* vector is a world-frame vector,
+      so its x/y flip like the field block; the other cars' forwards are in
+      the own car frame and are invariant;
     * the recorded last action: **invariant** - throttle, steer, yaw, pitch,
       roll, jump, boost and handbrake are all car-relative.
 
@@ -145,6 +186,9 @@ def mirror_observation(obs: np.ndarray, obs_version: int = OBS_VERSION) -> np.nd
     if version >= 2:
         for offset in range(6):  # pos x/y, forward x/y, ball x/y
             mirrored[FIELD_START + offset] = -values[FIELD_START + offset]
+    if version >= 4:
+        mirrored[ORIENTATION_START + 0] = -values[ORIENTATION_START + 0]  # up x
+        mirrored[ORIENTATION_START + 1] = -values[ORIENTATION_START + 1]  # up y
     return mirrored
 
 
@@ -289,8 +333,36 @@ def _build_obs(
             )
         obs[FIELD_START + 7] = _clamp(distance / 8000.0, 0.0, 1.5)
 
+    # -- own velocity (v3, car frame) --------------------------------------
+    if obs_version >= 3:
+        own_vel = vel @ rot
+        own_ang = physics.angular_velocity @ rot
+        for index in range(3):
+            obs[VELOCITY_START + index] = _clamp(own_vel[index] / VEL_SCALE, -2.0, 2.0)
+            obs[VELOCITY_START + 3 + index] = _clamp(
+                own_ang[index] / ANG_VEL_SCALE, -2.0, 2.0
+            )
+
+    # -- orientation (v4) ----------------------------------------------------
+    if obs_version >= 4:
+        # own up in world coordinates (rotation matrix column 2): together
+        # with the 2D forward of the field block this fixes pitch and roll.
+        for index in range(3):
+            obs[ORIENTATION_START + index] = _clamp(float(rot[index, 2]), -1.0, 1.0)
+        others = [
+            *(teammates[slot] if slot < len(teammates) else None for slot in range(TEAMMATE_SLOTS)),
+            *(opponents[slot] if slot < len(opponents) else None for slot in range(OPPONENT_SLOTS)),
+        ]
+        for slot, other in enumerate(others):
+            if other is None:
+                continue
+            fwd = np.asarray(other.physics.forward, dtype=np.float32) @ rot
+            base = ORIENTATION_START + 3 + slot * 3
+            for index in range(3):
+                obs[base + index] = _clamp(float(fwd[index]), -1.0, 1.0)
+
     # -- last action one-hot -----------------------------------------------
-    action_start = ACTION_START_V2 if obs_version >= 2 else ACTION_START_V1
+    action_start = ACTION_START_BY_VERSION[obs_version]
     if last_action is not None and 0 <= int(last_action) < ACTION_COUNT:
         obs[action_start + int(last_action)] = 1.0
     return obs
@@ -327,13 +399,25 @@ def build_observation(
 class SoccerObsBuilder(ObsBuilder[AgentID, np.ndarray, GameState, tuple[str, int]]):
     """RLGym observation builder wrapping :func:`build_observation`."""
 
-    def __init__(self, spec: ModeSpec, obs_version: int = OBS_VERSION):
+    def __init__(
+        self,
+        spec: ModeSpec,
+        obs_version: int = OBS_VERSION,
+        episode_seconds: float | None = None,
+    ):
         super().__init__()
         self.spec = spec
         self.obs_version = int(obs_version)
         if self.obs_version not in OBS_SIZE_BY_VERSION:
             raise ValueError(f"unknown observation version {obs_version}")
         self.size = obs_size(self.obs_version)
+        # first-frame clock: the *configured* episode length, not the mode
+        # default (a 15 s drill used to tell the policy "60 s left" once)
+        self.episode_seconds = (
+            float(episode_seconds)
+            if episode_seconds is not None
+            else float(spec.default_episode_seconds)
+        )
         self._state: GameState | None = None
         self._clock: dict[str, Any] = {}
 
@@ -343,7 +427,7 @@ class SoccerObsBuilder(ObsBuilder[AgentID, np.ndarray, GameState, tuple[str, int
     def reset(self, agents, initial_state, shared_info) -> None:
         self._state = initial_state
         shared_info["last_action"] = {agent: None for agent in agents}
-        shared_info["time_remaining"] = float(self.spec.default_episode_seconds)
+        shared_info["time_remaining"] = self.episode_seconds
         shared_info["score_diff"] = 0
 
     def build_obs(self, agents, state, shared_info) -> dict[AgentID, np.ndarray]:

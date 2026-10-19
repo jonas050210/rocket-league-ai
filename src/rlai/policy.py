@@ -140,6 +140,43 @@ class TorchPolicy:
         return cls(config.build(), device)
 
     @torch.no_grad()
+    def act_batch(
+        self,
+        batch: np.ndarray,
+        *,
+        deterministic: bool = False,
+        generator: torch.Generator | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Array in, arrays out: the hot path used by rollout workers.
+
+        Profiling a 1v1 rollout showed ~40 % of ``act`` time inside
+        ``torch.distributions.Categorical`` construction/sampling - pure
+        Python overhead around a 1-row MLP.  This path does the same math
+        with ``log_softmax`` + ``multinomial`` and no dict round-trips.
+        ``batch`` is ``(K, obs_size)``; returns int64 actions and float32
+        logprobs/values, each ``(K,)``.
+        """
+        tensor = torch.as_tensor(
+            np.asarray(batch, dtype=np.float32), device=self.device
+        )
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        logits, values = self.model(tensor)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        if deterministic:
+            actions = torch.argmax(log_probs, dim=-1)
+        else:
+            actions = torch.multinomial(
+                log_probs.exp(), 1, generator=generator
+            ).squeeze(-1)
+        chosen = log_probs.gather(1, actions.unsqueeze(-1)).squeeze(-1)
+        return (
+            actions.cpu().numpy().astype(np.int64),
+            chosen.cpu().numpy().astype(np.float32),
+            values.cpu().numpy().astype(np.float32),
+        )
+
+    @torch.no_grad()
     def act(
         self,
         obs: np.ndarray | dict,
@@ -154,22 +191,11 @@ class TorchPolicy:
             else np.stack([np.asarray(obs[k], dtype=np.float32) for k in obs])
         )
         keys = None if single else list(obs)
-        tensor = torch.as_tensor(batch, device=self.device)
-        logits, values = self.model(tensor)
-        dist = torch.distributions.Categorical(logits=logits)
-        if deterministic:
-            actions = torch.argmax(logits, dim=-1)
-        else:
-            actions = (
-                dist.sample()
-                if generator is None
-                else torch.multinomial(
-                    torch.softmax(logits, dim=-1), 1, generator=generator
-                ).squeeze(-1)
-            )
-        logprobs = dist.log_prob(actions)
+        actions, logprobs, values = self.act_batch(
+            batch, deterministic=deterministic, generator=generator
+        )
         if single:
-            return int(actions.item()), float(logprobs.item()), float(values.item())
+            return int(actions[0]), float(logprobs[0]), float(values[0])
         return (
             {k: int(a) for k, a in zip(keys, actions.tolist())},
             {k: float(lp) for k, lp in zip(keys, logprobs.tolist())},

@@ -22,11 +22,11 @@ def _env(mode="soccer-1v1", obs_version=None):
 
 
 def test_declared_sizes_are_consistent():
-    assert OBS_SIZE_BY_VERSION == {1: 190, 2: 198}
+    assert OBS_SIZE_BY_VERSION == {1: 190, 2: 198, 3: 204, 4: 222}
     assert obs_size(2) == OBS_SIZE == 198
     assert obs_size() == obs_size(obs_mod.OBS_VERSION)
     with pytest.raises(ValueError):
-        obs_size(3)
+        obs_size(99)
 
 
 def test_training_config_exposes_matching_sizes():

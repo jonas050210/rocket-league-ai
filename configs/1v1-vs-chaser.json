@@ -26,13 +26,15 @@
   "reward": {
     "goal": 10.0,
     "concede": 10.0,
-    "touch": 0.35,
-    "progress": 0.9,
-    "alignment": 0.02,
-    "approach": 0.03,
-    "boost": 0.02,
-    "defense": 0.15,
-    "bump": 0.3
+    "touch": 0.4,
+    "ball_progress": 1.0,
+    "progress": 0.35,
+    "shot": 1.0,
+    "defense": 0.5,
+    "alignment": 0.0,
+    "approach": 0.0,
+    "boost": 0.0,
+    "bump": 0.0
   },
   "policy": {
     "hidden": [

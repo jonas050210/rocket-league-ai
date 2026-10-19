@@ -82,6 +82,7 @@ class JobManager:
         resume_from: str | None = None,
         resume_mode: str = "fresh",
         allow_concurrent: bool = False,
+        config_overrides: list[str] | tuple[str, ...] | None = None,
     ) -> dict:
         if resume_mode not in ("fresh", "continue", "transfer"):
             raise ValueError(f"resume_mode must be fresh, continue or transfer, got {resume_mode!r}")
@@ -116,6 +117,8 @@ class JobManager:
         command += ["--resume-mode", resume_mode]
         if resume_from:
             command += ["--resume-from", str(resume_from)]
+        if config_overrides:
+            command += ["--override-config", ",".join(str(f) for f in config_overrides)]
         process = subprocess.Popen(
             command,
             cwd=str(project_root()),

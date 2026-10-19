@@ -80,6 +80,12 @@ def _resolve_resume(args: argparse.Namespace, config: TrainingConfig) -> tuple[s
     return mode, reference
 
 
+def _override_fields(args: argparse.Namespace) -> tuple[str, ...]:
+    """Parse ``--override-config a,b`` into validated field names."""
+    raw = getattr(args, "override_config", None) or ""
+    return tuple(part.strip() for part in str(raw).split(",") if part.strip())
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     from .resume import plan_resume
     from .trainer import run_training
@@ -93,14 +99,20 @@ def cmd_train(args: argparse.Namespace) -> int:
 
     run_id = args.run_id
     plan = None
+    override_fields = _override_fields(args)
     if resume_mode != "fresh":
-        plan = plan_resume(
-            paths["models"],
-            config,
-            mode=resume_mode,
-            run_id=run_id,
-            checkpoint=reference,
-        )
+        try:
+            plan = plan_resume(
+                paths["models"],
+                config,
+                mode=resume_mode,
+                run_id=run_id,
+                checkpoint=reference,
+                explicit_overrides=override_fields,
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         _print({"resume_plan": plan.to_dict()})
         if args.plan_only:
             return 0
@@ -131,6 +143,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         resume_from=str(plan.checkpoint_path) if plan and plan.will_resume else None,
         resume_mode=resume_mode,
         resume_plan=plan,
+        config_override_fields=override_fields,
     )
     if getattr(args, "headless", False):
         # Headless mode prints one compact final report instead of the full
@@ -200,13 +213,18 @@ def cmd_resume_plan(args: argparse.Namespace) -> int:
     if args.max_steps:
         config = config.model_copy(update={"total_steps": int(args.max_steps)})
     paths = ensure_dirs()
-    plan = plan_resume(
-        paths["models"],
-        config,
-        mode=args.mode,
-        run_id=args.run_id,
-        checkpoint=args.checkpoint,
-    )
+    try:
+        plan = plan_resume(
+            paths["models"],
+            config,
+            mode=args.mode,
+            run_id=args.run_id,
+            checkpoint=args.checkpoint,
+            explicit_overrides=_override_fields(args),
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     _print(plan.to_dict())
     print(plan.summary(), file=sys.stderr)
     return 0 if (plan.will_resume or args.mode == "fresh") else 3
@@ -430,6 +448,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument("--max-steps", type=int, default=None)
     train.add_argument(
+        "--override-config",
+        default=None,
+        help=(
+            "comma-separated inherited fields (e.g. reward,gamma) to change deliberately "
+            "on a continue resume; starts a recorded new training phase on the same weights"
+        ),
+    )
+    train.add_argument(
         "--headless",
         action="store_true",
         help=(
@@ -458,12 +484,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     headless.add_argument("--plan-only", action="store_true")
     headless.add_argument("--max-steps", type=int, default=None)
+    headless.add_argument("--override-config", default=None, help="see train --override-config")
     headless.set_defaults(func=cmd_train, headless=True)
     plan.add_argument("--config-file", required=True)
     plan.add_argument("--mode", default="continue", choices=["fresh", "continue", "transfer"])
     plan.add_argument("--run-id", default=None)
     plan.add_argument("--checkpoint", default=None, help="explicit checkpoint id or path")
     plan.add_argument("--max-steps", type=int, default=None)
+    plan.add_argument("--override-config", default=None, help="see train --override-config")
     plan.set_defaults(func=cmd_resume_plan)
 
     report = sub.add_parser("report", help="print the persisted training statistics report")

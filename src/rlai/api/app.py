@@ -44,6 +44,9 @@ class StartRunRequest(TrainingConfig):
 
     resume_from: str | None = None
     resume_mode: str = "fresh"
+    #: inherited config fields to change deliberately on a continue resume
+    #: (a recorded phase change; see rlai.resume.merge_config)
+    config_overrides: list[str] = []
     allow_concurrent: bool = False
     #: the user confirmed the start (the GUI asks before it posts)
     confirm: bool = False
@@ -56,6 +59,7 @@ class ResumePlanRequest(BaseModel):
     mode: str = "continue"
     run_id: str | None = None
     checkpoint: str | None = None
+    config_overrides: list[str] = []
 
 
 class StartPlanRequest(BaseModel):
@@ -462,6 +466,7 @@ def create_app(store_path: Path | None = None) -> FastAPI:
                 mode=request.mode,
                 run_id=request.run_id,
                 checkpoint=request.checkpoint,
+                explicit_overrides=request.config_overrides,
             )
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -526,7 +531,7 @@ def create_app(store_path: Path | None = None) -> FastAPI:
         if resume_mode == "fresh":
             resume_from = None
         stored = request.model_dump(
-            exclude={"resume_from", "resume_mode", "allow_concurrent", "confirm"}
+            exclude={"resume_from", "resume_mode", "allow_concurrent", "confirm", "config_overrides"}
         )
         config = TrainingConfig.model_validate(stored)
         if resume_mode in ("continue", "transfer") and not resume_from:
@@ -537,7 +542,10 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             # suitable checkpoint exists the start is refused with a reason.
             from ..resume import plan_resume
 
-            plan = plan_resume(paths["models"], config, mode=resume_mode)
+            plan = plan_resume(
+                paths["models"], config, mode=resume_mode,
+                explicit_overrides=request.config_overrides,
+            )
             if not plan.will_resume:
                 raise HTTPException(
                     status_code=400,
@@ -558,7 +566,8 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             from ..resume import plan_resume
 
             plan = plan_resume(
-                paths["models"], config, mode=resume_mode, checkpoint=resume_from
+                paths["models"], config, mode=resume_mode, checkpoint=resume_from,
+                explicit_overrides=request.config_overrides,
             )
             if not plan.will_resume:
                 reasons = [
@@ -581,6 +590,7 @@ def create_app(store_path: Path | None = None) -> FastAPI:
                 resume_from=resume_from,
                 resume_mode=resume_mode,
                 allow_concurrent=request.allow_concurrent,
+                config_overrides=request.config_overrides,
             )
         except RuntimeError as exc:
             # an explicit refusal (another run is active), not a crash

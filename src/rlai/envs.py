@@ -94,23 +94,120 @@ class ModeRocketSimEngine(RocketSimEngine):
         return state
 
 
+#: episode starting-state distributions (see :class:`ResetMutator`)
+RESET_MODES = ("kickoff", "drill", "mixed")
+
+
+class ResetMutator(KickoffMutator):
+    """Kickoff or randomized "drill" starts, chosen per reset.
+
+    Every pre-overhaul episode started from a kickoff.  A weak policy then
+    spends its life in the small set of states reachable from kickoffs and
+    almost never experiences the states that matter (ball close, ball near
+    the goal, shooting angles), so goal credit has nothing to attach to.
+
+    ``drill`` starts sample one of three scenarios per episode:
+
+    * **attack** (55 %): ball at a random position (sometimes rolling),
+      every car on its own defensive side of the ball - the last seconds of
+      an attack, thousands of times;
+    * **defense** (25 %): ball rolling toward the learning team's goal
+      (``shared_info['drill_team']``, set by :class:`MatchEnv`), its cars
+      goal-side of the ball - saves and clearances, which kickoff-only
+      training against a passive opponent never teaches;
+    * **race** (20 %): slow ball near midfield, both teams at comparable
+      distances - contested first touches and 50/50s.
+
+    ``mixed`` flips a coin between kickoff and drill per episode.  The mode
+    is read from ``shared_info['reset_mode']`` on every reset, so a
+    curriculum stage can change it without rebuilding the arena.
+    Randomness comes from the ``random`` module, which
+    :meth:`MatchEnv.reset` seeds deterministically.
+    """
+
+    def apply(self, state: GameState, shared_info: dict[str, Any]) -> None:
+        mode = str(shared_info.get("reset_mode", "kickoff"))
+        if mode == "mixed":
+            mode = "drill" if random.random() < 0.5 else "kickoff"
+        if mode != "drill":
+            super().apply(state, shared_info)
+            return
+        drill_team = int(shared_info.get("drill_team", BLUE_TEAM))
+        roll = random.random()
+        scenario = "attack" if roll < 0.55 else ("defense" if roll < 0.80 else "race")
+        if scenario == "defense":
+            # ball in the learning team's half, travelling at its goal
+            defend_sign = -1.0 if drill_team == BLUE_TEAM else 1.0  # own goal y sign
+            ball_x = random.uniform(-2000.0, 2000.0)
+            ball_y = defend_sign * random.uniform(500.0, 3000.0)
+            speed = random.uniform(800.0, 1600.0)
+            state.ball.linear_velocity = np.array(
+                [random.uniform(-300.0, 300.0), defend_sign * speed, 0.0], dtype=np.float32
+            )
+        elif scenario == "race":
+            ball_x = random.uniform(-1500.0, 1500.0)
+            ball_y = random.uniform(-1200.0, 1200.0)
+            state.ball.linear_velocity = np.array(
+                [random.uniform(-200.0, 200.0), random.uniform(-200.0, 200.0), 0.0],
+                dtype=np.float32,
+            )
+        else:
+            ball_x = random.uniform(-2500.0, 2500.0)
+            ball_y = random.uniform(-3500.0, 3500.0)
+            if random.random() < 0.5:
+                angle = random.uniform(0.0, 2.0 * np.pi)
+                speed = random.uniform(0.0, 600.0)
+                state.ball.linear_velocity = np.array(
+                    [speed * np.cos(angle), speed * np.sin(angle), 0.0], dtype=np.float32
+                )
+            else:
+                state.ball.linear_velocity = np.zeros(3, dtype=np.float32)
+        state.ball.position = np.array([ball_x, ball_y, 93.0], dtype=np.float32)
+        state.ball.angular_velocity = np.zeros(3, dtype=np.float32)
+        shared_info["drill_scenario"] = scenario
+        for car in state.cars.values():
+            # Blue attacks +y (orange goal), orange attacks -y.  Every car
+            # starts on its own-goal side of the ball: for an attacker that
+            # is "behind the ball" (driving at it plays it toward the target
+            # goal); for the defending team in the defense scenario the same
+            # side is *between ball and own goal*, facing the incoming ball.
+            attack = 1.0 if car.team_num == BLUE_TEAM else -1.0
+            if scenario == "defense" and int(car.team_num) == drill_team:
+                distance = random.uniform(500.0, 1800.0)
+            elif scenario == "race":
+                distance = random.uniform(1200.0, 2000.0)
+            else:
+                distance = random.uniform(700.0, 2600.0)
+            car_y_raw = ball_y - attack * distance
+            car_x = float(np.clip(ball_x + random.uniform(-900.0, 900.0), -3800.0, 3800.0))
+            car_y = float(np.clip(car_y_raw, -4800.0, 4800.0))
+            car.physics.position = np.array([car_x, car_y, 17.0], dtype=np.float32)
+            car.physics.linear_velocity = np.zeros(3, dtype=np.float32)
+            car.physics.angular_velocity = np.zeros(3, dtype=np.float32)
+            yaw = float(np.arctan2(ball_y - car_y, ball_x - car_x))
+            car.physics.euler_angles = np.array([0.0, yaw, 0.0], dtype=np.float32)
+            car.boost_amount = random.uniform(20.0, 100.0)
+
+
 def build_rlgym_env(
     spec: ModeSpec,
     *,
     reward_weights: RewardWeights | None = None,
+    potential_gamma: float = 1.0,
     episode_seconds: float | None = None,
     tick_skip: int = 8,
     rlbot_delay: bool = True,
     obs_version: int = OBS_VERSION,
 ) -> RLGym:
-    kickoff = ModeKickoffMutator() if spec.heatseeker else KickoffMutator()
+    kickoff = ModeKickoffMutator() if spec.heatseeker else ResetMutator()
+    seconds = episode_seconds if episode_seconds is not None else spec.default_episode_seconds
     return RLGym(
         state_mutator=MutatorSequence(
             FixedTeamSizeMutator(spec.team_size, spec.team_size), kickoff
         ),
-        obs_builder=SoccerObsBuilder(spec, obs_version=obs_version),
+        obs_builder=SoccerObsBuilder(spec, obs_version=obs_version, episode_seconds=seconds),
         action_parser=RepeatAction(LookupTableAction(), tick_skip),
-        reward_fn=SoccerReward(spec, reward_weights),
+        reward_fn=SoccerReward(spec, reward_weights, potential_gamma=potential_gamma),
         transition_engine=ModeRocketSimEngine(spec, rlbot_delay=rlbot_delay),
         termination_cond=GoalCondition(),
         truncation_cond=TimeoutCondition(
@@ -128,8 +225,12 @@ class StepInfo:
     goal_scored: bool
     scoring_team: int | None
     touches: dict[str, int]
-    #: reward components accumulated for the current episode (see rewards.py)
+    #: reward components accumulated for the current episode (see rewards.py);
+    #: these are the *learning team's* components only
     reward_components: dict[str, float] = field(default_factory=dict)
+    #: event counts (touches, shots, defensive touches, goals) of the
+    #: learning team for the current episode
+    reward_events: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -161,7 +262,13 @@ class MatchEnv:
         rlbot_delay: bool = True,
         obs_version: int = OBS_VERSION,
         policy_team: int = BLUE_TEAM,
+        reset_mode: str = "kickoff",
+        potential_gamma: float = 1.0,
     ):
+        if reset_mode not in RESET_MODES:
+            raise ValueError(f"reset_mode must be one of {RESET_MODES}, got {reset_mode!r}")
+        #: starting-state distribution, read by the reset mutator per episode
+        self.reset_mode = reset_mode
         self.spec = spec
         self.obs_version = int(obs_version)
         self.opponent = opponent
@@ -176,6 +283,7 @@ class MatchEnv:
         self.env = build_rlgym_env(
             spec,
             reward_weights=reward_weights,
+            potential_gamma=potential_gamma,
             episode_seconds=self.episode_seconds,
             tick_skip=tick_skip,
             rlbot_delay=rlbot_delay,
@@ -191,6 +299,11 @@ class MatchEnv:
         self._observations: dict[str, np.ndarray] = {}
         self._touch_total = -1
         self._touches: dict[str, int] = {}
+        #: per-episode accumulators owned by the env (not by a rollout), so an
+        #: episode that spans two rollout collections still reports its full
+        #: return and length instead of being silently dropped.
+        self.episode_reward_total: dict[str, float] = {}
+        self.episode_decisions = 0
 
     # -- helper properties -------------------------------------------------
     @property
@@ -226,9 +339,38 @@ class MatchEnv:
         return self.score_orange if self.policy_team == BLUE_TEAM else self.score_blue
 
     @property
+    def current_obs(self) -> dict[str, np.ndarray]:
+        """Observations of the current (possibly unfinished) episode."""
+        return self._observations
+
+    @property
     def reward_stats(self) -> dict[str, float]:
-        """Per-episode reward components accumulated by the reward function."""
-        return dict(self.env.shared_info.get("reward_stats", {}) or {})
+        """Per-episode reward components of the *learning team only*.
+
+        The reward function tracks every agent; summing all of them (the old
+        behaviour) mixed the opponent's shaping into the policy's reported
+        components, so the numbers described neither team.
+        """
+        by_agent = self.env.shared_info.get("reward_stats_by_agent") or {}
+        if not by_agent:
+            return dict(self.env.shared_info.get("reward_stats", {}) or {})
+        totals: dict[str, float] = {}
+        for agent in self.policy_agents:
+            for key, value in (by_agent.get(agent) or {}).items():
+                if isinstance(value, float):
+                    totals[key] = totals.get(key, 0.0) + value
+        return totals
+
+    @property
+    def reward_events(self) -> dict[str, int]:
+        """Per-episode event counts (touches/shots/…) of the learning team."""
+        by_agent = self.env.shared_info.get("reward_stats_by_agent") or {}
+        totals: dict[str, int] = {}
+        for agent in self.policy_agents:
+            for key, value in (by_agent.get(agent) or {}).items():
+                if isinstance(value, int):
+                    totals[key] = totals.get(key, 0) + value
+        return totals
 
     # -- lifecycle ---------------------------------------------------------
     def reset(self, *, episode_seed: int | None = None) -> dict[str, np.ndarray]:
@@ -244,6 +386,9 @@ class MatchEnv:
         try:
             random.seed(seed)
             np.random.seed(seed % (2**32 - 1))
+            # the reset mutator reads the starting-state distribution here
+            self.env.shared_info["reset_mode"] = self.reset_mode
+            self.env.shared_info["drill_team"] = int(self.policy_team)
             obs = self.env.reset()
         finally:
             random.setstate(python_state)
@@ -253,6 +398,8 @@ class MatchEnv:
         self.score_orange = 0
         self.episode_goals_for = 0
         self.episode_goals_against = 0
+        self.episode_reward_total = {}
+        self.episode_decisions = 0
         self.last_goal_team = None
         self._touch_total = -1
         self._observations = obs
@@ -326,6 +473,11 @@ class MatchEnv:
         trunc = any(bool(truncated.get(a, False)) for a in self.policy_agents)
         self._sync_clock()
 
+        policy_rewards = {a: float(rewards.get(a, 0.0)) for a in self.policy_agents}
+        for agent, value in policy_rewards.items():
+            self.episode_reward_total[agent] = self.episode_reward_total.get(agent, 0.0) + value
+        self.episode_decisions += 1
+
         info = StepInfo(
             tick_count=state.tick_count,
             time_remaining=float(self.env.shared_info["time_remaining"]),
@@ -335,10 +487,11 @@ class MatchEnv:
             scoring_team=scoring_team,
             touches=self._touch_cache(state),
             reward_components=self.reward_stats,
+            reward_events=self.reward_events,
         )
         return StepResult(
             obs=obs,
-            rewards={a: float(rewards.get(a, 0.0)) for a in self.policy_agents},
+            rewards=policy_rewards,
             done=done,
             truncated=trunc,
             info=info,

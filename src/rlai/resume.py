@@ -31,8 +31,17 @@ from .config import TrainingConfig
 
 RESUME_MODES = ("fresh", "continue", "transfer")
 
-#: fields that must come from the checkpoint for a continuation to stay
-#: comparable with the run it continues
+#: fields that come from the checkpoint *by default* so a continuation stays
+#: comparable with the run it continues.  Any of them can still be changed on
+#: purpose by naming it in ``explicit_overrides`` (CLI ``--override-config``):
+#: that starts a new training *phase* on the same weights and is recorded as
+#: such - it is how a fixed reward definition reaches an existing checkpoint.
+#:
+#: ``episode_seconds`` and ``rollout_steps`` used to live here.  They are
+#: operational (they change neither the network nor the objective), and
+#: inheriting them silently replaced a requested 60 s horizon with the
+#: checkpoint's 15 s in a real run.  The request now wins; the difference is
+#: still reported as an override.
 INHERITED_FIELDS = (
     "mode",
     "obs_version",
@@ -51,14 +60,17 @@ INHERITED_FIELDS = (
     "learning_rate",
     "lr_anneal",
     "tick_skip",
-    "rollout_steps",
-    "episode_seconds",
 )
 
-#: fields the operator is allowed to change when continuing
+#: fields the operator is allowed to change when continuing (request wins;
+#: differences are listed in the plan/report, never applied silently)
 REQUEST_FIELDS = (
     "run_name",
     "total_steps",
+    "rollout_steps",
+    "episode_seconds",
+    "reset_mode",
+    "discount_shaping",
     "n_workers",
     "device",
     "seed",
@@ -95,6 +107,12 @@ class ResumePlan:
     validation: dict | None = None
     overrides: list[dict] = field(default_factory=list)
     inherited: list[str] = field(default_factory=list)
+    #: inherited fields the operator explicitly decided to change (phase change)
+    explicit_overrides: list[str] = field(default_factory=list)
+    #: the configuration the resumed run would *actually* use (after merging)
+    effective_config: dict | None = None
+    #: inherited fields whose value changes vs the checkpoint (new phase)
+    phase_change: list[str] = field(default_factory=list)
     considered: list[dict] = field(default_factory=list)
     rejected: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -165,6 +183,9 @@ class ResumePlan:
             "validation": self.validation,
             "overrides": self.overrides,
             "inherited": self.inherited,
+            "explicit_overrides": self.explicit_overrides,
+            "effective_config": self.effective_config,
+            "phase_change": self.phase_change,
             "considered": self.considered,
             "rejected": self.rejected,
             "warnings": self.warnings,
@@ -229,17 +250,32 @@ def merge_config(
     requested: TrainingConfig,
     *,
     mode: str = "continue",
+    explicit_overrides: Any = (),
 ) -> tuple[TrainingConfig, list[dict], list[str]]:
     """Combine the stored configuration with the operator's request.
 
     For ``continue`` the checkpoint wins on everything that would make the
     resumed run incomparable with its parent (mode, observation layout,
     network shape, reward weights, PPO hyper-parameters); the request wins on
-    operational knobs (how long, how many workers, evaluation schedule).
-    Every field taken from the checkpoint while the request asked for
-    something else is reported as an override, so nothing happens silently.
-    For ``transfer`` and ``fresh`` the request is used unchanged.
+    operational knobs (how long, how many workers, episode horizon,
+    evaluation schedule).  Every difference is reported as an override with
+    the value actually used, so nothing happens silently.
+
+    Fields named in ``explicit_overrides`` are the deliberate exception: the
+    request wins even on an inherited field.  That is a *phase change* (same
+    weights, changed objective/hyper-parameters) and the override records say
+    so (``source: "explicit"``).  Unknown or non-inherited names are refused
+    instead of being ignored.  For ``transfer`` and ``fresh`` the request is
+    used unchanged.
     """
+    explicit = [str(name).strip() for name in (explicit_overrides or ()) if str(name).strip()]
+    unknown = [name for name in explicit if name not in INHERITED_FIELDS]
+    if unknown:
+        raise ValueError(
+            f"cannot explicitly override {unknown}: only inherited fields "
+            f"{list(INHERITED_FIELDS)} need (and accept) an explicit override; "
+            "every other field already follows the request"
+        )
     if mode != "continue" or not checkpoint_config:
         return requested, [], []
     overrides: list[dict] = []
@@ -250,10 +286,28 @@ def merge_config(
             continue
         stored = checkpoint_config[name]
         current_value = _plain(getattr(requested, name, None))
+        if name in explicit:
+            if stored != current_value:
+                overrides.append(
+                    {
+                        "field": name,
+                        "checkpoint": stored,
+                        "requested": current_value,
+                        "used": current_value,
+                        "source": "explicit",
+                    }
+                )
+            continue
         inherited.append(name)
         if stored != current_value:
             overrides.append(
-                {"field": name, "checkpoint": stored, "requested": current_value, "used": stored}
+                {
+                    "field": name,
+                    "checkpoint": stored,
+                    "requested": current_value,
+                    "used": stored,
+                    "source": "inherited",
+                }
             )
             updates[name] = stored
     for name in REQUEST_FIELDS:
@@ -267,6 +321,7 @@ def merge_config(
                         "checkpoint": stored,
                         "requested": current_value,
                         "used": current_value,
+                        "source": "request",
                     }
                 )
     if not updates:
@@ -290,6 +345,7 @@ def plan_resume(
     run_id: str | None = None,
     checkpoint: str | None = None,
     max_candidates: int = 25,
+    explicit_overrides: Any = (),
 ) -> ResumePlan:
     """Find the newest valid, compatible checkpoint for ``mode``.
 
@@ -302,6 +358,11 @@ def plan_resume(
         raise ValueError(f"resume mode must be one of {RESUME_MODES}, got {mode!r}")
 
     plan = ResumePlan(mode=mode, requested=checkpoint)
+    plan.explicit_overrides = [
+        str(name).strip() for name in (explicit_overrides or ()) if str(name).strip()
+    ]
+    # validate eagerly so a typo fails the *plan*, not the training start
+    merge_config({}, config, mode="continue", explicit_overrides=plan.explicit_overrides)
     plan.lineage = lineage_runs(models_dir, run_id)
 
     candidates = checkpoints.list_checkpoint_candidates(models_dir, mode=None)
@@ -386,6 +447,48 @@ def plan_resume(
         plan.validation = validation.to_dict()
         plan.fallback_used = bool(plan.rejected)
         plan.config = validation.training_config
+        # Show, before anything starts, which configuration the resumed run
+        # would actually use and which requested values would *not* be used.
+        # (plan.overrides used to stay empty forever, so the preview could
+        # not reveal e.g. a horizon being replaced by the checkpoint's.)
+        if mode == "continue" and validation.training_config:
+            effective, plan.overrides, plan.inherited = merge_config(
+                validation.training_config,
+                config,
+                mode=mode,
+                explicit_overrides=plan.explicit_overrides,
+            )
+            plan.effective_config = effective.to_dict()
+            plan.phase_change = [
+                item["field"]
+                for item in plan.overrides
+                if item.get("source") == "explicit"
+            ]
+            replaced = [
+                item["field"]
+                for item in plan.overrides
+                if item.get("source") == "inherited"
+            ]
+            if replaced:
+                plan.warnings.append(
+                    "these requested values will be replaced by the checkpoint's "
+                    f"({', '.join(replaced)}); name a field in --override-config "
+                    "to change it deliberately instead"
+                )
+            if plan.phase_change:
+                plan.warnings.append(
+                    "phase change: continuing the same weights with changed "
+                    f"{', '.join(plan.phase_change)} - the value function and "
+                    "optimizer moments were fitted to the old values and need "
+                    "some iterations to re-adapt"
+                )
+            stored_total = (validation.training_config or {}).get("total_steps")
+            if stored_total and int(stored_total) != int(config.total_steps) and config.lr_anneal:
+                plan.warnings.append(
+                    f"total_steps changes from {stored_total} to {config.total_steps}: "
+                    "the learning-rate schedule is recomputed against the new total, "
+                    "so the learning rate will differ from an uninterrupted run"
+                )
         plan.has_model = validation.has_model
         plan.has_optimizer = validation.has_optimizer
         plan.has_rng = validation.has_rng

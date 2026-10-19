@@ -40,9 +40,44 @@ def is_best_candidate(result: dict, best_score: float) -> bool:
     """A model can only become "best" after it has actually won a game.
 
     Untrained policies produce 0:0 draws; marking those as best would put a
-    meaningless checkpoint at the top of the GUI and of ``best.json``.
+    meaningless checkpoint at the top of the GUI and of ``best.json``.  A
+    single decisive game is not evidence either: with the loser known, at
+    least two decisive games are required before a win rate may dethrone
+    the incumbent.
     """
-    return int(result.get("wins", 0)) > 0 and float(result.get("win_rate", 0.0)) > best_score
+    wins = int(result.get("wins", 0))
+    if wins <= 0:
+        return False
+    if result.get("losses") is not None and wins + int(result.get("losses") or 0) < 2:
+        return False
+    return float(result.get("win_rate", 0.0)) > best_score
+
+
+#: periodic evaluations without measurable progress that count as a stall
+STALL_WINDOW = 3
+
+
+def detect_eval_stall(history: list[dict], window: int = STALL_WINDOW) -> bool:
+    """True when the last ``window`` evaluations show no progress at all.
+
+    Progress means: a win, a better goal difference, or more ball touches
+    than the evaluation right before the window.  Deliberately strict - a
+    false alarm costs a log warning, a missed stall costs hours.
+    """
+    if len(history) < window + 1:
+        return False
+    recent, before = history[-window:], history[-window - 1]
+    if any(int(item.get("wins") or 0) > 0 for item in recent):
+        return False
+    if max(float(item.get("goal_diff") or 0) for item in recent) > float(
+        before.get("goal_diff") or 0
+    ):
+        return False
+    if max(float(item.get("touches") or 0) for item in recent) > float(
+        before.get("touches") or 0
+    ):
+        return False
+    return True
 
 
 def _outcome_counts(episodes: list[dict]) -> tuple[int, int, int]:
@@ -79,7 +114,13 @@ class Trainer:
         run_dir: Path | None = None,
         resume_mode: str = "continue",
         resume_plan: ResumePlan | None = None,
+        config_override_fields: tuple[str, ...] = (),
     ):
+        #: inherited config fields the operator explicitly wants to change
+        #: on a ``continue`` resume (a phase change, see rlai.resume)
+        self.config_override_fields = tuple(config_override_fields or ())
+        #: merge decisions of the resume, for the report
+        self.resume_overrides: list[dict] = []
         self.config = config
         self.run_id = run_id
         self.store = store
@@ -111,10 +152,14 @@ class Trainer:
             Curriculum(stages_for_mode(config.mode)) if config.curriculum else None
         )
         self.rng = np.random.default_rng(int(config.seed))
-        self.best_score = float(
-            checkpoints.best_record(self.models_dir).get("score", float("-inf"))
-        )
+        #: best win rate per evaluation protocol (key -> score).  Comparing
+        #: against the primary pointer regardless of protocol (the old code)
+        #: could block a genuinely better result under a harder protocol -
+        #: or crown one measured under an easier one.
+        self._best_by_protocol: dict[str, float] = {}
         self.run_best_score = float("-inf")
+        #: periodic-eval history for stall detection (see detect_eval_stall)
+        self._eval_history: list[dict] = []
         self.started = time.time()
         #: reliable training-time accounting (monotonic clock + persisted
         #: accumulated total); see :mod:`rlai.timing`
@@ -277,6 +322,7 @@ class Trainer:
             mode=self.resume_mode,
             run_id=self.run_id,
             checkpoint=self.resume_from,
+            explicit_overrides=self.config_override_fields,
         )
 
     def _load_resume(self) -> None:
@@ -325,9 +371,14 @@ class Trainer:
         saved_timing = (payload.get("extra") or {}).get("timing")
         self._saved_timing = saved_timing if isinstance(saved_timing, dict) else None
 
+        explicit = tuple(plan.explicit_overrides or ()) or self.config_override_fields
         merged, overrides, inherited = merge_config(
-            payload.get("training_config"), self.config, mode=plan.mode
+            payload.get("training_config"),
+            self.config,
+            mode=plan.mode,
+            explicit_overrides=explicit,
         )
+        self.resume_overrides = overrides
         if overrides:
             for override in overrides:
                 if "error" in override:
@@ -338,8 +389,18 @@ class Trainer:
                         "config field "
                         f"{override['field']!r}: using {override['used']!r} "
                         f"(checkpoint had {override['checkpoint']!r}, request asked for "
-                        f"{override['requested']!r})",
+                        f"{override['requested']!r}, source={override.get('source', 'inherited')})",
                     )
+        phase_change = [
+            item["field"] for item in overrides if item.get("source") == "explicit"
+        ]
+        if phase_change:
+            self._warn(
+                "phase change: continuing these weights with changed "
+                f"{', '.join(phase_change)}; value estimates and optimizer "
+                "moments were fitted to the old settings and will re-adapt "
+                "over the next iterations"
+            )
         self.config = merged
         self.resume_inherited = inherited
 
@@ -389,6 +450,13 @@ class Trainer:
                 start_index=int(saved.get("index", 0)),
                 stage_iterations=int(saved.get("iterations", 0)),
                 total_iterations=int(saved.get("total_iterations", 0)),
+                window_episodes=saved.get("window") if isinstance(saved.get("window"), list) else None,
+            )
+            self._log(
+                "INFO",
+                f"restored curriculum stage {self.curriculum.index} "
+                f"({self.curriculum.stage.name}); blocked: "
+                f"{self.curriculum.blocked_reason() or 'no'}",
             )
         elif self.curriculum is not None:
             self._warn("checkpoint has no curriculum state; the curriculum restarts at stage 0")
@@ -797,30 +865,58 @@ class Trainer:
         self.resource_plan = plan
 
     # -- opponent selection --------------------------------------------------
-    def _select_opponent(self) -> tuple[str | None, dict | None, str | None, str]:
-        """Return (opponent name, opponent weights, pool entry id, stage name)."""
+    def _select_opponents(
+        self,
+    ) -> tuple[list[str | None], list, list[str | None], str, str, float]:
+        """Per-worker (names, weights, pool ids, stage, reset mode, seconds).
+
+        Every worker draws its own opponent: in `mixed` stages each worker
+        independently faces chase or random, in self-play each worker gets
+        its own PFSP snapshot draw.  A whole batch against a single
+        opponent is correlated data (and one lucky/unlucky snapshot could
+        dominate an entire PPO update).  The reset distribution and episode
+        horizon belong to the stage: a touch drill wants randomized close
+        starts and short episodes, a match stage wants longer ones.
+        """
+        count = max(1, int(self.config.n_workers))
+        seconds = float(self.config.episode_seconds)
         if self.curriculum is not None:
             stage = self.curriculum.stage
+            reset_mode = stage.reset_mode
+            if stage.episode_seconds is not None:
+                seconds = float(stage.episode_seconds)
             if stage.opponent == "self" and self.league.usable:
-                entry = self.league.sample(self.rng)
-                return None, entry.state, entry.id, stage.name
+                picks = [self.league.sample(self.rng) for _ in range(count)]
+                return (
+                    [None] * count,
+                    [entry.state for entry in picks],
+                    [entry.id for entry in picks],
+                    stage.name, reset_mode, seconds,
+                )
             if stage.opponent == "mixed":
-                name = str(self.rng.choice(["chase", "random"]))
-                return name, None, None, stage.name
+                names = [str(self.rng.choice(["chase", "random"])) for _ in range(count)]
+                return names, [None] * count, [None] * count, stage.name, reset_mode, seconds
             if stage.opponent == "self":
                 # The pool has no playable snapshot yet (first iteration, or a
                 # checkpoint written without league states).  "self" is not a
                 # buildable opponent, so fall back to a scripted one instead
                 # of handing the worker a name it cannot resolve.
                 fallback = self._self_play_fallback()
-                return fallback, None, None, stage.name
-            return stage.opponent, None, None, stage.name
+                return [fallback] * count, [None] * count, [None] * count, stage.name, reset_mode, seconds
+            return [stage.opponent] * count, [None] * count, [None] * count, stage.name, reset_mode, seconds
+        reset_mode = str(self.config.reset_mode)
         if self.config.self_play and self.league.usable:
-            entry = self.league.sample(self.rng)
-            return None, entry.state, entry.id, "self-play"
+            picks = [self.league.sample(self.rng) for _ in range(count)]
+            return (
+                [None] * count,
+                [entry.state for entry in picks],
+                [entry.id for entry in picks],
+                "self-play", reset_mode, seconds,
+            )
         if self.config.opponent == "self":
-            return self._self_play_fallback(), None, None, "fixed"
-        return self.config.opponent, None, None, "fixed"
+            fallback = self._self_play_fallback()
+            return [fallback] * count, [None] * count, [None] * count, "fixed", reset_mode, seconds
+        return [self.config.opponent] * count, [None] * count, [None] * count, "fixed", reset_mode, seconds
 
     def _self_play_fallback(self) -> str:
         """Scripted opponent to use while no self-play snapshot exists yet."""
@@ -861,7 +957,11 @@ class Trainer:
         common = dict(
             mode=self.config.mode,
             games=self.config.eval_games,
-            seed=int(self.config.seed) + 900_001 + self.iteration,
+            # Fixed seed on purpose: the same kickoffs every evaluation, so
+            # results stay inside ONE protocol and remain comparable across
+            # checkpoints (a rotating seed silently created a new protocol -
+            # and a new best-pointer file - on every single evaluation).
+            seed=int(self.config.seed) + 900_001,
             match_seconds=self.config.eval_match_seconds,
             episode_seconds=min(self.config.eval_match_seconds, 30.0),
             device=str(self.device),
@@ -938,8 +1038,16 @@ class Trainer:
         # A 0 % win rate is not a "best" model: keep the pointer empty until the
         # policy actually won a game, so the GUI never offers a checkpoint as
         # "best" that has never scored.  Scores are only compared inside one
-        # protocol, so "best" always means "best under the same measurement".
-        if is_best_candidate(result, self.best_score):
+        # protocol, so "best" always means "best under the same measurement" -
+        # including against whatever a previous run left on disk.
+        key = checkpoints.protocol_key(protocol or None)
+        incumbent = float(
+            checkpoints.best_record(self.models_dir, protocol=protocol or None).get(
+                "score", float("-inf")
+            )
+        )
+        best_score = max(incumbent, self._best_by_protocol.get(key, float("-inf")))
+        if is_best_candidate(result, best_score):
             record = checkpoints.set_best(
                 self.models_dir,
                 model_id,
@@ -947,14 +1055,50 @@ class Trainer:
                 metric="win_rate",
                 protocol=protocol or None,
             )
-            self.best_score = float(record.get("score", score))
+            self._best_by_protocol[key] = float(record.get("score", score))
             self._log(
                 "INFO",
-                f"new global best {model_id} (win rate {float(score):.2f} vs "
-                f"{result.get('opponent')}, protocol {record.get('protocol_key')})",
+                f"new best for protocol {key}: {model_id} (win rate "
+                f"{float(score):.2f} vs {result.get('opponent')})",
             )
         self.run_best_score = max(self.run_best_score, float(score))
+        if phase == "periodic":
+            self._track_eval_stall(result)
         return result
+
+    def _track_eval_stall(self, result: dict) -> None:
+        """Warn (once per stall) when independent evaluation stops moving.
+
+        Training reward can keep climbing while play does not; the periodic
+        evaluation is the ground truth, so three flat evaluations in a row
+        are reported loudly instead of being discovered in the final report.
+        """
+        self._eval_history.append(
+            {
+                "goal_diff": float(result.get("goal_diff") or 0),
+                "wins": int(result.get("wins") or 0),
+                "touches": float(result.get("touches") or 0),
+            }
+        )
+        stalled = detect_eval_stall(self._eval_history)
+        self._metric("eval/stalled", 1.0 if stalled else 0.0)
+        if stalled and not getattr(self, "_stall_warned", False):
+            self._stall_warned = True
+            hint = ""
+            if self.curriculum is not None:
+                hint = (
+                    f" Curriculum stage {self.curriculum.stage.name!r} is blocked by: "
+                    f"{self.curriculum.blocked_reason()}."
+                )
+            self._warn(
+                "evaluation stall: no win and no goal-difference or touch "
+                f"improvement across the last {STALL_WINDOW} periodic evaluations."
+                + hint
+                + " Check charts/touches and reward components before spending "
+                "more steps - more of the same training rarely fixes a stall."
+            )
+        elif not stalled:
+            self._stall_warned = False
 
     @staticmethod
     def _flatten_suite(suite: dict) -> dict:
@@ -1063,10 +1207,13 @@ class Trainer:
             self.store.update_run(self.run_id, status="running")
             self.league.add(f"initial-{self.run_id[:6]}", self.step, self._snapshot_state())
             if self.curriculum is not None:
+                stage = self.curriculum.stage
                 self._log(
                     "INFO",
-                    f"curriculum stage 0/{len(self.curriculum.stages) - 1}: "
-                    f"{self.curriculum.stage.name} vs {self.curriculum.stage.opponent}",
+                    f"curriculum stage {self.curriculum.index}/"
+                    f"{len(self.curriculum.stages) - 1}: {stage.name} vs "
+                    f"{stage.opponent} (resets {stage.reset_mode}); promotion "
+                    f"blocked by: {self.curriculum.blocked_reason() or 'nothing'}",
                 )
             if self.config.eval_interval and self.config.eval_before:
                 self._log("INFO", "measuring the policy before the first update")
@@ -1095,16 +1242,25 @@ class Trainer:
                     self._log("INFO", "resumed")
 
                 iteration_started = time.perf_counter()
-                opponent_name, opponent_state, opponent_id, stage_name = self._select_opponent()
+                (
+                    opponent_names,
+                    opponent_states,
+                    opponent_ids,
+                    stage_name,
+                    reset_mode,
+                    episode_seconds,
+                ) = self._select_opponents()
                 started = time.perf_counter()
                 rollouts = self.pool.collect(
                     self._cpu_state(),
                     self.config.rollout_steps,
                     self.config.seed + self.iteration,
-                    opponent_state=opponent_state,
-                    opponent=opponent_name,
+                    opponent_names=opponent_names,
+                    opponent_states=opponent_states,
                     policy_teams=self._policy_teams(),
                     opponent_execution=self._opponent_execution(),
+                    reset_mode=reset_mode,
+                    episode_seconds=episode_seconds,
                 )
                 collect_seconds = time.perf_counter() - started
 
@@ -1135,23 +1291,42 @@ class Trainer:
                 wins, losses, draws = _outcome_counts(episodes)
                 self._apply_adaptation(episodes)
                 self._remember_players(episodes)
-                if opponent_id:
-                    self.league.record(opponent_id, wins, losses, draws)
+                # Elo decay is per snapshot: with per-worker draws, each
+                # rollout's results belong to the snapshot that worker faced
+                recorded = False
+                for rollout in rollouts:
+                    entry_id = opponent_ids[int(rollout.get("worker", 0)) % len(opponent_ids)]
+                    if entry_id:
+                        n_w, n_l, n_d = _outcome_counts(rollout["episodes"])
+                        if n_w + n_l + n_d:
+                            self.league.record(entry_id, n_w, n_l, n_d)
+                            recorded = True
+                if recorded:
                     self._metric("league/agent_elo", self.league.agent_elo)
                     self._metric("league/pool_size", float(len(self.league)))
 
                 if self.curriculum is not None:
-                    promoted = self.curriculum.observe(episodes)
+                    transitioned = self.curriculum.observe(episodes)
                     for key, value in self.curriculum.metrics().items():
                         self._metric(key, value)
-                    if promoted:
+                    event = self.curriculum.last_event
+                    if transitioned and event in ("promotion", "demotion"):
                         stage = self.curriculum.stage
                         self._log(
                             "INFO",
-                            f"curriculum promotion -> {stage.name} "
-                            f"(opponent {stage.opponent}, target {stage.win_rate:.0%})",
+                            f"curriculum {event} -> {stage.name} "
+                            f"(opponent {stage.opponent}, resets {stage.reset_mode}, "
+                            f"episodes {stage.episode_seconds or self.config.episode_seconds:.0f}s; "
+                            f"blocked by: {self.curriculum.blocked_reason() or 'nothing'})",
                         )
-                        self.curriculum.reset_window()
+                    elif event == "stagnation":
+                        self._warn(
+                            f"curriculum stage {self.curriculum.stage.name!r} has not "
+                            f"promoted for {self.curriculum.stage_iterations} iterations; "
+                            f"blocked by: {self.curriculum.blocked_reason()}. Training "
+                            "continues on this stage - check reward/touch metrics "
+                            "instead of waiting for the stage to move by itself."
+                        )
 
                 self._log_iteration(
                     episodes,
@@ -1270,6 +1445,16 @@ class Trainer:
             resume_info["mode"] = self.resume_mode
             resume_info["restored_step"] = self.start_step
             resume_info["inherited_fields"] = list(getattr(self, "resume_inherited", []))
+            # the merge decisions actually applied by this process (the plan
+            # may predate them); the report must show the effective config's
+            # provenance, not only the final values
+            if self.resume_overrides:
+                resume_info["overrides"] = self.resume_overrides
+            resume_info["phase_change"] = [
+                item["field"]
+                for item in (resume_info.get("overrides") or [])
+                if item.get("source") == "explicit"
+            ]
             payload = report_module.build_run_report(
                 self.store,
                 self.run_id,
@@ -1277,6 +1462,7 @@ class Trainer:
                 run_dir=self.run_dir,
                 config=self.config.to_dict(),
                 resume=resume_info,
+                curriculum=self.curriculum.status() if self.curriculum else None,
                 device=str(self.device),
                 workers=int(self.config.n_workers),
                 wall_seconds=max(0.0, time.time() - self.started),
@@ -1330,6 +1516,8 @@ class Trainer:
                 "charts/draw_rate": _mean([1.0 if e.get("result") == "draw" else 0.0 for e in episodes]),
                 "charts/goals_for": _mean([e["goals_for"] for e in episodes]),
                 "charts/goals_against": _mean([e["goals_against"] for e in episodes]),
+                "charts/touches": _mean([e.get("touches", 0) for e in episodes]),
+                "charts/shots": _mean([e.get("shots", 0) for e in episodes]),
                 "charts/episodes": float(len(episodes)),
                 "charts/truncation_rate": _mean(
                     [1.0 if e.get("truncated") else 0.0 for e in episodes]
@@ -1356,6 +1544,8 @@ class Trainer:
                 step=self.step,
                 truncated=bool(episode.get("truncated")),
                 opponent=episode.get("opponent") or opponent_name,
+                touches=int(episode.get("touches", 0)),
+                shots=int(episode.get("shots", 0)),
             )
         self._log(
             "INFO",
@@ -1387,6 +1577,7 @@ def run_training(
     resume_from: str | None = None,
     resume_mode: str = "continue",
     resume_plan: ResumePlan | None = None,
+    config_override_fields: tuple[str, ...] = (),
 ) -> dict:
     return Trainer(
         config,
@@ -1395,4 +1586,5 @@ def run_training(
         resume_from=resume_from,
         resume_mode=resume_mode,
         resume_plan=resume_plan,
+        config_override_fields=config_override_fields,
     ).run()

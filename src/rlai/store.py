@@ -66,7 +66,9 @@ CREATE TABLE IF NOT EXISTS episodes (
     result TEXT,
     step INTEGER DEFAULT 0,
     truncated INTEGER DEFAULT 0,
-    opponent TEXT
+    opponent TEXT,
+    touches INTEGER DEFAULT 0,
+    shots INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_episodes_run ON episodes(run_id);
 
@@ -195,6 +197,9 @@ _EPISODE_MIGRATIONS = {
     "step": "INTEGER DEFAULT 0",
     "truncated": "INTEGER DEFAULT 0",
     "opponent": "TEXT",
+    # ball-interaction evidence (learning overhaul); old rows read as 0
+    "touches": "INTEGER DEFAULT 0",
+    "shots": "INTEGER DEFAULT 0",
 }
 _EVALUATION_MIGRATIONS = {"phase": "TEXT"}
 
@@ -406,13 +411,15 @@ class Store:
         step: int = 0,
         truncated: bool = False,
         opponent: str | None = None,
+        touches: int = 0,
+        shots: int = 0,
     ) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO episodes"
                 " (run_id,episode,ts,reward,length,goals_for,goals_against,result,step,"
-                " truncated,opponent)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " truncated,opponent,touches,shots)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id,
                     episode,
@@ -425,6 +432,8 @@ class Store:
                     int(step),
                     1 if truncated else 0,
                     opponent,
+                    int(touches),
+                    int(shots),
                 ),
             )
 
@@ -489,6 +498,46 @@ class Store:
             "goals_for": sum(int(row["goals_for"] or 0) for row in rows),
             "goals_against": sum(int(row["goals_against"] or 0) for row in rows),
             "opponents": opponents,
+        }
+
+    def episode_window_stats(
+        self, run_id: str, *, which: str = "last", window: int = 200, since_step: int = 0
+    ) -> dict:
+        """First/last-``window`` episode aggregates (learning-evidence view).
+
+        Comparing the first window with the last window of the *same* run is
+        the cheapest honest answer to "did anything improve?" that does not
+        depend on the shaped reward.
+        """
+        order = "DESC" if which == "last" else "ASC"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT reward,length,goals_for,goals_against,result,truncated,touches,shots"
+                f" FROM episodes WHERE run_id=? AND step>=? ORDER BY id {order} LIMIT ?",
+                (run_id, int(since_step), int(window)),
+            ).fetchall()
+        if not rows:
+            return {"available": False, "count": 0}
+        n = len(rows)
+        def mean(key):
+            values = [float(row[key]) for row in rows if row[key] is not None]
+            return sum(values) / len(values) if values else None
+
+        shots = sum(int(row["shots"] or 0) for row in rows)
+        goals = sum(int(row["goals_for"] or 0) for row in rows)
+        return {
+            "available": True,
+            "count": n,
+            "mean_reward": mean("reward"),
+            "mean_length_decisions": mean("length"),
+            "win_rate": sum(1 for row in rows if row["result"] == "win") / n,
+            "draw_rate": sum(1 for row in rows if row["result"] == "draw") / n,
+            "truncation_rate": sum(1 for row in rows if row["truncated"]) / n,
+            "goals_per_episode": goals / n,
+            "conceded_per_episode": sum(int(row["goals_against"] or 0) for row in rows) / n,
+            "touches_per_episode": mean("touches"),
+            "shots_per_episode": shots / n,
+            "shot_conversion": (goals / shots) if shots else None,
         }
 
     # -- logs --------------------------------------------------------------

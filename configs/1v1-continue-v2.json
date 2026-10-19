@@ -1,0 +1,61 @@
+{
+  "run_name": "1v1 continue v2 checkpoint with fixed reward",
+  "mode": "soccer-1v1",
+  "seed": 42,
+  "total_steps": 5000000,
+  "rollout_steps": 512,
+  "n_workers": 6,
+  "tick_skip": 8,
+  "episode_seconds": 30.0,
+  "learning_rate": 0.0003,
+  "gamma": 0.995,
+  "gae_lambda": 0.95,
+  "clip_coef": 0.2,
+  "value_coef": 0.5,
+  "entropy_coef": 0.01,
+  "epochs": 4,
+  "minibatch_size": 1024,
+  "max_grad_norm": 0.5,
+  "lr_anneal": true,
+  "device": "auto",
+  "opponent": "idle",
+  "self_play": false,
+  "snapshot_interval": 10,
+  "checkpoint_interval": 50,
+  "keep_checkpoints": 8,
+  "reward": {
+    "goal": 10.0,
+    "concede": 10.0,
+    "touch": 0.4,
+    "ball_progress": 1.0,
+    "progress": 0.35,
+    "shot": 1.0,
+    "defense": 0.5,
+    "alignment": 0.0,
+    "approach": 0.0,
+    "boost": 0.0,
+    "bump": 0.0
+  },
+  "policy": {
+    "hidden": [
+      256,
+      256
+    ],
+    "activation": "tanh"
+  },
+  "eval_opponent": "chase",
+  "eval_interval": 25,
+  "eval_games": 10,
+  "eval_match_seconds": 60,
+  "curriculum": true,
+  "obs_version": 2,
+  "reset_mode": "kickoff",
+  "eval_opponents": [
+    "idle",
+    "chase"
+  ],
+  "eval_sides": [
+    "blue",
+    "orange"
+  ]
+}
