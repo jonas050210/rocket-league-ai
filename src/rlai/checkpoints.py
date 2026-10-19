@@ -3,6 +3,13 @@
 Rules enforced here (safety requirements):
 * checkpoints are written to a temporary file and atomically renamed;
 * an existing checkpoint is never overwritten — a new id is generated;
+* the latest completed save is recorded in ``latest.json`` (metadata, not a
+  filename convention), so a resume never has to trust a timestamp in a
+  directory name;
+* retention deletes only complete, older checkpoints and keeps the newest
+  ``keep`` ones, the latest pointer target, every best checkpoint and the
+  newest final/interrupted checkpoint; before anything is deleted it checks
+  that a loadable checkpoint remains;
 * the stable model is never deleted or replaced automatically;
 * promotion is an explicit operation;
 * loading uses ``weights_only`` by default, so a hostile file cannot execute
@@ -35,6 +42,11 @@ MANIFEST = "manifest.json"
 MODEL_FILE = "model.pt"
 STABLE_POINTER = "stable.json"
 BEST_POINTER = "best.json"
+#: Updated after every successful save.  This is the authoritative "latest
+#: completed checkpoint" record; the id still contains a timestamp, but resume
+#: selection uses this metadata (and the step in the manifest), never the
+#: lexical order of directory names.
+LATEST_POINTER = "latest.json"
 
 
 def _utc_now() -> str:
@@ -48,6 +60,32 @@ def _utc_stamp() -> str:
 def _slug(text: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9._-]+", "-", text).strip("-")
     return text[:48] or "model"
+
+
+def _fsync_dir(path: Path) -> None:
+    """Best-effort directory fsync so a rename survives a power loss."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_text(path: str | Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (temp file + ``os.replace``)."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    _fsync_dir(path.parent)
 
 
 def _timing_value(timing: Any, key: str) -> float | None:
@@ -116,10 +154,6 @@ def save_checkpoint(
         "created_at": _utc_now(),
         "extra": extra or {},
     }
-    tmp_path = directory / (MODEL_FILE + ".tmp")
-    torch.save(payload, tmp_path)
-    os.replace(tmp_path, directory / MODEL_FILE)
-
     manifest = {
         "id": model_id,
         "path": f"{model_id}/{MODEL_FILE}",
@@ -129,7 +163,7 @@ def save_checkpoint(
         "mode": mode,
         "state": "candidate",
         "policy_config": policy_config,
-        "size_bytes": (directory / MODEL_FILE).stat().st_size,
+        "size_bytes": 0,
         "label": label,
         # cheap metadata for the GUI and for resume planning; older manifests
         # simply do not have these keys.
@@ -144,7 +178,45 @@ def save_checkpoint(
         "duration_s": _timing_value((extra or {}).get("timing"), "accumulated_s"),
         "session_duration_s": _timing_value((extra or {}).get("timing"), "session_s"),
     }
-    (directory / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    model_path = directory / MODEL_FILE
+    tmp_path = directory / (MODEL_FILE + ".tmp")
+    try:
+        # Write the model first, fsync it, then atomically publish it.  The
+        # manifest is published only afterwards and is itself atomic, so a
+        # reader never sees a half-written checkpoint and a failure in this
+        # new directory cannot touch a previously valid one.
+        with open(tmp_path, "wb") as handle:
+            torch.save(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, model_path)
+        _fsync_dir(directory)
+        manifest["size_bytes"] = model_path.stat().st_size
+        write_manifest(directory, manifest)
+    except BaseException:
+        # This directory was created by this call and is not referenced by any
+        # pointer yet.  Removing the partial attempt keeps failed saves from
+        # accumulating while leaving every earlier checkpoint untouched.
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    try:
+        _write_pointer(
+            models_dir,
+            LATEST_POINTER,
+            {
+                "id": model_id,
+                "path": f"{model_id}/{MODEL_FILE}",
+                "step": int(step),
+                "run_id": run_id,
+                "mode": mode,
+                "label": label,
+                "created_at": manifest["created_at"],
+            },
+        )
+    except OSError:
+        # The checkpoint itself is complete and valid; the pointer is an
+        # optimization.  Resume still finds it through the manifests.
+        pass
     return manifest
 
 
@@ -366,31 +438,77 @@ def read_manifest(model_dir: str | Path) -> dict:
 
 
 def write_manifest(model_dir: str | Path, manifest: dict) -> None:
-    path = Path(model_dir) / MANIFEST
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    _atomic_write_text(Path(model_dir) / MANIFEST, json.dumps(manifest, indent=2))
+
+
+def _write_pointer(models_dir: str | Path, name: str, payload: dict) -> None:
+    """Publish a pointer atomically; a pointer is metadata, never weights."""
+    _atomic_write_text(Path(models_dir) / name, json.dumps(payload, indent=2))
+
+
+def _read_pointer(models_dir: str | Path, name: str) -> dict:
+    pointer = Path(models_dir) / name
+    try:
+        data = json.loads(pointer.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def latest_record(models_dir: str | Path) -> dict:
+    """The last successfully completed save, or ``{}``.
+
+    This is advisory metadata: a damaged pointer is ignored and discovery
+    falls back to the manifests, but it lets resume and retention identify
+    the latest save without parsing timestamps out of directory names.
+    """
+    record = _read_pointer(models_dir, LATEST_POINTER)
+    return record if record.get("id") else {}
+
+
+def latest_model(models_dir: str | Path) -> dict | None:
+    """Manifest of the latest checkpoint, if it still exists and is readable."""
+    record = latest_record(models_dir)
+    if not record.get("id"):
+        return None
+    try:
+        return get_model(models_dir, str(record["id"]))
+    except (KeyError, json.JSONDecodeError, OSError):
+        return None
+
+
+def set_label(models_dir: str | Path, model_id: str, label: str) -> dict:
+    """Relabel an existing checkpoint without writing another model file.
+
+    Used when a checkpoint at the final step already exists (for example one
+    written by the final evaluation) so completion does not create a duplicate
+    copy of identical weights just to attach the ``final`` label.
+    """
+    models_dir = Path(models_dir)
+    directory = checkpoint_dir(models_dir, model_id)
+    manifest = get_model(models_dir, model_id)
+    for key in ("absolute_path", "stable", "best"):
+        manifest.pop(key, None)
+    manifest["label"] = label
+    write_manifest(directory, manifest)
+    record = latest_record(models_dir)
+    if str(record.get("id")) == model_id:
+        record = dict(record, label=label)
+        try:
+            _write_pointer(models_dir, LATEST_POINTER, record)
+        except OSError:
+            # The manifest is authoritative; a stale pointer label is not
+            # worth failing a completed run for.
+            pass
+    return manifest
 
 
 def _stable_id(models_dir: str | Path) -> str | None:
-    pointer = Path(models_dir) / STABLE_POINTER
-    if not pointer.exists():
-        return None
-    try:
-        value = json.loads(pointer.read_text(encoding="utf-8")).get("id")
-    except (json.JSONDecodeError, OSError, AttributeError):
-        return None
-    return str(value) if value else None
+    return _pointer_id(models_dir, STABLE_POINTER)
 
 
 def _pointer_id(models_dir: str | Path, name: str) -> str | None:
-    pointer = Path(models_dir) / name
-    if not pointer.exists():
-        return None
-    try:
-        value = json.loads(pointer.read_text(encoding="utf-8")).get("id")
-    except (json.JSONDecodeError, OSError, AttributeError):
-        return None
+    value = _read_pointer(models_dir, name).get("id")
     return str(value) if value else None
 
 
@@ -513,17 +631,13 @@ def set_best(
         "updated_at": _utc_now(),
         "previous": previous.get("id"),
     }
-    tmp = models_dir / (pointer.name + ".tmp")
-    tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    os.replace(tmp, pointer)
+    _atomic_write_text(pointer, json.dumps(record, indent=2))
     if key != "default":
         # Keep the primary pointer in sync only when it is empty or already
         # describes the same protocol; never mix incomparable measurements.
         primary = best_record(models_dir)
         if not primary or primary.get("protocol_key") == key:
-            primary_tmp = models_dir / (BEST_POINTER + ".tmp")
-            primary_tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
-            os.replace(primary_tmp, models_dir / BEST_POINTER)
+            _atomic_write_text(models_dir / BEST_POINTER, json.dumps(record, indent=2))
     return record
 
 
@@ -584,9 +698,7 @@ def promote_model(models_dir: str | Path, model_id: str) -> dict:
         "promoted_at": _utc_now(),
         "previous": previous.get("id") if previous else None,
     }
-    tmp = models_dir / (STABLE_POINTER + ".tmp")
-    tmp.write_text(json.dumps(pointer, indent=2), encoding="utf-8")
-    os.replace(tmp, models_dir / STABLE_POINTER)
+    _atomic_write_text(models_dir / STABLE_POINTER, json.dumps(pointer, indent=2))
     set_model_state(models_dir, model_id, "stable")
     if previous and previous.get("id") != model_id:
         try:
@@ -618,8 +730,8 @@ def delete_model(models_dir: str | Path, model_id: str) -> None:
     remaining = [m for m in list_models(models_dir) if m["id"] != model_id]
     if not remaining:
         raise ValueError("refusing to delete the last remaining checkpoint")
-    # A best pointer must never dangle.  Pruning already skips the best
-    # checkpoint; an explicit delete removes the pointer together with it.
+    # A pointer must never dangle.  Pruning already skips the best and latest
+    # checkpoints; an explicit delete removes the pointers together with it.
     if manifest.get("best"):
         for pointer in list(models_dir.glob("best*.json")):
             try:
@@ -627,34 +739,101 @@ def delete_model(models_dir: str | Path, model_id: str) -> None:
                     pointer.unlink()
             except (json.JSONDecodeError, OSError):
                 continue
+    if str(latest_record(models_dir).get("id")) == model_id:
+        try:
+            (models_dir / LATEST_POINTER).unlink()
+        except OSError:
+            pass
     shutil.rmtree(checkpoint_dir(models_dir, model_id))
 
 
-def prune_candidates(models_dir: str | Path, keep: int = 8, run_id: str | None = None) -> list[str]:
-    """Delete oldest non-stable candidates beyond ``keep``.
+def _loadable(models_dir: str | Path, manifest: dict) -> bool:
+    """True when the checkpoint can actually be loaded again."""
+    path = Path(models_dir) / str(manifest.get("path") or "")
+    try:
+        return validate_checkpoint(path).ok
+    except Exception:
+        return False
 
-    When ``run_id`` is given only checkpoints from that run are considered,
-    so starting a new run can never delete another run's history.  Never
-    touches the stable model, the best checkpoint, or the last remaining
-    checkpoint.  Returns deleted ids.
+
+def prune_candidates(models_dir: str | Path, keep: int = 8, run_id: str | None = None) -> list[str]:
+    """Delete old routine checkpoints while keeping every safety anchor.
+
+    ``keep`` is the number of checkpoints to retain from the run's normal
+    history (the newest by training step, then by creation time).  Stable,
+    every best checkpoint, the latest pointer target and the newest
+    final/interrupted checkpoint are *additional* anchors and are never
+    removed by this function.
+
+    When ``run_id`` is given only checkpoints from that run are candidates, so
+    routine training of one run can never delete another run's history.
+    Before deleting anything the function verifies that a loadable checkpoint
+    remains; if every existing file is corrupt it deletes nothing.  Returns
+    the deleted ids.
     """
-    models = [
+    models_dir = Path(models_dir)
+    keep = max(0, int(keep))
+    all_models = list_models(models_dir)
+    if not all_models:
+        return []
+
+    eligible = [
         m
-        for m in list_models(models_dir)
+        for m in all_models
         if not m.get("stable")
         and not m.get("best")
         and (run_id is None or m.get("run_id") == run_id)
     ]
-    if len(models) <= keep:
+    if len(eligible) <= keep:
         return []
+
+    # Newest training progress first.  The step is the reliable ordering
+    # signal; created_at only breaks ties (two saves in the same second).
+    eligible.sort(
+        key=lambda m: (int(m.get("step") or 0), str(m.get("created_at") or "")),
+        reverse=True,
+    )
+    delete = eligible[keep:]
+
+    protected: set[str] = set()
+    latest_id = str(latest_record(models_dir).get("id") or "")
+    if latest_id:
+        protected.add(latest_id)
+    for label in ("final", "interrupt"):
+        labelled = [
+            m
+            for m in all_models
+            if m.get("label") == label and (run_id is None or m.get("run_id") == run_id)
+        ]
+        if labelled:
+            newest = max(
+                labelled,
+                key=lambda m: (int(m.get("step") or 0), str(m.get("created_at") or "")),
+            )
+            protected.add(str(newest["id"]))
+    delete = [m for m in delete if str(m["id"]) not in protected]
+    if not delete:
+        return []
+
+    deleting_ids = {str(item["id"]) for item in delete}
+    retained = [m for m in all_models if m["id"] not in deleting_ids]
+    if not any(_loadable(models_dir, m) for m in retained):
+        # Deleting anything now would remove the only recoverable state.  Try
+        # to salvage the newest loadable candidate instead; if nothing loads,
+        # leave the directory untouched and let the caller report it.
+        salvage = next((m for m in delete if _loadable(models_dir, m)), None)
+        if salvage is None:
+            return []
+        delete = [m for m in delete if m["id"] != salvage["id"]]
+
     deleted: list[str] = []
-    for manifest in models[keep:]:
+    for manifest in delete:
         if len(list_models(models_dir)) <= 1:
             break
         try:
             delete_model(models_dir, manifest["id"])
             deleted.append(manifest["id"])
-        except ValueError:
+        except (ValueError, OSError):
             continue
     return deleted
 
@@ -739,8 +918,9 @@ def list_checkpoint_candidates(
 
     ``require_optimizer`` filters for checkpoints that can continue an
     interrupted run exactly (weights *and* optimiser state).  Sorting is by
-    creation time and then by step, so a run that was resumed from an older
-    checkpoint still yields its newest file first.
+    training step (then creation time and the latest pointer), so a run that
+    was resumed from an older checkpoint still yields its newest progress
+    first instead of relying on the timestamp inside a directory name.
     """
     candidates: list[dict] = []
     for manifest in list_models(models_dir):
@@ -759,8 +939,17 @@ def list_checkpoint_candidates(
         manifest["exists"] = model_file.exists()
         manifest["size_bytes"] = model_file.stat().st_size if model_file.exists() else 0
         candidates.append(manifest)
+    latest_id = str(latest_record(models_dir).get("id") or "")
+    # Training progress (the step) is the reliable ordering signal.  The
+    # creation timestamp is only a tie-breaker, and the latest pointer
+    # disambiguates two saves at the same step.  Directory names are never
+    # parsed: the old ``m-<timestamp>-<step>`` convention was not a contract.
     candidates.sort(
-        key=lambda item: (item.get("created_at") or "", int(item.get("step") or 0)),
+        key=lambda item: (
+            int(item.get("step") or 0),
+            str(item.get("created_at") or ""),
+            str(item.get("id")) == latest_id,
+        ),
         reverse=True,
     )
     return candidates

@@ -96,6 +96,10 @@ class TrainingConfig(BaseModel):
     #: stored; turn this off only when checkpoint size matters more.
     league_states: bool = True
     checkpoint_interval: int = Field(default=10, ge=1, le=10000)
+    #: additional recovery checkpoints kept per run (newest training steps).
+    #: The latest resume point, stable model, every best checkpoint and the
+    #: newest final/interrupt checkpoint are anchored in addition to this
+    #: number; retention never deletes the only loadable checkpoint.
     keep_checkpoints: int = Field(default=8, ge=1, le=100)
     reward: RewardWeights = Field(default_factory=RewardWeights)
     policy: PolicySettings = Field(default_factory=PolicySettings)

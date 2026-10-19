@@ -48,10 +48,13 @@ def test_train_registers_a_missing_run_id(data_root, monkeypatch, capsys):
     assert seen["steps"] == 4000
     # the trainer (not the CLI) is responsible for registering a missing row
     assert seen["store_has_run"] is False
-    # no checkpoint was requested, so nothing is restored and no plan is built
-    assert seen["resume_mode"] == "fresh"
+    # automatic continuation is the default: a plan is built and finds no
+    # checkpoint, so the trainer will start a new policy from scratch
+    assert seen["resume_mode"] == "continue"
     assert seen["resume_from"] is None
-    assert seen["resume_plan"] is None
+    assert seen["resume_plan"] is not None
+    assert seen["resume_plan"].will_resume is False
+    assert seen["resume_plan"].candidates_found == 0
     assert json.loads(capsys.readouterr().out)["status"] == "completed"
 
 
@@ -75,7 +78,7 @@ def test_train_plan_only_never_starts_training(data_root, monkeypatch, capsys):
     assert payload["resume_plan"]["will_resume"] is False
 
 
-def test_auto_resume_hands_the_plan_to_the_trainer(data_root, monkeypatch, capsys):
+def test_automatic_resume_hands_the_plan_to_the_trainer(data_root, monkeypatch, capsys):
     config = TrainingConfig.load("configs/smoke-1v1.json")
     policy_config = config.policy_config()
     manifest = checkpoints.save_checkpoint(
@@ -97,8 +100,9 @@ def test_auto_resume_hands_the_plan_to_the_trainer(data_root, monkeypatch, capsy
         return {"status": "completed", "step": 2048, "message": "fake"}
 
     monkeypatch.setattr("rlai.trainer.run_training", fake_run_training)
+    # no --auto-resume / --resume-mode needed: continuation is the default
     code = cli.main(
-        ["train", "--config-file", "configs/smoke-1v1.json", "--auto-resume", "--run-id", "child"]
+        ["train", "--config-file", "configs/smoke-1v1.json", "--run-id", "child"]
     )
     assert code == 0
     assert seen["mode"] == "continue"
@@ -251,3 +255,83 @@ def test_live_launch_fails_clearly_off_windows(data_root, models_dir, capsys):
     captured = capsys.readouterr()
     assert "live match unavailable" in captured.err
     assert "preflight" in captured.err
+
+
+def _checkpoint(models_dir, config, *, step, hidden=None, label=""):
+    from rlai.policy import PolicyConfig
+
+    base = config.policy_config()
+    policy = PolicyConfig(
+        obs_size=base.obs_size,
+        hidden=tuple(hidden or base.hidden),
+        activation=base.activation,
+    )
+    model = policy.build()
+    return checkpoints.save_checkpoint(
+        models_dir,
+        model_state=model.state_dict(),
+        policy_config=policy.to_dict(),
+        optimizer_state={"state": {}, "param_groups": []},
+        step=step,
+        run_id="parent",
+        mode=config.mode,
+        training_config=config.to_dict(),
+        extra={"obs_version": config.obs_version},
+        label=label,
+    )
+
+
+def test_train_refuses_unusable_checkpoints_before_creating_a_run(data_root, monkeypatch, capsys):
+    config = TrainingConfig.load("configs/smoke-1v1.json")
+    _checkpoint(data_root / "models", config, step=2048, hidden=(64,))
+
+    def boom(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("an unusable checkpoint must not start training")
+
+    monkeypatch.setattr("rlai.trainer.run_training", boom)
+    code = cli.main(["train", "--config-file", "configs/smoke-1v1.json"])
+
+    assert code == 3
+    assert "Refusing to start a fresh model" in capsys.readouterr().err
+    assert Store(data_root / "rlai.sqlite3").list_runs() == []
+
+
+def test_explicit_fresh_overrides_existing_checkpoints(data_root, monkeypatch, capsys):
+    config = TrainingConfig.load("configs/smoke-1v1.json")
+    _checkpoint(data_root / "models", config, step=2048, hidden=(64,))
+    seen = {}
+
+    def fake_run_training(cfg, run_id, store, resume_from=None, **kwargs):
+        seen.update(resume_from=resume_from, mode=kwargs.get("resume_mode"))
+        return {"status": "completed", "step": 0, "message": "fake"}
+
+    monkeypatch.setattr("rlai.trainer.run_training", fake_run_training)
+    code = cli.main(
+        ["train", "--config-file", "configs/smoke-1v1.json", "--resume-mode", "fresh"]
+    )
+    assert code == 0
+    assert seen["mode"] == "fresh"
+    assert seen["resume_from"] is None
+    assert "starts a new policy" in capsys.readouterr().err
+
+
+def test_explicit_resume_from_overrides_the_newest_checkpoint(data_root, capsys):
+    config = TrainingConfig.load("configs/smoke-1v1.json")
+    older = _checkpoint(data_root / "models", config, step=256)
+    _checkpoint(data_root / "models", config, step=4096, label="final")
+
+    code = cli.main(
+        [
+            "train",
+            "--config-file",
+            "configs/smoke-1v1.json",
+            "--resume-from",
+            older["id"],
+            "--plan-only",
+        ]
+    )
+    assert code == 0
+    plan = json.loads(capsys.readouterr().out)["resume_plan"]
+    assert plan["will_resume"] is True
+    assert plan["model_id"] == older["id"]
+    assert plan["restored_step"] == 256

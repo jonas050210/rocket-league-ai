@@ -117,6 +117,10 @@ class ResumePlan:
     rejected: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     lineage: list[str] = field(default_factory=list)
+    #: how many checkpoints exist at all (even ones filtered out by mode)
+    candidates_found: int = 0
+    #: the latest pointer target, if one was written (metadata recording only)
+    latest_checkpoint_id: str | None = None
     fallback_used: bool = False
     explicit_unavailable: bool = False
     has_model: bool = False
@@ -190,6 +194,8 @@ class ResumePlan:
             "rejected": self.rejected,
             "warnings": self.warnings,
             "lineage": self.lineage,
+            "candidates_found": self.candidates_found,
+            "latest_checkpoint_id": self.latest_checkpoint_id,
             "fallback_used": self.fallback_used,
             "explicit_unavailable": self.explicit_unavailable,
             "has_model": self.has_model,
@@ -364,8 +370,10 @@ def plan_resume(
     # validate eagerly so a typo fails the *plan*, not the training start
     merge_config({}, config, mode="continue", explicit_overrides=plan.explicit_overrides)
     plan.lineage = lineage_runs(models_dir, run_id)
+    plan.latest_checkpoint_id = checkpoints.latest_record(models_dir).get("id")
 
     candidates = checkpoints.list_checkpoint_candidates(models_dir, mode=None)
+    plan.candidates_found = len(candidates)
     compatible = [
         item
         for item in candidates
@@ -384,7 +392,9 @@ def plan_resume(
         plan.warnings.append(f"no checkpoints in {models_dir}; nothing to resume from")
         return plan
 
-    ordered = _order_candidates(compatible, plan.lineage, config, mode)
+    ordered = _order_candidates(
+        compatible, plan.lineage, config, mode, latest_id=plan.latest_checkpoint_id
+    )
     if checkpoint:
         explicit = _explicit_first(models_dir, checkpoint, ordered)
         if explicit is not None:
@@ -557,11 +567,19 @@ def plan_resume(
             + "; refusing to start from scratch silently"
         )
     if not plan.will_resume:
-        plan.warnings.append(
-            f"no compatible checkpoint found for mode={config.mode} "
-            f"obs_version={config.obs_version} ({len(plan.rejected)} rejected); "
-            "training would start from scratch"
-        )
+        if candidates and not compatible:
+            plan.warnings.append(
+                f"no compatible checkpoint found: {len(candidates)} checkpoint(s) exist "
+                f"but none matches mode={config.mode}; automatic continuation refuses "
+                "to ignore them silently - start with --resume-mode fresh (new policy) "
+                "or --resume-mode transfer (weights only)"
+            )
+        else:
+            plan.warnings.append(
+                f"no compatible checkpoint found for mode={config.mode} "
+                f"obs_version={config.obs_version} ({len(plan.rejected)} rejected); "
+                "refusing to start from scratch silently"
+            )
     return plan
 
 
@@ -618,19 +636,34 @@ def _candidate_summary(item: dict) -> dict:
 
 
 def _order_candidates(
-    candidates: list[dict], lineage: list[str], config: TrainingConfig, mode: str
+    candidates: list[dict],
+    lineage: list[str],
+    config: TrainingConfig,
+    mode: str,
+    latest_id: str | None = None,
 ) -> list[dict]:
-    """Newest first, but inside the requested lineage before anything else."""
+    """Newest training progress first, inside the requested lineage first.
+
+    Within the lineage the checkpoint with the highest step wins: that is the
+    training progress, not a timestamp parsed out of a directory name.  For
+    equal steps the latest pointer disambiguates two saves, and the creation
+    time breaks any remaining tie.  A candidate without optimizer state is
+    still preferred over an older one - losing trained steps would be worse
+    than starting a fresh optimizer (the plan warns about the missing state).
+    """
+    latest = str(latest_id or "")
+
     def sort_key(item: dict):
         in_lineage = 1 if str(item.get("run_id")) in lineage else 0
         same_mode = 1 if item.get("mode") in (None, config.mode) else 0
-        has_optimizer = 1 if item.get("has_optimizer") in (True, None) else 0
+        step = int(item.get("step") or 0)
+        is_latest = 1 if latest and str(item.get("id")) == latest else 0
         return (
             in_lineage if mode == "continue" else 0,
             same_mode,
-            has_optimizer if mode == "continue" else 0,
-            item.get("created_at") or "",
-            int(item.get("step") or 0),
+            step,
+            is_latest,
+            str(item.get("created_at") or ""),
         )
 
     return sorted(candidates, key=sort_key, reverse=True)

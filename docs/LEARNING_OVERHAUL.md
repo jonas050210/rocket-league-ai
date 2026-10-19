@@ -113,7 +113,7 @@ selected automatically):
 
 ```bash
 python -m rlai.cli resume-plan --config-file configs/1v1-continue-v2.json --override-config reward
-python -m rlai.cli train --config-file configs/1v1-continue-v2.json --auto-resume --override-config reward
+python -m rlai.cli train --config-file configs/1v1-continue-v2.json --override-config reward
 ```
 
 Key settings (A): `obs_version=3`, `curriculum=true` (stage horizons

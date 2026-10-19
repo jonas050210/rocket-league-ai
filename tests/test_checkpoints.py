@@ -166,3 +166,128 @@ def test_corrupt_best_pointer_is_ignored(tmp_path):
     (tmp_path / checkpoints.BEST_POINTER).write_text("{not json", encoding="utf-8")
     assert checkpoints.best_model(tmp_path) is None
     assert checkpoints.best_record(tmp_path) == {}
+
+
+def test_save_records_the_latest_pointer(tmp_path):
+    """Discovery must not have to parse a timestamp out of a directory name."""
+    first = _save(tmp_path, 10)
+    second = _save(tmp_path, 20)
+    record = checkpoints.latest_record(tmp_path)
+    assert record["id"] == second["id"]
+    assert record["step"] == 20
+    assert checkpoints.latest_model(tmp_path)["id"] == second["id"]
+    assert first["id"] != second["id"]
+
+
+def test_a_failed_save_leaves_the_previous_checkpoint_and_pointer_intact(
+    tmp_path, monkeypatch
+):
+    first = _save(tmp_path, 10)
+
+    def broken_save(payload, handle):
+        handle.write(b"partial garbage")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(checkpoints.torch, "save", broken_save)
+    with pytest.raises(OSError, match="disk full"):
+        _save(tmp_path, 20)
+
+    models = checkpoints.list_models(tmp_path)
+    assert [m["id"] for m in models] == [first["id"]]
+    assert checkpoints.latest_record(tmp_path)["id"] == first["id"]
+    assert [p.name for p in tmp_path.iterdir() if p.is_dir()] == [first["id"]]
+    assert checkpoints.load_checkpoint(tmp_path / first["path"])["step"] == 10
+
+
+def test_pruning_keeps_the_best_checkpoint_when_it_is_older_than_recovery(tmp_path):
+    best = _save(tmp_path, 10)
+    for step in (20, 30, 40):
+        _save(tmp_path, step)
+    checkpoints.set_best(tmp_path, best["id"], 0.9)
+
+    deleted = checkpoints.prune_candidates(tmp_path, keep=1)
+
+    remaining = {m["id"] for m in checkpoints.list_models(tmp_path)}
+    assert best["id"] in remaining
+    assert checkpoints.latest_record(tmp_path)["id"] in remaining
+    assert deleted
+    assert best["id"] not in deleted
+
+
+def test_pruning_keeps_a_final_checkpoint_when_it_is_older_than_recovery(tmp_path):
+    final = _save(tmp_path, 10)
+    checkpoints.set_label(tmp_path, final["id"], "final")
+    for step in (20, 30, 40):
+        _save(tmp_path, step)
+
+    checkpoints.prune_candidates(tmp_path, keep=1)
+
+    remaining = {m["id"] for m in checkpoints.list_models(tmp_path)}
+    assert final["id"] in remaining
+    assert checkpoints.get_model(tmp_path, final["id"])["label"] == "final"
+
+
+def test_pruning_never_deletes_the_only_loadable_checkpoint(tmp_path):
+    valid = _save(tmp_path, 10)
+    corrupt = _save(tmp_path, 20)
+    (tmp_path / corrupt["path"]).write_bytes(b"not a torch file")
+
+    deleted = checkpoints.prune_candidates(tmp_path, keep=0)
+
+    assert deleted == []
+    assert checkpoints.load_checkpoint(tmp_path / valid["path"])["step"] == 10
+    # the newest (corrupt) attempt is retained too; nothing was removed
+    assert {m["id"] for m in checkpoints.list_models(tmp_path)} == {
+        valid["id"],
+        corrupt["id"],
+    }
+
+
+def test_pruning_does_nothing_when_every_checkpoint_is_corrupt(tmp_path):
+    for step in (10, 20):
+        manifest = _save(tmp_path, step)
+        (tmp_path / manifest["path"]).write_bytes(b"broken")
+    assert checkpoints.prune_candidates(tmp_path, keep=0) == []
+    assert len(checkpoints.list_models(tmp_path)) == 2
+
+
+def test_candidate_order_uses_the_training_step(tmp_path):
+    _save(tmp_path, 64)
+    _save(tmp_path, 1024)
+    _save(tmp_path, 512)
+    steps = [item["step"] for item in checkpoints.list_checkpoint_candidates(tmp_path)]
+    assert steps == [1024, 512, 64]
+    # the pointer still records the last *save*, not the highest step
+    assert checkpoints.latest_record(tmp_path)["step"] == 512
+
+
+def test_pruning_keeps_the_latest_saved_checkpoint_even_below_the_keep_window(tmp_path):
+    # simulate an out-of-order save: the pointer represents a completed save
+    # at a lower step than checkpoints that were written earlier
+    _save(tmp_path, 20)
+    _save(tmp_path, 30)
+    _save(tmp_path, 40)
+    last_saved = _save(tmp_path, 10)
+    assert checkpoints.latest_record(tmp_path)["id"] == last_saved["id"]
+
+    checkpoints.prune_candidates(tmp_path, keep=1)
+
+    remaining = {m["id"] for m in checkpoints.list_models(tmp_path)}
+    assert last_saved["id"] in remaining
+    # the newest training progress is retained as well
+    assert checkpoints.list_checkpoint_candidates(tmp_path)[0]["step"] == 40
+
+
+def test_a_failed_manifest_write_leaves_no_half_published_checkpoint(tmp_path, monkeypatch):
+    first = _save(tmp_path, 10)
+
+    def broken_manifest(directory, manifest):
+        raise OSError("disk full while writing manifest")
+
+    monkeypatch.setattr(checkpoints, "write_manifest", broken_manifest)
+    with pytest.raises(OSError, match="manifest"):
+        _save(tmp_path, 20)
+
+    assert [m["id"] for m in checkpoints.list_models(tmp_path)] == [first["id"]]
+    assert checkpoints.latest_record(tmp_path)["id"] == first["id"]
+    assert [p.name for p in tmp_path.iterdir() if p.is_dir()] == [first["id"]]

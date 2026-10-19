@@ -31,11 +31,15 @@ MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class StartRunRequest(TrainingConfig):
-    """Training configuration plus an explicit resume decision.
+    """Training configuration plus a resume decision.
 
-    ``resume_mode`` is never inferred silently: "fresh" starts a new policy,
-    "continue" restores weights/optimizer/step/RNG/curriculum from a compatible
-    checkpoint and "transfer" keeps only the weights and restarts the step count.
+    Omitting ``resume_mode`` means automatic continuation: the newest valid,
+    compatible checkpoint is restored when one exists, and a new policy is
+    started only when the models directory contains no checkpoint at all.
+    Existing but unusable checkpoints are refused, never silently replaced by
+    a fresh model.  Explicit values keep their old meaning: ``fresh`` always
+    starts a new policy, ``continue`` requires a usable checkpoint and
+    ``transfer`` keeps only the weights and restarts the step count.
 
     ``confirm`` must be set by the client.  It is the server-side half of the
     confirmation dialog: a training run is never started by a request that did
@@ -43,7 +47,7 @@ class StartRunRequest(TrainingConfig):
     """
 
     resume_from: str | None = None
-    resume_mode: str = "fresh"
+    resume_mode: str | None = None
     #: inherited config fields to change deliberately on a continue resume
     #: (a recorded phase change; see rlai.resume.merge_config)
     config_overrides: list[str] = []
@@ -524,20 +528,61 @@ def create_app(store_path: Path | None = None) -> FastAPI:
                     "the run (the GUI asks the user first)"
                 ),
             )
-        resume_from = request.resume_from
-        resume_mode = request.resume_mode or "fresh"
-        if resume_mode not in ("fresh", "continue", "transfer"):
-            raise HTTPException(status_code=400, detail=f"unknown resume mode {resume_mode!r}")
-        if resume_mode == "fresh":
-            resume_from = None
         stored = request.model_dump(
             exclude={"resume_from", "resume_mode", "allow_concurrent", "confirm", "config_overrides"}
         )
         config = TrainingConfig.model_validate(stored)
+        resume_from = request.resume_from
+        explicit_mode = request.resume_mode
+        if explicit_mode is not None and explicit_mode not in (
+            "fresh",
+            "continue",
+            "transfer",
+        ):
+            raise HTTPException(
+                status_code=400, detail=f"unknown resume mode {explicit_mode!r}"
+            )
+        if explicit_mode is None:
+            # Automatic default.  Prefer a named checkpoint when the caller
+            # supplied one; otherwise discover the newest usable checkpoint.
+            from ..resume import plan_resume
+
+            resume_mode = "continue"
+            if not resume_from:
+                plan = plan_resume(
+                    paths["models"],
+                    config,
+                    mode="continue",
+                    explicit_overrides=request.config_overrides,
+                )
+                if plan.will_resume:
+                    resume_from = str(plan.checkpoint_path)
+                elif plan.candidates_found:
+                    reasons = [
+                        reason
+                        for item in plan.rejected
+                        for reason in item.get("reasons", [])
+                    ] or plan.warnings
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"automatic resume found {plan.candidates_found} checkpoint(s) "
+                            "but none is usable: "
+                            + "; ".join(reasons)
+                            + ". Start deliberately with resume_mode='fresh' for a new "
+                            "policy or resume_mode='transfer' to reuse weights."
+                        ),
+                    )
+                else:
+                    resume_mode = "fresh"
+        else:
+            resume_mode = explicit_mode
+            if resume_mode == "fresh":
+                resume_from = None
         if resume_mode in ("continue", "transfer") and not resume_from:
             # Automatic continuation: resolve the newest valid, compatible
-            # checkpoint with the same logic the CLI's --auto-resume uses and
-            # pass the explicit path to the trainer.  A run that was asked to
+            # checkpoint with the same logic the CLI uses by default and pass
+            # the explicit path to the trainer.  A run that was asked to
             # continue is never turned into a fresh model silently; when no
             # suitable checkpoint exists the start is refused with a reason.
             from ..resume import plan_resume

@@ -656,10 +656,13 @@ function resumeStateHtml(plan) {
       </div>
     </div>`;
   }
+  const hasCandidates = Number(resume.candidates_found || 0) > 0;
   return `<div class="callout ${resume.rejected && resume.rejected.length ? "warning" : ""}">
     <div class="callout-copy">
-      <strong>Will start a new model</strong>
-      <p>No compatible checkpoint is available, so training starts from scratch with a fresh policy. Existing checkpoints are never touched.</p>
+      <strong>${hasCandidates ? "Start refused until the checkpoints are usable" : "Will start a new model"}</strong>
+      <p>${hasCandidates
+        ? "Checkpoints exist but none can be used for a continuation. The server refuses to initialise a fresh model and silently ignore that progress; repair the files or remove the unusable checkpoints under Models first."
+        : "No checkpoint exists, so training starts from scratch with a fresh policy. Existing checkpoints are never touched."}</p>
       ${reasonList("Why", resume.warnings)}
       ${(resume.rejected || []).length ? `<div class="table-wrap"><table class="compact">
         <thead><tr><th>Rejected checkpoint</th><th>Step</th><th>Reason</th></tr></thead>
@@ -832,21 +835,25 @@ views.training = async () => {
     const runName = nameInput.value.trim();
     const plan = trainingState.plan;
     const resuming = Boolean(plan && plan.will_resume);
+    const blocked = Boolean(plan && plan.resume && Number(plan.resume.candidates_found || 0) > 0);
     const summary = [
       `1v1 · ${fmtNumber(totalSteps)} environment steps.`,
       resuming
         ? `Will continue from ${plan.resume.model_id} at step ${fmtNumber(plan.resume.restored_step)} (weights, optimiser and step counter are restored).`
-        : "Will start a new model — no compatible checkpoint is available.",
+        : blocked
+          ? "The server will refuse this start: checkpoints exist but none is usable. Repair or remove them under Models first."
+          : "Will start a new model — no checkpoint exists.",
       `Device ${String(plan?.device || "auto")} · ${fmtNumber(plan?.workers?.recommended_workers)} worker(s) on this machine.`,
       "Training starts immediately and keeps running until it is stopped or the budget is reached.",
     ].join(" ");
     confirmAction("Start 1v1 training", summary, async () => {
       submit.disabled = true;
       try {
+        // No resume_mode: the server resumes the newest usable checkpoint
+        // automatically and starts fresh only when no checkpoint exists.
         const payload = {
           total_steps: totalSteps,
           mode: "soccer-1v1",
-          resume_mode: resuming ? "continue" : "fresh",
           allow_concurrent: false,
         };
         // the server refuses a start that was not confirmed; this flag is only
@@ -854,7 +861,7 @@ views.training = async () => {
         payload.confirm = true;
         if (runName) payload.run_name = runName;
         const run = await api("/api/runs", { method: "POST", body: JSON.stringify(payload) });
-        toast(`Run ${run.id} started (${payload.resume_mode})`);
+        toast(`Run ${run.id} started (${resuming ? "continued" : "new model"})`);
         location.hash = `#/monitoring?run=${encodeURIComponent(run.id)}`;
       } catch (error) {
         toast(error.message, "error");

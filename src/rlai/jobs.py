@@ -80,7 +80,7 @@ class JobManager:
         config: TrainingConfig,
         run_id: str,
         resume_from: str | None = None,
-        resume_mode: str = "fresh",
+        resume_mode: str = "continue",
         allow_concurrent: bool = False,
         config_overrides: list[str] | tuple[str, ...] | None = None,
     ) -> dict:

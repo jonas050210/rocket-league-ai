@@ -103,6 +103,9 @@ def _config_from(client, **overrides) -> dict:
         n_workers=1,
         minibatch_size=256,
         mode="soccer-1v1",
+        # these tests exercise explicit configuration handling; automatic
+        # continuation is covered separately
+        resume_mode="fresh",
         # a training run is only started after an explicit confirmation
         confirm=True,
     )
@@ -128,6 +131,7 @@ def test_run_lifecycle(client, monkeypatch):
         n_workers=1,
         minibatch_size=256,
         mode="soccer-1v1",
+        resume_mode="fresh",
         confirm=True,
     )
     response = client.post("/api/runs", json=payload)
@@ -342,10 +346,15 @@ def test_simplified_start_run_payload(client, models_dir, monkeypatch):
 
     monkeypatch.setattr(client.app.state.jobs, "start_training", fake_start)
 
-    # fresh start: a slim payload without any technical parameter
+    # explicit fresh start: a slim payload without any technical parameter
     response = client.post(
         "/api/runs",
-        json={"total_steps": 4096, "run_name": "slim run", "confirm": True},
+        json={
+            "total_steps": 4096,
+            "run_name": "slim run",
+            "resume_mode": "fresh",
+            "confirm": True,
+        },
     )
     assert response.status_code == 200, response.text
     config = started["config"]
@@ -383,6 +392,36 @@ def test_simplified_start_run_payload(client, models_dir, monkeypatch):
     assert response.status_code == 200, response.text
     assert started["resume_mode"] == "continue"
     assert started["resume_from"].endswith(manifest["path"])
+
+
+def test_omitted_resume_mode_continues_automatically(client, models_dir, monkeypatch):
+    """No resume fields means auto: resume if possible, fresh only if empty."""
+    started = {}
+
+    def fake_start(config, run_id, resume_from=None, **kwargs):
+        started["resume_from"] = resume_from
+        started.update(kwargs)
+
+    monkeypatch.setattr(client.app.state.jobs, "start_training", fake_start)
+    config = TrainingConfig.model_validate(_config_from(client, resume_mode="fresh"))
+    manifest = _compatible_checkpoint(models_dir, config)
+
+    response = client.post(
+        "/api/runs", json={"total_steps": 4096, "confirm": True}
+    )
+    assert response.status_code == 200, response.text
+    assert started["resume_mode"] == "continue"
+    assert started["resume_from"].endswith(manifest["path"])
+
+    # an unusable checkpoint is refused, not silently replaced by a new model
+    models_dir.joinpath(manifest["id"]).joinpath(
+        checkpoints.MODEL_FILE
+    ).write_bytes(b"broken")
+    response = client.post(
+        "/api/runs", json={"total_steps": 4096, "confirm": True}
+    )
+    assert response.status_code == 400, response.text
+    assert "automatic resume" in response.json()["detail"]
 
 
 def test_model_validation_endpoint(client, models_dir):
@@ -664,3 +703,29 @@ def test_cors_is_opt_in(monkeypatch, data_root, models_dir):
         assert response.headers.get("access-control-allow-origin") == "https://gui.example"
         response = client.get("/api/health", headers={"origin": "https://evil.example"})
         assert "access-control-allow-origin" not in response.headers
+
+
+def test_omitted_resume_mode_starts_fresh_only_without_any_checkpoint(
+    client, models_dir, monkeypatch
+):
+    started = {}
+
+    def fake_start(config, run_id, resume_from=None, **kwargs):
+        started["resume_from"] = resume_from
+        started.update(kwargs)
+
+    monkeypatch.setattr(client.app.state.jobs, "start_training", fake_start)
+    # the shared fixture contains a checkpoint; this test needs an empty store
+    import shutil
+
+    for child in models_dir.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+    response = client.post("/api/runs", json={"total_steps": 4096, "confirm": True})
+
+    assert response.status_code == 200, response.text
+    assert started["resume_mode"] == "fresh"
+    assert started["resume_from"] is None

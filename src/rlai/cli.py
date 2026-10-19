@@ -64,10 +64,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _resolve_resume(args: argparse.Namespace, config: TrainingConfig) -> tuple[str, str | None]:
-    """Decide the explicit resume mode and (optional) checkpoint reference."""
+    """Decide the resume mode and (optional) checkpoint reference.
+
+    Automatic continuation is the default: ``train`` and ``headless`` look
+    for the newest valid, compatible checkpoint and continue from it.  Only an
+    explicit ``--resume-mode fresh`` starts a new policy; ``--auto-resume`` is
+    kept as a backwards-compatible no-op (it used to request this behaviour).
+    """
     mode = args.resume_mode
     if mode is None:
-        mode = "continue" if (args.resume_from or args.auto_resume) else "fresh"
+        mode = "continue"
     if mode not in ("fresh", "continue", "transfer"):
         raise SystemExit(f"--resume-mode must be fresh, continue or transfer, got {mode!r}")
     reference = args.resume_from
@@ -77,6 +83,11 @@ def _resolve_resume(args: argparse.Namespace, config: TrainingConfig) -> tuple[s
             file=sys.stderr,
         )
         reference = None
+    elif mode == "fresh":
+        print(
+            "NOTE: --resume-mode fresh starts a new policy; existing checkpoints are ignored.",
+            file=sys.stderr,
+        )
     return mode, reference
 
 
@@ -113,7 +124,8 @@ def cmd_train(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-        _print({"resume_plan": plan.to_dict()})
+        if plan.will_resume or plan.candidates_found or reference or args.plan_only:
+            _print({"resume_plan": plan.to_dict()})
         if args.plan_only:
             return 0
         if not plan.will_resume and reference:
@@ -125,11 +137,37 @@ def cmd_train(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        if not plan.will_resume and resume_mode == "transfer":
+            print(
+                "ERROR: transfer learning needs a usable checkpoint; none was found. "
+                "Use --resume-mode fresh for a new policy.",
+                file=sys.stderr,
+            )
+            return 3
+        if not plan.will_resume and plan.candidates_found:
+            # Never turn existing, unusable progress into a silent fresh run.
+            # The run row is not created here, so a refusal leaves no debris.
+            print(
+                f"ERROR: automatic resume found {plan.candidates_found} checkpoint(s), "
+                "but none is usable. Refusing to start a fresh model and lose that "
+                "progress. Use --resume-mode fresh to start a new policy, "
+                "--resume-mode transfer to reuse weights, or name a checkpoint "
+                "with --resume-from.",
+                file=sys.stderr,
+            )
+            return 3
         for warning in plan.warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
-    elif args.plan_only:
-        _print({"resume_plan": {"mode": "fresh", "will_resume": False}})
-        return 0
+        if not plan.will_resume:
+            print(
+                "NOTE: no checkpoint found; automatic resume will start a new "
+                "policy from scratch (fresh training).",
+                file=sys.stderr,
+            )
+    else:
+        if args.plan_only:
+            _print({"resume_plan": {"mode": "fresh", "will_resume": False}})
+            return 0
 
     if not run_id:
         run_id = store.create_run(
@@ -433,13 +471,19 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--auto-resume",
         action="store_true",
-        help="continue from the newest valid, compatible checkpoint of this lineage",
+        help=(
+            "deprecated compatibility flag: automatic continuation is now the "
+            "default, so this changes nothing"
+        ),
     )
     train.add_argument(
         "--resume-mode",
         default=None,
         choices=["fresh", "continue", "transfer"],
-        help="fresh (default), continue (restore everything) or transfer (weights only)",
+        help=(
+            "continue (default: newest valid, compatible checkpoint), fresh "
+            "(always a new policy) or transfer (weights only)"
+        ),
     )
     train.add_argument(
         "--plan-only",
@@ -475,12 +519,19 @@ def build_parser() -> argparse.ArgumentParser:
     headless.add_argument("--config-file", required=True)
     headless.add_argument("--run-id", default=None)
     headless.add_argument("--resume-from", default=None)
-    headless.add_argument("--auto-resume", action="store_true")
+    headless.add_argument(
+        "--auto-resume",
+        action="store_true",
+        help="deprecated compatibility flag: automatic continuation is the default",
+    )
     headless.add_argument(
         "--resume-mode",
         default=None,
         choices=["fresh", "continue", "transfer"],
-        help="fresh (default), continue (restore everything) or transfer (weights only)",
+        help=(
+            "continue (default: newest valid, compatible checkpoint), fresh "
+            "(always a new policy) or transfer (weights only)"
+        ),
     )
     headless.add_argument("--plan-only", action="store_true")
     headless.add_argument("--max-steps", type=int, default=None)
