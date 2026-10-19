@@ -238,7 +238,9 @@ class Trainer:
             duplicate_distance_tolerance=float(config.pool_duplicate_distance_tolerance),
         )
         self.curriculum = (
-            Curriculum(stages_for_mode(config.mode)) if config.curriculum else None
+            Curriculum(stages_for_mode(config.mode, config.curriculum_preset))
+            if config.curriculum
+            else None
         )
         self.rng = np.random.default_rng(int(config.seed))
         #: best win rate per evaluation protocol (key -> score).  Comparing
@@ -266,6 +268,8 @@ class Trainer:
         self.interrupt_checkpoint_error: str | None = None
         self._interrupt_guard = _InterruptGuard()
         self.evaluation_seconds = 0.0
+        self.gate_seconds = 0.0
+        self.gate_probe_seconds = 0.0
         self.checkpoint_seconds = 0.0
         self.evaluated_before = False
         #: filled in by :meth:`_apply_resource_limits` before the workers start
@@ -599,12 +603,33 @@ class Trainer:
                 )
         if self.curriculum is not None and isinstance(extra.get("curriculum"), dict):
             saved = extra["curriculum"]
+            stages = stages_for_mode(self.config.mode, self.config.curriculum_preset)
+            # Restore by stage *name*, not by position: a checkpoint written
+            # under a different preset (or an older stage list) would otherwise
+            # silently continue at whatever stage happens to have that index.
+            saved_name = str((saved.get("stage") or {}).get("name") or "")
+            names = [stage.name for stage in stages]
+            if saved_name and saved_name in names:
+                start_index = names.index(saved_name)
+            else:
+                start_index = int(saved.get("index", 0))
+                if saved_name:
+                    self._warn(
+                        f"checkpoint curriculum stage {saved_name!r} does not exist in the "
+                        f"{self.config.curriculum_preset!r} stage list {names}; restoring "
+                        f"position {start_index} ({names[min(start_index, len(names) - 1)]}) "
+                        "instead - gate confirmations and retention baselines are kept"
+                    )
             self.curriculum = Curriculum(
-                stages_for_mode(self.config.mode),
-                start_index=int(saved.get("index", 0)),
+                stages,
+                start_index=start_index,
                 stage_iterations=int(saved.get("iterations", 0)),
                 total_iterations=int(saved.get("total_iterations", 0)),
                 window_episodes=saved.get("window") if isinstance(saved.get("window"), list) else None,
+                # gate measurements, confirmation counts and retention
+                # baselines survive the checkpoint: a resume must not get a
+                # second chance at a gate it already failed (or passed)
+                gate_state=saved.get("gate_state"),
             )
             self._log(
                 "INFO",
@@ -1153,6 +1178,115 @@ class Trainer:
         self.rng.shuffle(teams)
         return teams
 
+    # -- curriculum gate evaluation ------------------------------------------
+    def _gate_measurements(self) -> dict[str, dict]:
+        """Measure every skill the active curriculum currently needs.
+
+        Probes are state-based and independent of the training reward; the
+        ``match_*`` skills are real match evaluations against a fixed
+        opponent.  Skills mastered in *earlier* stages are measured in the
+        same call so the retention comparison uses one protocol.
+        """
+        from .evaluation import evaluate_policy
+        from .skills import MATCH_SKILLS, evaluate_skills, match_measurement
+
+        assert self.curriculum is not None
+        skills = self.curriculum.required_skills()
+        policy = TorchPolicy(self.model, device=self.device)
+        measurements: dict[str, dict] = {}
+        probes = [skill for skill in skills if skill not in MATCH_SKILLS]
+        try:
+            if probes:
+                suite = evaluate_skills(
+                    policy,
+                    probes,
+                    mode=self.config.mode,
+                    trials=int(self.config.curriculum_gate_trials),
+                    seed=int(self.config.seed) + 770_001,
+                    sides=("blue", "orange"),
+                    mirror=bool(self.config.eval_mirror),
+                    obs_version=self.config.obs_version,
+                    device=str(self.device),
+                )
+                measurements.update(suite["results"])
+                self.gate_probe_seconds += float(suite.get("duration_s") or 0.0)
+            for skill in skills:
+                if skill not in MATCH_SKILLS:
+                    continue
+                result = evaluate_policy(
+                    policy,
+                    mode=self.config.mode,
+                    opponent=MATCH_SKILLS[skill],
+                    games=int(self.config.eval_games),
+                    seed=int(self.config.seed) + 880_001,
+                    match_seconds=float(self.config.eval_match_seconds),
+                    episode_seconds=min(float(self.config.eval_match_seconds), 30.0),
+                    device=str(self.device),
+                    obs_version=self.config.obs_version,
+                    sides=tuple(self.config.eval_sides),
+                    mirror=bool(self.config.eval_mirror),
+                )
+                measurements[skill] = match_measurement(result)
+        finally:
+            self.model.train()
+        return measurements
+
+    def _run_gate_evaluation(self) -> dict | None:
+        """One independent gate evaluation; may promote, block or demote."""
+        if self.curriculum is None or self.curriculum.finished:
+            return None
+        stage_name = self.curriculum.stage.name
+        started = time.perf_counter()
+        measurements = self._gate_measurements()
+        seconds = time.perf_counter() - started
+        self.gate_seconds += seconds
+        transition = self.curriculum.record_gate(measurements)
+        for key, value in self.curriculum.metrics().items():
+            self._metric(key, value)
+        self._metric("time/gate_seconds", seconds)
+        summary = ", ".join(
+            f"{gate.skill}={float(measurement.get('rate') or 0.0):.2f}"
+            f"[n={int(measurement.get('trials') or 0)}]"
+            for gate in self.curriculum.stage.gates
+            for measurement in [measurements.get(gate.skill) or {}]
+        )
+        self._log(
+            "INFO",
+            f"gate[{stage_name}] {summary or 'no gates'} in {seconds:.1f}s -> "
+            f"{self.curriculum.gates.passes_in_a_row}/"
+            f"{self.curriculum.stage.confirmations} confirmations; blocked by: "
+            f"{self.curriculum.blocked_reason() or 'nothing'}",
+        )
+        event = self.curriculum.last_event
+        if transition and event == "promotion":
+            self._log_curriculum_transition("promotion")
+        elif event == "regression":
+            failing = [
+                row
+                for row in self.curriculum.retention_rows()
+                if not row["ok"]
+            ]
+            self._warn(
+                "skill regression: "
+                + "; ".join(f"{row['name']} {row['reason']}" for row in failing)
+                + f" - stage {stage_name!r} is NOT counted as mastered; the "
+                "confirmation counter was reset"
+            )
+        self._flush_metrics()
+        return measurements
+
+    def _log_curriculum_transition(self, event: str) -> None:
+        stage = self.curriculum.stage
+        assert self.curriculum is not None
+        self._log(
+            "INFO",
+            f"curriculum {event} -> {stage.name} "
+            f"(opponent {stage.opponent}, resets {stage.reset_mode}, "
+            f"episodes {stage.episode_seconds or self.config.episode_seconds:.0f}s; "
+            f"gates {[gate.name for gate in stage.gates] or 'window criteria'}; "
+            f"blocked by: {self.curriculum.blocked_reason() or 'nothing'})",
+        )
+
     # -- evaluation ----------------------------------------------------------
     def _evaluation_opponents(self) -> list[str]:
         if self.config.eval_opponents:
@@ -1478,7 +1612,10 @@ class Trainer:
                     "INFO",
                     f"curriculum stage {self.curriculum.index}/"
                     f"{len(self.curriculum.stages) - 1}: {stage.name} vs "
-                    f"{stage.opponent} (resets {stage.reset_mode}); promotion "
+                    f"{stage.opponent} (resets {stage.reset_mode}); gates "
+                    f"{[gate.name for gate in stage.gates] or 'window criteria'} "
+                    f"every {self.config.curriculum_gate_interval} iterations "
+                    f"x {self.config.curriculum_gate_trials} trials; promotion "
                     f"blocked by: {self.curriculum.blocked_reason() or 'nothing'}",
                 )
             if self.config.eval_interval and self.config.eval_before:
@@ -1577,14 +1714,7 @@ class Trainer:
                         self._metric(key, value)
                     event = self.curriculum.last_event
                     if transitioned and event in ("promotion", "demotion"):
-                        stage = self.curriculum.stage
-                        self._log(
-                            "INFO",
-                            f"curriculum {event} -> {stage.name} "
-                            f"(opponent {stage.opponent}, resets {stage.reset_mode}, "
-                            f"episodes {stage.episode_seconds or self.config.episode_seconds:.0f}s; "
-                            f"blocked by: {self.curriculum.blocked_reason() or 'nothing'})",
-                        )
+                        self._log_curriculum_transition(event)
                     elif event == "stagnation":
                         self._warn(
                             f"curriculum stage {self.curriculum.stage.name!r} has not "
@@ -1608,6 +1738,17 @@ class Trainer:
                     self.league.add(
                         f"step-{self.step}-{self.iteration}", self.step, self._snapshot_state()
                     )
+
+                # Gate evaluations are independent of the periodic match
+                # evaluation: they measure the *skills* the active stage is
+                # about to be promoted on, on both sides, with fixed seeds.
+                if (
+                    self.curriculum is not None
+                    and not self.curriculum.finished
+                    and self.config.curriculum_gate_interval
+                    and self.iteration % self.config.curriculum_gate_interval == 0
+                ):
+                    self._run_gate_evaluation()
 
                 if self.config.eval_interval and self.iteration % self.config.eval_interval == 0:
                     self._run_evaluation()

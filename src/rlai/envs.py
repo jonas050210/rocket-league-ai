@@ -28,6 +28,7 @@ from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMuta
 
 from .modes import ModeSpec
 from .obs import OBS_VERSION, SoccerObsBuilder
+from .scenarios import apply_reach, apply_scenario
 from .rewards import RewardWeights, SoccerReward
 
 GOAL_HALF_WIDTH = 892.755
@@ -94,8 +95,11 @@ class ModeRocketSimEngine(RocketSimEngine):
         return state
 
 
-#: episode starting-state distributions (see :class:`ResetMutator`)
-RESET_MODES = ("kickoff", "drill", "mixed")
+#: episode starting-state distributions (see :class:`ResetMutator`).
+#: ``reach`` and the exact scenarios of :mod:`rlai.scenarios` exist because a
+#: fresh policy's bottleneck is the distance between "drive at the ball" and
+#: "touch the ball" - measured in docs/MASTERY_CURRICULUM.md, experiment 1.
+RESET_MODES = ("kickoff", "drill", "reach", "mixed")
 
 
 class ResetMutator(KickoffMutator):
@@ -118,17 +122,37 @@ class ResetMutator(KickoffMutator):
     * **race** (20 %): slow ball near midfield, both teams at comparable
       distances - contested first touches and 50/50s.
 
+    ``reach`` starts are the attack scenario with the learning team much
+    closer to the ball (250-900 uu instead of 700-2600 uu) and the opponent
+    further away.  Early curriculum stages use it: the measured bottleneck of
+    a fresh policy is the length of the causal chain between "drive at the
+    ball" and "touch the ball", not the variety of the starts.
+
     ``mixed`` flips a coin between kickoff and drill per episode.  The mode
     is read from ``shared_info['reset_mode']`` on every reset, so a
     curriculum stage can change it without rebuilding the arena.
     Randomness comes from the ``random`` module, which
     :meth:`MatchEnv.reset` seeds deterministically.
+
+    Finally, ``shared_info['scenario']`` (set by :class:`MatchEnv`) overrides
+    everything with an *exact* starting state - that is how the independent
+    skill probes of :mod:`rlai.skills` measure one specific situation.
     """
 
     def apply(self, state: GameState, shared_info: dict[str, Any]) -> None:
+        # An exact scenario (skill probe) wins over the distribution: a gate
+        # that measures "reach the ball from 800 uu" cannot be measured from
+        # a randomized start.
+        scenario = shared_info.get("scenario")
+        if scenario:
+            apply_scenario(state, shared_info, scenario)
+            return
         mode = str(shared_info.get("reset_mode", "kickoff"))
         if mode == "mixed":
             mode = "drill" if random.random() < 0.5 else "kickoff"
+        if mode == "reach":
+            apply_reach(state, shared_info)
+            return
         if mode != "drill":
             super().apply(state, shared_info)
             return
@@ -273,11 +297,14 @@ class MatchEnv:
         policy_team: int = BLUE_TEAM,
         reset_mode: str = "kickoff",
         potential_gamma: float = 1.0,
+        scenario: dict | None = None,
     ):
         if reset_mode not in RESET_MODES:
             raise ValueError(f"reset_mode must be one of {RESET_MODES}, got {reset_mode!r}")
         #: starting-state distribution, read by the reset mutator per episode
         self.reset_mode = reset_mode
+        #: exact starting state (skill probes); overrides ``reset_mode``
+        self.scenario = scenario
         self.spec = spec
         self.obs_version = int(obs_version)
         self.opponent = opponent
@@ -397,6 +424,7 @@ class MatchEnv:
             # the reset mutator reads the starting-state distribution here
             self.env.shared_info["reset_mode"] = self.reset_mode
             self.env.shared_info["drill_team"] = int(self.policy_team)
+            self.env.shared_info["scenario"] = self.scenario
             obs = self.env.reset()
         finally:
             random.setstate(python_state)

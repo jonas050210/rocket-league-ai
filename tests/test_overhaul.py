@@ -116,6 +116,8 @@ def test_legacy_state_bonuses_default_to_zero_but_still_parse():
 
 # ---------------------------------------------------------------------------
 # Curriculum: stages test the skill they teach and explain themselves
+# (the window-only criteria live in the ``legacy`` preset; the mastery preset
+# promotes on measured gates and is covered in tests/test_curriculum_gates.py)
 # ---------------------------------------------------------------------------
 
 def _draws_with_touches(n, touches=3):
@@ -126,7 +128,7 @@ def _draws_with_touches(n, touches=3):
 
 
 def test_first_stage_promotes_on_touches_without_any_win():
-    curriculum = Curriculum(stages_for_mode("soccer-1v1"))
+    curriculum = Curriculum(stages_for_mode("soccer-1v1", "legacy"))
     assert curriculum.stage.name == "first-touch"
     assert "touches_per_episode" in (curriculum.blocked_reason() or "")
     promoted = None
@@ -137,7 +139,7 @@ def test_first_stage_promotes_on_touches_without_any_win():
 
 
 def test_blocked_reason_is_exact_and_criteria_are_reported():
-    curriculum = Curriculum(stages_for_mode("soccer-1v1"))
+    curriculum = Curriculum(stages_for_mode("soccer-1v1", "legacy"))
     curriculum.observe(_draws_with_touches(40, touches=0))
     status = curriculum.status()
     names = {row["name"]: row for row in status["criteria"]}
@@ -148,7 +150,7 @@ def test_blocked_reason_is_exact_and_criteria_are_reported():
 
 
 def test_curriculum_window_survives_a_checkpoint_round_trip():
-    stages = stages_for_mode("soccer-1v1")
+    stages = stages_for_mode("soccer-1v1", "legacy")
     curriculum = Curriculum(stages)
     curriculum.observe(_draws_with_touches(25))
     described = curriculum.describe()
@@ -516,12 +518,18 @@ def test_mixed_stage_draws_opponents_per_worker(data_root):
         minibatch_size=64, policy={"hidden": [16]}, device="cpu", curriculum=True,
     )
     trainer = Trainer(config, "unit-run", Store(data_root / "rlai.sqlite3"))
-    trainer.curriculum.index = 3  # the "mixed" stage
+    # the stage whose opponent pool is "mixed" (index depends on the preset)
+    trainer.curriculum.index = next(
+        index
+        for index, stage in enumerate(trainer.curriculum.stages)
+        if stage.opponent == "mixed"
+    )
+    stage = trainer.curriculum.stage
     names, states, ids, stage_name, reset_mode, seconds = trainer._select_opponents()
-    assert stage_name == "mixed"
+    assert stage_name == stage.name
     assert len(names) == 8 and set(names) <= {"chase", "random"}
     assert states == [None] * 8 and ids == [None] * 8
-    assert reset_mode == "mixed" and seconds == 45.0
+    assert reset_mode == "mixed" and seconds == float(stage.episode_seconds or 45.0)
 
 
 def test_detect_eval_stall():
