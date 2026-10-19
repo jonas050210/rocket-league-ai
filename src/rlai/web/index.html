@@ -18,16 +18,16 @@
         </a>
 
         <div class="workspace-switch">
-          <span class="workspace-avatar">LA</span>
+          <span class="workspace-avatar">1v1</span>
           <span>
-            local training
+            1v1 training
             <small id="workspace-mode">no active run</small>
           </span>
           <span class="local-dot" id="connection-dot" title="API connection"></span>
         </div>
 
         <p class="nav-caption">WORKSPACE</p>
-        <nav id="nav">
+        <nav id="nav" aria-label="Primary">
           <a class="nav-item" href="#/dashboard" data-route="dashboard">
             <svg class="icon"><use href="/theme/icons.svg#icon-dashboard" /></svg>
             <span class="nav-text">Dashboard</span>
@@ -40,36 +40,24 @@
             <svg class="icon"><use href="/theme/icons.svg#icon-chart" /></svg>
             <span class="nav-text">Stats</span>
           </a>
-          <a class="nav-item" href="#/monitoring" data-route="monitoring">
-            <svg class="icon"><use href="/theme/icons.svg#icon-monitoring" /></svg>
-            <span class="nav-text">Monitoring</span>
+          <a class="nav-item" href="#/lab" data-route="lab">
+            <svg class="icon"><use href="/theme/icons.svg#icon-evaluation" /></svg>
+            <span class="nav-text">Bot Lab</span>
           </a>
-          <a class="nav-item" href="#/reports" data-route="reports">
-            <svg class="icon"><use href="/theme/icons.svg#icon-file" /></svg>
-            <span class="nav-text">Reports</span>
-          </a>
-          <a class="nav-item" href="#/models" data-route="models">
+        </nav>
+
+        <p class="nav-caption">SYSTEM</p>
+        <nav id="nav-secondary" aria-label="System">
+          <a class="nav-item secondary" href="#/models" data-route="models">
             <svg class="icon"><use href="/theme/icons.svg#icon-models" /></svg>
             <span class="nav-text">Models</span>
             <span class="nav-count" id="model-count">0</span>
           </a>
-          <a class="nav-item" href="#/lab" data-route="lab">
-            <svg class="icon"><use href="/theme/icons.svg#icon-evaluation" /></svg>
-            <span class="nav-text">Lab</span>
-          </a>
-          <a class="nav-item" href="#/teams" data-route="teams">
-            <svg class="icon"><use href="/theme/icons.svg#icon-visualization" /></svg>
-            <span class="nav-text">Teams</span>
-          </a>
-          <a class="nav-item" href="#/memory" data-route="memory">
-            <svg class="icon"><use href="/theme/icons.svg#icon-models" /></svg>
-            <span class="nav-text">Memory</span>
-          </a>
-          <a class="nav-item" href="#/live" data-route="live">
+          <a class="nav-item secondary" href="#/live" data-route="live">
             <svg class="icon"><use href="/theme/icons.svg#icon-visualization" /></svg>
             <span class="nav-text">Live match</span>
           </a>
-          <a class="nav-item" href="#/settings" data-route="settings">
+          <a class="nav-item secondary" href="#/settings" data-route="settings">
             <svg class="icon"><use href="/theme/icons.svg#icon-settings" /></svg>
             <span class="nav-text">Settings</span>
           </a>
@@ -79,7 +67,7 @@
           <div class="foundation-note">
             <span class="tiny-label">Simulator</span>
             <strong>RocketSim · RLGym</strong>
-            <p>Headless training. GPU optional. Live matches require Windows + RLBot.</p>
+            <p>Headless 1v1 training. GPU optional. Live matches require Windows + RLBot.</p>
             <a class="text-button" href="#/settings">
               Diagnostics
               <svg class="icon"><use href="/theme/icons.svg#icon-arrow" /></svg>
@@ -87,7 +75,7 @@
           </div>
           <div class="version">
             <span id="app-version">RLAI</span>
-            <span>PPO · DISCRETE</span>
+            <span>PPO · 1v1</span>
           </div>
         </div>
       </aside>
@@ -116,7 +104,7 @@
         </main>
 
         <footer>
-          <span>Rocket League AI <b>·</b> local-first training</span>
+          <span>Rocket League AI <b>·</b> local-first 1v1 training</span>
           <span id="footer-status">API · not connected</span>
         </footer>
       </div>

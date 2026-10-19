@@ -58,6 +58,19 @@ class ResumePlanRequest(BaseModel):
     checkpoint: str | None = None
 
 
+class StartPlanRequest(BaseModel):
+    """The simplified training request: the only two user-controlled values.
+
+    Everything else (mode, PPO hyper-parameters, network, worker count,
+    device) keeps its backend default, so the user never has to understand
+    them.  The mode is fixed to 1v1 for this workflow; the server enforces
+    it here so the GUI cannot drift.
+    """
+
+    total_steps: int = Field(default=200_000, ge=2_000, le=5_000_000_000)
+    run_name: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 class ValidateModelRequest(BaseModel):
     """Validate a checkpoint against a config before spending time on it."""
 
@@ -369,9 +382,30 @@ def create_app(store_path: Path | None = None) -> FastAPI:
 
     @app.get("/api/config/defaults")
     def config_defaults():
+        """Backend defaults plus the automatic 1v1 configuration.
+
+        ``default_run`` is the single configuration the simplified training
+        form uses: 1v1, the stable backend defaults for every technical
+        parameter, the resolved device and the machine-checked worker count.
+        Benchmark and multi-mode configurations stay available through the
+        ``configs/`` files and the CLI; they are not offered as ordinary
+        training choices.
+        """
+        from ..resources import plan_resources
+
+        base = TrainingConfig()
         return {
-            "training": TrainingConfig().to_dict(),
-            "presets": _presets(),
+            "training": base.to_dict(),
+            "default_run": {
+                "mode": base.mode,
+                "config": base.to_dict(),
+                "device": base.resolved_device(),
+                "workers": plan_resources(base.n_workers).to_dict(),
+                "note": (
+                    "automatic 1v1 configuration; every technical parameter keeps its "
+                    "backend default and the worker count is checked against this machine"
+                ),
+            },
         }
 
     @app.post("/api/config/validate", dependencies=[Depends(require_auth)])
@@ -433,6 +467,45 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return plan.to_dict()
 
+    @app.post("/api/runs/start-plan")
+    def start_plan(request: StartPlanRequest):
+        """Compute what a simplified training start *would* do.  Read-only.
+
+        The simplified workflow exposes exactly two user-controlled values
+        (``total_steps`` and optionally ``run_name``).  This endpoint builds
+        the effective configuration from the stable 1v1 backend defaults,
+        checks the worker count against the machine (existing resource
+        logic) and previews the checkpoint continuation (existing resume
+        logic), so the GUI can show the user, before the confirmation
+        dialog, exactly which run will start: continue from which checkpoint
+        or initialise a new model, on which device, with how many workers.
+
+        Nothing here starts training; ``POST /api/runs`` still requires
+        ``confirm=true``.
+        """
+        from ..resources import plan_resources
+        from ..resume import plan_resume
+
+        config = TrainingConfig(total_steps=request.total_steps)
+        if request.run_name:
+            config.run_name = request.run_name
+        if config.mode != "soccer-1v1":
+            # the simplified workflow trains 1v1 only; the server decides
+            # this, not the client
+            config = config.model_copy(update={"mode": "soccer-1v1"})
+        resume = plan_resume(paths["models"], config, mode="continue")
+        resources = plan_resources(config.n_workers)
+        return {
+            "config": config.to_dict(),
+            "device": config.resolved_device(),
+            "workers": resources.to_dict(),
+            "resume": resume.to_dict(),
+            "will_resume": resume.will_resume,
+            "resume_mode": "continue" if resume.will_resume else "fresh",
+            "warnings": [*resume.warnings, *resources.warnings],
+            "notes": resources.notes,
+        }
+
     @app.post("/api/runs", dependencies=[Depends(require_auth)])
     def start_run(request: StartRunRequest):
         if not request.confirm:
@@ -456,6 +529,24 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             exclude={"resume_from", "resume_mode", "allow_concurrent", "confirm"}
         )
         config = TrainingConfig.model_validate(stored)
+        if resume_mode in ("continue", "transfer") and not resume_from:
+            # Automatic continuation: resolve the newest valid, compatible
+            # checkpoint with the same logic the CLI's --auto-resume uses and
+            # pass the explicit path to the trainer.  A run that was asked to
+            # continue is never turned into a fresh model silently; when no
+            # suitable checkpoint exists the start is refused with a reason.
+            from ..resume import plan_resume
+
+            plan = plan_resume(paths["models"], config, mode=resume_mode)
+            if not plan.will_resume:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"cannot {resume_mode} automatically: "
+                        + "; ".join(plan.warnings or ["no compatible checkpoint found"])
+                    ),
+                )
+            resume_from = str(plan.checkpoint_path)
         if resume_from:
             try:
                 resume_path = checkpoints.resolve_model_path(paths["models"], resume_from)
@@ -1214,122 +1305,3 @@ def _rlbot_installed() -> bool:
         return True
     except Exception:
         return False
-
-
-def _presets() -> list[dict]:
-    base = TrainingConfig()
-    return [
-        {
-            "id": "ball-control",
-            "name": "Ball control warm-up",
-            "description": "Short episodes, dense touch and approach rewards. Learn to reach the ball.",
-            "config": base.model_copy(
-                update={
-                    "run_name": "ball control",
-                    "mode": "soccer-1v1",
-                    "opponent": "idle",
-                    "total_steps": 100_000,
-                    "episode_seconds": 15,
-                    "n_workers": 4,
-                    "rollout_steps": 512,
-                    "eval_interval": 10,
-                    "eval_opponent": "idle",
-                    "eval_games": 4,
-                    "eval_match_seconds": 20,
-                }
-            ).to_dict(),
-        },
-        {
-            "id": "1v1-chase",
-            "name": "1v1 vs chaser",
-            "description": "First real match baseline against a scripted opponent that drives at the ball.",
-            "config": base.model_copy(
-                update={
-                    "run_name": "1v1 vs chaser",
-                    "mode": "soccer-1v1",
-                    "opponent": "chase",
-                    "total_steps": 2_000_000,
-                    "n_workers": 6,
-                    "eval_interval": 10,
-                    "eval_games": 6,
-                }
-            ).to_dict(),
-        },
-        {
-            "id": "1v1-curriculum",
-            "name": "1v1 curriculum",
-            "description": "Staged opponents (idle → chaser → mixed → self-play); promotion only on a measured win rate.",
-            "config": base.model_copy(
-                update={
-                    "run_name": "1v1 curriculum",
-                    "mode": "soccer-1v1",
-                    "opponent": "idle",
-                    "curriculum": True,
-                    "total_steps": 2_000_000,
-                    "n_workers": 6,
-                    "eval_interval": 10,
-                    "eval_games": 6,
-                }
-            ).to_dict(),
-        },
-        {
-            "id": "1v1-selfplay",
-            "name": "1v1 self-play",
-            "description": "Opponent pool of frozen snapshots. Use after the chaser baseline is stable.",
-            "config": base.model_copy(
-                update={
-                    "run_name": "1v1 self-play",
-                    "mode": "soccer-1v1",
-                    "self_play": True,
-                    "total_steps": 10_000_000,
-                    "n_workers": 8,
-                    "eval_interval": 20,
-                }
-            ).to_dict(),
-        },
-        {
-            "id": "2v2",
-            "name": "2v2 team play",
-            "description": "Shared policy for both blue cars, 4 s decision window, self-play opponents.",
-            "config": base.model_copy(
-                update={
-                    "run_name": "2v2 team",
-                    "mode": "soccer-2v2",
-                    "self_play": True,
-                    "total_steps": 20_000_000,
-                    "n_workers": 8,
-                    "eval_interval": 20,
-                }
-            ).to_dict(),
-        },
-        {
-            "id": "3v3",
-            "name": "3v3 team play",
-            "description": "Three cars per team. Observation is already padded; fine-tune from 2v2.",
-            "config": base.model_copy(
-                update={
-                    "run_name": "3v3 team",
-                    "mode": "soccer-3v3",
-                    "self_play": True,
-                    "total_steps": 30_000_000,
-                    "n_workers": 8,
-                    "eval_interval": 20,
-                }
-            ).to_dict(),
-        },
-        {
-            "id": "heatseeker",
-            "name": "Heatseeker 2v2",
-            "description": "Homing ball, unlimited boost. Train separately: reward and dynamics differ.",
-            "config": base.model_copy(
-                update={
-                    "run_name": "heatseeker 2v2",
-                    "mode": "heatseeker-2v2",
-                    "self_play": True,
-                    "total_steps": 10_000_000,
-                    "n_workers": 8,
-                    "eval_interval": 20,
-                }
-            ).to_dict(),
-        },
-    ]

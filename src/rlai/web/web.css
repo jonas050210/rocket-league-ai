@@ -1,5 +1,6 @@
 /* App-specific glue only; all visual language comes from ui/theme/theme.css. */
-#nav {
+#nav,
+#nav-secondary {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -8,6 +9,16 @@
 
 .sidebar .nav-caption {
   margin-top: 4px;
+}
+
+/* Secondary (system) nav items are visually quieter than the primary ones. */
+.nav-item.secondary {
+  opacity: 0.78;
+}
+
+.nav-item.secondary:hover,
+.nav-item.secondary.active {
+  opacity: 1;
 }
 
 .sidebar-bottom {
@@ -147,15 +158,112 @@
   line-height: 1.6;
 }
 
-.preset-grid {
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+/* ---------------------------------------------------------- training form */
+.training-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(280px, 5fr);
+  gap: 18px;
+  align-items: start;
 }
 
-.preset-card p {
+@media (max-width: 1100px) {
+  .training-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.training-form {
   margin-bottom: 0;
 }
 
-.preset-top {
+.training-form .field.full + .step-suggestions {
+  margin-top: -6px;
+}
+
+.step-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 14px;
+}
+
+.step-suggestion {
+  padding: 4px 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.field span em {
+  color: var(--faint);
+  font-style: normal;
+  font-weight: 400;
+}
+
+/* In-view subtabs (Bot Lab sections). */
+.subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius, 11px);
+  background: var(--panel);
+  width: fit-content;
+  max-width: 100%;
+}
+
+.subtab {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm, 7px);
+  color: var(--muted);
+  font-size: var(--fs-sm, 12px);
+  font-weight: 550;
+  text-decoration: none;
+  transition: color var(--transition-fast, 140ms ease), background var(--transition-fast, 140ms ease);
+}
+
+.subtab:hover {
+  color: var(--text);
+  background: var(--accent-softer);
+}
+
+.subtab.active {
+  color: var(--accent-ink, #04130a);
+  background: var(--accent, #55e38b);
+}
+
+/* Compact model summary strip on the dashboard. */
+.model-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.model-strip-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm, 7px);
+  background: var(--surface-2, #0d1510);
+}
+
+.model-strip-item strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-md, 13px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-strip-item small {
+  color: var(--faint);
+  font-size: var(--fs-2xs, 10px);
+}
+
+.panel-header .panel-actions {
+  display: flex;
+  align-items: center;
   gap: 10px;
 }
 
