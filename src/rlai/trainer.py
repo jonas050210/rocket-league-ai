@@ -11,8 +11,11 @@ from __future__ import annotations
 import json
 import os
 import random
+import signal
+import threading
 import time
 import traceback
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,6 +88,75 @@ def _outcome_counts(episodes: list[dict]) -> tuple[int, int, int]:
     losses = sum(1 for episode in episodes if episode.get("result") == "loss")
     draws = sum(1 for episode in episodes if episode.get("result") == "draw")
     return wins, losses, draws
+
+
+class _InterruptGuard:
+    """Turn Ctrl+C into a safe stop instead of an immediate crash.
+
+    The first SIGINT raises :class:`KeyboardInterrupt` (so a blocking worker
+    wait is interrupted promptly).  Inside :meth:`deferred` the signal is
+    remembered instead: checkpoint writing must finish before the exception is
+    raised, otherwise an interruption in the middle of a save could leave the
+    process to be killed before updating its own bookkeeping.  Every further
+    signal during cleanup is recorded but ignored, so a second Ctrl+C cannot
+    interrupt the checkpoint and report of the first one.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.installed = False
+        self._original = None
+        self._defer_depth = 0
+        self._deferred = False
+        self.shutting_down = False
+
+    def begin_shutdown(self) -> None:
+        """From now on Ctrl+C is noted but never allowed to abort cleanup."""
+        self.shutting_down = True
+
+    def install(self) -> None:
+        if self.installed or threading.current_thread() is not threading.main_thread():
+            return
+        try:
+            self._original = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._handle)
+            self.installed = True
+        except (ValueError, OSError):  # pragma: no cover - platform specific
+            self.installed = False
+
+    def restore(self) -> None:
+        if not self.installed:
+            return
+        try:
+            signal.signal(signal.SIGINT, self._original)
+        except (ValueError, OSError):  # pragma: no cover - platform specific
+            pass
+        self.installed = False
+
+    def _handle(self, signum, frame) -> None:
+        self.count += 1
+        if self.shutting_down:
+            return
+        if self._defer_depth:
+            # Only a first interrupt may be turned into an exception after the
+            # critical section; later ones must not abort cleanup.
+            if self.count == 1:
+                self._deferred = True
+            return
+        if self.count == 1:
+            raise KeyboardInterrupt
+
+    @contextmanager
+    def deferred(self):
+        """Delay a first SIGINT until this block has finished."""
+        self._defer_depth += 1
+        try:
+            yield
+        finally:
+            self._defer_depth -= 1
+            if self._defer_depth == 0 and self._deferred:
+                self._deferred = False
+                raise KeyboardInterrupt
 
 
 def _reward_component_means(episodes: list[dict]) -> dict[str, float]:
@@ -168,6 +240,14 @@ class Trainer:
         self.last_checkpoint_id: str | None = None
         self.final_manifest: dict | None = None
         self.run_warnings: list[str] = []
+        #: True when the latest state was successfully written at shutdown,
+        #: False when an interrupted run could not save it.  ``None`` until a
+        #: terminal state is known.
+        self.resumable: bool | None = None
+        self._interrupted = False
+        self.interrupt_checkpoint_id: str | None = None
+        self.interrupt_checkpoint_error: str | None = None
+        self._interrupt_guard = _InterruptGuard()
         self.evaluation_seconds = 0.0
         self.checkpoint_seconds = 0.0
         self.evaluated_before = False
@@ -307,15 +387,15 @@ class Trainer:
 
     # -- lifecycle ---------------------------------------------------------
     def _resolve_plan(self) -> ResumePlan | None:
-        """Build (or reuse) the resume plan for this trainer."""
+        """Build (or reuse) the resume plan for this trainer.
+
+        ``continue`` (the default) always asks :func:`resume.plan_resume` to
+        discover the newest usable checkpoint, even when the caller supplied no
+        explicit reference.  A ``fresh`` run still builds a (read-only) plan so
+        the log can state exactly which checkpoints were deliberately ignored.
+        """
         if self.resume_plan is not None:
             return self.resume_plan
-        if not self.resume_from and self.resume_mode == "fresh":
-            return None
-        if not self.resume_from and self.resume_mode == "continue":
-            # Automatic continuation: only when the caller explicitly asked for
-            # it through ``resume_mode``; a plain fresh run stays fresh.
-            return None
         return plan_resume(
             self.models_dir,
             self.config,
@@ -333,12 +413,30 @@ class Trainer:
         for warning in plan.warnings:
             self._warn(warning)
         if not plan.will_resume:
+            reasons = "; ".join(
+                reason
+                for item in plan.rejected
+                for reason in item.get("reasons", [])
+            ) or "; ".join(plan.warnings) or "no compatible checkpoint found"
+
+            # An explicit fresh request always wins and is named as such in
+            # the log; it is the only way to deliberately ignore progress.
+            if self.resume_mode == "fresh":
+                if plan.candidates_found:
+                    self._log(
+                        "INFO",
+                        f"fresh training requested: {plan.candidates_found} existing "
+                        f"checkpoint(s) in {self.models_dir} deliberately ignored",
+                    )
+                else:
+                    self._log(
+                        "INFO",
+                        f"fresh training requested and no checkpoint exists in "
+                        f"{self.models_dir}; starting a new policy at step 0",
+                    )
+                return
+
             if self.resume_from:
-                reasons = "; ".join(
-                    reason
-                    for item in plan.rejected
-                    for reason in item.get("reasons", [])
-                ) or "; ".join(plan.warnings) or "no compatible checkpoint found"
                 if explicit_checkpoint_exists(self.models_dir, self.resume_from):
                     raise ValueError(
                         f"cannot resume from {self.resume_from!r}: {reasons}"
@@ -346,8 +444,40 @@ class Trainer:
                 raise FileNotFoundError(
                     f"no usable checkpoint for {self.resume_from!r}: {reasons}"
                 )
+
+            if self.resume_mode == "transfer":
+                raise ValueError(
+                    "transfer learning needs a checkpoint, but none is usable: "
+                    + reasons
+                    + "; use resume_mode='fresh' for a new policy"
+                )
+
+            # ``continue`` is the automatic default.  No checkpoint at all is
+            # a normal first start; existing but unusable state is not.  In
+            # the latter case starting a fresh model would silently discard
+            # progress, so the run is refused with the validation reasons.
+            if plan.candidates_found:
+                raise ValueError(
+                    f"automatic resume found {plan.candidates_found} checkpoint(s) in "
+                    f"{self.models_dir}, but none is usable ({reasons}). Refusing to "
+                    "start a fresh model and lose that progress; name a checkpoint "
+                    "with resume_from, repair the files, or start deliberately with "
+                    "resume_mode='fresh'."
+                )
+            self._log(
+                "INFO",
+                f"automatic resume: no checkpoint found in {self.models_dir}; "
+                "starting a new policy from scratch (fresh training)",
+            )
+            self.resume_mode = "fresh"
             return
 
+        selection = "requested checkpoint" if self.resume_from else "resume"
+        self._log(
+            "INFO",
+            f"{selection} selected {plan.model_id or plan.checkpoint_path} "
+            f"at step {plan.parent_step}",
+        )
         path = Path(str(plan.checkpoint_path))
         payload = checkpoints.load_checkpoint(path)
         saved_config = PolicyConfig.from_dict(payload.get("policy_config"))
@@ -421,6 +551,13 @@ class Trainer:
             self._warn("checkpoint has no optimizer state; starting a fresh optimizer")
         self.step = int(payload.get("step", 0))
         self.start_step = self.step
+        # The restored checkpoint already contains this exact state.  Marking
+        # its step prevents a redundant copy at the first evaluation or at
+        # completion when the run performs no further step; the final save
+        # relabels that checkpoint instead of storing the same weights twice.
+        if plan.model_id:
+            self.last_checkpoint_step = self.step
+            self.last_checkpoint_id = str(plan.model_id)
         extra = payload.get("extra") or {}
         self.iteration = int(extra.get("iteration", 0) or 0)
         if isinstance(extra.get("league"), dict):
@@ -577,60 +714,117 @@ class Trainer:
         )
 
     def _save(self, *, label: str = "", force: bool = False) -> dict | None:
-        if not force and self.step == self.last_checkpoint_step:
-            return None
+        """Write one checkpoint, or reuse the one at the current step.
+
+        A final save must not create a second copy of weights that were already
+        written at the same step (for example by the final evaluation).  It
+        relabels the existing checkpoint instead; the model file stays the
+        single source of truth and no duplicate directory is left behind.
+        """
+        same_step = (
+            self.step == self.last_checkpoint_step and self.last_checkpoint_id is not None
+        )
+        if same_step:
+            if force and label in ("final", "interrupt") and self.last_checkpoint_id:
+                try:
+                    existing = checkpoints.get_model(
+                        self.models_dir, self.last_checkpoint_id
+                    )
+                    if not (self.models_dir / str(existing["path"])).is_file():
+                        raise FileNotFoundError(existing["path"])
+                    manifest = checkpoints.set_label(
+                        self.models_dir, self.last_checkpoint_id, label
+                    )
+                    self.store.sync_models([manifest])
+                    self.final_manifest = manifest
+                    self._log(
+                        "INFO",
+                        f"checkpoint {manifest['id']} at step {self.step} "
+                        f"reused as the {label} checkpoint",
+                    )
+                    return manifest
+                except Exception as exc:
+                    self._log(
+                        "WARNING",
+                        f"could not relabel checkpoint {self.last_checkpoint_id}: {exc}",
+                    )
+            if not force:
+                return None
+            # A shutdown save at a step that was already written needs no new
+            # file; the existing checkpoint already contains this state.
+            if self.last_checkpoint_id:
+                try:
+                    manifest = checkpoints.get_model(
+                        self.models_dir, self.last_checkpoint_id
+                    )
+                except (KeyError, OSError):
+                    manifest = None
+                if manifest is not None and (
+                    self.models_dir / str(manifest.get("path") or "")
+                ).is_file():
+                    self.final_manifest = manifest
+                    return manifest
+
         started = time.perf_counter()
         # The accumulated training time is measured with the monotonic clock
         # and covers the sessions that actually ran - never the time the
         # process was stopped.
         accumulated = self.clock.accumulated_s + (self.clock.current_session_s or 0.0)
-        manifest = save_checkpoint(
-            self.models_dir,
-            model_state=self.model.state_dict(),
-            policy_config=self.config.policy_config().to_dict(),
-            optimizer_state=self.optimizer.state_dict(),
-            step=self.step,
-            run_id=self.run_id,
-            mode=self.config.mode,
-            training_config=self.config.to_dict(),
-            extra={
-                "iteration": self.iteration,
-                "obs_version": self.config.obs_version,
-                "league": self.league.to_dict(include_states=self.config.league_states),
-                "curriculum": self.curriculum.describe() if self.curriculum else None,
-                "rng": self._snapshot_rng(),
-                "parent_run": (self.resume_plan.parent_run if self.resume_plan else None),
-                "resume_mode": self.resume_mode,
-                "start_step": self.start_step,
-                "side_randomization": bool(self.config.side_randomization),
-                "timing": {
-                    "accumulated_s": float(accumulated),
-                    "session_s": self.clock.current_session_s,
-                    "session_started_at": (
-                        self.clock.timer.started_at if self.clock.timer else None
+        manifest = None
+        # A Ctrl+C arriving while the file is written is deferred until the
+        # checkpoint, the pointer and the bookkeeping are all consistent.
+        with self._interrupt_guard.deferred():
+            manifest = save_checkpoint(
+                self.models_dir,
+                model_state=self.model.state_dict(),
+                policy_config=self.config.policy_config().to_dict(),
+                optimizer_state=self.optimizer.state_dict(),
+                step=self.step,
+                run_id=self.run_id,
+                mode=self.config.mode,
+                training_config=self.config.to_dict(),
+                extra={
+                    "iteration": self.iteration,
+                    "obs_version": self.config.obs_version,
+                    "league": self.league.to_dict(include_states=self.config.league_states),
+                    "curriculum": self.curriculum.describe() if self.curriculum else None,
+                    "rng": self._snapshot_rng(),
+                    "parent_run": (self.resume_plan.parent_run if self.resume_plan else None),
+                    "resume_mode": self.resume_mode,
+                    "start_step": self.start_step,
+                    "side_randomization": bool(self.config.side_randomization),
+                    "timing": {
+                        "accumulated_s": float(accumulated),
+                        "session_s": self.clock.current_session_s,
+                        "session_started_at": (
+                            self.clock.timer.started_at if self.clock.timer else None
+                        ),
+                        "measured_at": utc_now_iso(),
+                        "source": "monotonic clock",
+                    },
+                    "adaptive": (
+                        self._adaptive.state() if self._adaptive is not None else None
                     ),
-                    "measured_at": utc_now_iso(),
-                    "source": "monotonic clock",
                 },
-                "adaptive": (
-                    self._adaptive.state() if self._adaptive is not None else None
-                ),
-            },
-            label=label,
-        )
-        self.store.register_model(manifest)
-        self.last_checkpoint_step = self.step
-        self.last_checkpoint_id = manifest["id"]
-        self.final_manifest = manifest
-        self.store.update_run(
-            self.run_id,
-            last_checkpoint_at=manifest.get("created_at"),
-            last_checkpoint_id=manifest["id"],
-        )
-        try:
-            prune_candidates(self.models_dir, keep=self.config.keep_checkpoints, run_id=self.run_id)
-        except Exception as exc:  # never let cleanup kill a run
-            self._log("WARNING", f"checkpoint cleanup skipped: {exc}")
+                label=label,
+            )
+            self.store.register_model(manifest)
+            self.last_checkpoint_step = self.step
+            self.last_checkpoint_id = manifest["id"]
+            self.final_manifest = manifest
+            self.store.update_run(
+                self.run_id,
+                last_checkpoint_at=manifest.get("created_at"),
+                last_checkpoint_id=manifest["id"],
+            )
+            try:
+                prune_candidates(
+                    self.models_dir,
+                    keep=self.config.keep_checkpoints,
+                    run_id=self.run_id,
+                )
+            except Exception as exc:  # never let cleanup kill a run
+                self._log("WARNING", f"checkpoint cleanup skipped: {exc}")
         self.checkpoint_seconds += time.perf_counter() - started
         self._metric("time/checkpoint_seconds", time.perf_counter() - started)
         self._log("INFO", f"checkpoint {manifest['id']} saved at step {self.step}")
@@ -1066,6 +1260,49 @@ class Trainer:
             self._track_eval_stall(result)
         return result
 
+    def _save_after_interrupt(self) -> tuple[bool, str]:
+        """Stop the workers, then persist the latest resumable state.
+
+        Called from the ``KeyboardInterrupt`` handler.  Closing the pool first
+        releases the simulator processes; only then is the checkpoint written,
+        so no worker can still be running while the state is snapshotted.  A
+        failure to write is reported as such - the run must not claim to be
+        resumable when its latest state is not on disk.
+        """
+        self._interrupt_guard.begin_shutdown()
+        self._warn("training interrupted by Ctrl+C; stopping workers and saving state")
+        if self.pool is not None:
+            try:
+                self.pool.close()
+            except Exception as exc:  # pragma: no cover - defensive
+                self._warn(f"could not close all workers cleanly: {exc}")
+        try:
+            manifest = self._save(label="interrupt", force=True)
+        except BaseException as exc:  # the shutdown path must still finish
+            self.interrupt_checkpoint_error = f"{type(exc).__name__}: {exc}"
+            self.resumable = False
+            previous = self.last_checkpoint_id or "none"
+            message = (
+                "interrupted by user (Ctrl+C); the latest state could NOT be saved "
+                f"({self.interrupt_checkpoint_error}); the previous checkpoint "
+                f"{previous} was left untouched"
+            )
+            self._log("ERROR", message)
+            return False, message
+        if manifest is None:  # pragma: no cover - force=True always returns one
+            self.resumable = False
+            message = "interrupted by user (Ctrl+C); no checkpoint could be written"
+            self._log("ERROR", message)
+            return False, message
+        self.interrupt_checkpoint_id = str(manifest.get("id"))
+        self.resumable = True
+        message = (
+            "interrupted by user (Ctrl+C); resumable checkpoint "
+            f"{self.interrupt_checkpoint_id} saved at step {manifest.get('step')}"
+        )
+        self._log("INFO", message)
+        return True, message
+
     def _track_eval_stall(self, result: dict) -> None:
         """Warn (once per stall) when independent evaluation stops moving.
 
@@ -1192,6 +1429,7 @@ class Trainer:
 
         exit_status = "completed"
         exit_message = ""
+        self._interrupt_guard.install()
         try:
             self._load_resume()
             self.store.update_run(
@@ -1383,10 +1621,19 @@ class Trainer:
                     "'after' measurement would be identical to the baseline"
                 )
             self._save(label="final", force=True)
+            self.resumable = bool(self.final_manifest)
             exit_message = exit_message or "training completed"
+        except KeyboardInterrupt:
+            # Ctrl+C: stop the workers, then write whatever state exists.  The
+            # exception is swallowed so the session, run row and report are
+            # still closed consistently; the CLI sees a normal "stopped" exit.
+            self._interrupted = True
+            exit_status = "stopped"
+            _, exit_message = self._save_after_interrupt()
         except Exception as exc:  # pragma: no cover - requires a failure to exercise
             exit_status = "failed"
             exit_message = str(exc)
+            self.resumable = False
             self.store.log(self.run_id, "ERROR", traceback.format_exc())
             self._log("ERROR", f"training failed: {exc}")
         finally:
@@ -1409,6 +1656,7 @@ class Trainer:
             )
             self._log("INFO", f"run {exit_status}: {exit_message}")
             self._write_report(exit_status)
+            self._interrupt_guard.restore()
         return {
             "status": exit_status,
             "step": self.step,
@@ -1417,7 +1665,9 @@ class Trainer:
             "message": exit_message,
             "resume_mode": self.resume_mode,
             "parent_run": self.resume_plan.parent_run if self.resume_plan else None,
-            "checkpoint": self.last_checkpoint_id,
+            "checkpoint": self.interrupt_checkpoint_id or self.last_checkpoint_id,
+            "resumable": bool(self.resumable),
+            "interrupted": self._interrupted,
             "report": str(self.run_dir / "report.json"),
             "warnings": list(self.run_warnings),
             "best_win_rate": (
@@ -1429,7 +1679,11 @@ class Trainer:
     def _write_report(self, status: str) -> None:
         try:
             final_checkpoint = None
-            if self.final_manifest:
+            # An interrupted run whose shutdown save failed must not present
+            # an older periodic checkpoint as its final resumable state.
+            if self.final_manifest and not (
+                self._interrupted and self.resumable is False
+            ):
                 final_checkpoint = {
                     "model_id": self.final_manifest.get("id"),
                     "path": str(self.models_dir / self.final_manifest["path"]),
@@ -1445,6 +1699,8 @@ class Trainer:
             resume_info["mode"] = self.resume_mode
             resume_info["restored_step"] = self.start_step
             resume_info["inherited_fields"] = list(getattr(self, "resume_inherited", []))
+            resume_info["interrupted"] = bool(self._interrupted)
+            resume_info["resumable"] = self.resumable
             # the merge decisions actually applied by this process (the plan
             # may predate them); the report must show the effective config's
             # provenance, not only the final values

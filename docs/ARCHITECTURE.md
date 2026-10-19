@@ -46,9 +46,14 @@ CLI (src/rlai/cli.py) → Trainer → Report/Summary
    schreibt Metriken, Episoden und Logs.
 4. Das Dashboard liest Metriken per HTTP und abonniert `/api/events` für
    Live-Updates. Es gibt keinen zweiten Kanal und keine erfundenen Werte.
-5. Checkpoints werden atomar gespeichert. Promotion ist ein expliziter
-   Schreibvorgang auf `stable.json`; `best.json` hält nur die beste gemessene
-   Evaluation fest und deployt nichts.
+5. Checkpoints werden atomar gespeichert; `latest.json` verzeichnet den
+   letzten erfolgreichen Speichervorgang. Die Aufräumroutine behält die
+   neuesten `keep_checkpoints` plus stabile, beste, letzte sowie die neuesten
+   finalen/interrupt-Checkpoints und löscht nur, wenn danach noch ein ladbarer
+   Checkpoint übrig ist. Promotion ist ein expliziter Schreibvorgang auf `stable.json`;
+   `best.json` hält nur die beste gemessene Evaluation fest und deployt nichts.
+   Ctrl+C schließt die Worker und schreibt vor dem Beenden einen
+   `interrupt`-Checkpoint (siehe `docs/TRAINING.md`).
 6. Evaluation lädt einen Checkpoint und spielt deterministische Serien gegen
    `idle`, `random`, `chase`, ein anderes Modell oder eine Pool-Kopie. Sie
    meldet Siege, Tore, Ballberührungen und ein 95-%-Wilson-Intervall.
@@ -57,11 +62,16 @@ CLI (src/rlai/cli.py) → Trainer → Report/Summary
    PFSP-Gewichten. Beides wird im Checkpoint gespeichert und beim Resume
    fortgesetzt (inklusive RNG-Zuständen und, mit `league_states`, den
    Gewichten der Pool-Snapshots).
-8. Vor einem Resume baut `resume.plan_resume` einen Plan: Kandidaten der
-   Lauf-Linie, Kompatibilitätsprüfung, Fallback bei defekten Checkpoints,
-   Ablehnung bei explizit angeforderten, unbrauchbaren Checkpoints. CLI
-   (`resume-plan`, `train --plan-only`) und API (`POST /api/resume/plan`)
-   zeigen denselben Plan, bevor etwas startet.
+8. Ein Training startet standardmäßig mit automatischer Fortsetzung.
+   `resume.plan_resume` baut dafür einen Plan: Kandidaten der Lauf-Linie,
+   Auswahl nach Trainingsschritt und `latest.json` (nicht nach Dateinamen),
+   Kompatibilitätsprüfung, Fallback bei defekten Checkpoints, Ablehnung bei
+   explizit angeforderten, unbrauchbaren Checkpoints. Gibt es gar keinen
+   Checkpoint, startet bewusst eine neue Policy; gibt es nur unbrauchbare,
+   wird der Start abgelehnt statt Fortschritt still zu verwerfen. CLI
+   (`resume-plan`, `train --plan-only`), `train`/`headless` ohne
+   Resume-Option und API (`POST /api/resume/plan`, `POST /api/runs` ohne
+   `resume_mode`) zeigen bzw. verwenden denselben Plan.
 9. Nach jedem Lauf – auch nach Stopp oder Fehler – schreibt der Trainer den
    Report nach `data/runs/<id>/report.json` und in die Tabelle `reports`;
    die GUI-Ansichten `#/reports` und `#/report?run=<id>` lesen ihn.
@@ -163,7 +173,8 @@ Zeitmessung.
 * `WorkerPool` wartet nicht unbegrenzt: Start und Sammlung haben Timeouts,
   ein toter Kindprozess wird mit Exit-Code gemeldet statt als Hängen, und
   `close()` ist idempotent (terminate → kill).
-* Checkpoints sind unveränderlich; der letzte Checkpoint und das stabile
-  Modell sind gegen Löschen geschützt. `best.json` ist ein Zeiger ohne
-  Lösch- oder Promotionswirkung.
+* Checkpoint-Modelldateien sind unveränderlich; ein Label (`final`,
+  `interrupt`) wird nur atomar im Manifest aktualisiert. Der letzte Checkpoint
+  (`latest.json`) und das stabile Modell sind gegen automatisches Löschen
+  geschützt. `best.json` ist ein Zeiger ohne Lösch- oder Promotionswirkung.
 * Kein automatisches Starten von Training, kein automatisches Promoten.

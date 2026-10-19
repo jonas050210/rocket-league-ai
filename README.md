@@ -64,9 +64,11 @@ Fortsetzung, Report und seitengeglichene Evaluation:
 # Was würde ein Resume wiederherstellen? (startet kein Training)
 python -m rlai.cli resume-plan --config-file configs/smoke-1v1.json --run-id <run-id>
 
-# Explizit fortsetzen / nur Gewichte übernehmen / bewusst neu anfangen
-python -m rlai.cli train --config-file configs/smoke-1v1.json --auto-resume --max-steps 40000
+# Standard: neuester gültiger, kompatibler Checkpoint wird automatisch fortgesetzt
+python -m rlai.cli train --config-file configs/smoke-1v1.json --max-steps 40000
+# Explizit von einem Checkpoint / nur Gewichte übernehmen / bewusst neu anfangen
 python -m rlai.cli train --config-file configs/smoke-1v1.json --resume-from <model-id> --resume-mode transfer
+python -m rlai.cli train --config-file configs/smoke-1v1.json --resume-mode fresh
 python -m rlai.cli train --config-file configs/smoke-1v1.json --plan-only
 
 # Statistik-Report eines Laufs (bzw. Vergleich mehrerer Läufe)
@@ -119,16 +121,23 @@ ein Checkpoint kann daher als Initialisierung für größere Teams dienen.
   orthogonaler Initialisierung; Actor und Critic getrennt.
 * Jeder Worker ist ein eigener Prozess mit einer RocketSim-Arena; der Trainer
   sammelt Rollouts, trainiert zentral und schreibt Metriken in SQLite.
-* Checkpoints sind atomar und unveränderlich; der stabile Zeiger wird nur
-  explizit gesetzt. Der letzte Checkpoint ist gegen Löschen geschützt. Laden
+* Checkpoints werden atomar geschrieben; die Modelldateien sind unveränderlich,
+  nur Labels werden im Manifest aktualisiert. Der stabile Zeiger wird nur
+  explizit gesetzt. Der letzte Checkpoint ist gegen automatisches Löschen
+  geschützt; `latest.json` hält ihn fest. Laden
   erfolgt standardmäßig mit `torch.load(weights_only=True)`, Modellreferenzen
   aus HTTP-Anfragen bleiben auf `data/models` beschränkt.
-* **Fortsetzung ist explizit**: `fresh` (nichts wird geladen), `continue`
-  (Gewichte, Optimizer, Schrittstand, RNG, Curriculum, Gegnerpool, geerbte
-  Config-Felder) und `transfer` (nur Gewichte, Schrittzähler beginnt bei 0).
-  Gesucht wird der neueste gültige, kompatible Checkpoint der Lauf-Linie;
-  ist er defekt oder inkompatibel, wird auf einen älteren zurückgefallen –
-  mit Begründung im Log und im Report. Ein **namentlich** angeforderter
+* **Fortsetzung ist automatisch**: Ohne Resume-Option wird der neueste
+  gültige, kompatible Checkpoint gesucht und fortgesetzt; `fresh` (nichts wird
+  geladen), `continue` (Gewichte, Optimizer, Schrittstand, RNG, Curriculum,
+  Gegnerpool, geerbte Config-Felder) und `transfer` (nur Gewichte,
+  Schrittzähler beginnt bei 0) bleiben explizit wählbar. Sortiert wird nach
+  Trainingsschritt und zuletzt erfolgreichem Speichern, nicht nach Dateiname.
+  Ist der neueste Checkpoint defekt oder inkompatibel, wird auf einen älteren
+  zurückgefallen – mit Begründung im Log und im Report. Existieren nur
+  unbrauchbare Checkpoints, startet der Lauf **nicht** und nennt die Gründe
+  (CLI-Exit 3, API 400); ein bewusstes `--resume-mode fresh` ist der einzige
+  Weg, vorhandenen Fortschritt zu ignorieren. Ein **namentlich** angeforderter
   Checkpoint wird niemals stillschweigend durch einen anderen ersetzt:
   dann startet der Lauf nicht. `rlai resume-plan` bzw. `POST /api/resume/plan`
   zeigen vorher, was wiederhergestellt würde und was fehlt.
@@ -186,8 +195,10 @@ fehlende Abhängigkeiten werden als Diagnose angezeigt.
   plus der Hardware-/Konfigurationslogik und bleiben in der Backend-Config.
   Das Fortsetzungs-Panel zeigt vor dem Start, was der Server finden würde
   (welcher Checkpoint, welche Schritte, welche Zustände werden wiederhergestellt)
-  – ein passender Checkpoint wird nie stillschweigend überschrieben, und ohne
-  Checkpoint startet der Lauf neu; beides wird im Dialog benannt. Die
+  – ein passender Checkpoint wird nie stillschweigend überschrieben. Ohne
+  Checkpoint startet der Lauf neu; existieren nur unbrauchbare Checkpoints,
+  verweigert der Server den Start und nennt die Gründe. Beides wird im Dialog
+  benannt. Die
   erweiterten Optionen (paralleler Lauf, Evaluations-Regler) sind für die
   Entwicklung im Bot Lab (Serien) verfügbar.
 * **Monitoring** zeigt zusätzlich die Iterationskosten (Collect, Simulation,

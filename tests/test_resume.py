@@ -328,3 +328,46 @@ def test_validation_reports_every_reason(data_root):
     assert any("architecture mismatch" in reason for reason in wrong.reasons)
     missing = checkpoints.validate_checkpoint(models / "nope" / "model.pt")
     assert missing.ok is False and missing.error == "file does not exist"
+
+
+def test_highest_training_step_wins_even_when_saves_arrive_out_of_order(data_root):
+    """Selection is by progress metadata, not by the newest directory name."""
+    models = data_root / "models"
+    config = _config()
+    _save(models, config, step=128, run_id="run-a")
+    latest_step = _save(models, config, step=1024, run_id="run-a")
+    last_saved = _save(models, config, step=512, run_id="run-a")
+
+    plan = plan_resume(models, config, mode="continue", run_id="run-a")
+
+    assert plan.will_resume is True
+    assert plan.model_id == latest_step["id"]
+    assert plan.restored_step == 1024
+    # the pointer records the last completed save, not the highest step
+    assert checkpoints.latest_record(models)["id"] == last_saved["id"]
+
+
+def test_candidates_found_distinguishes_an_empty_directory_from_rejections(data_root):
+    models = data_root / "models"
+    empty = plan_resume(models, _config(), mode="continue", run_id="run-b")
+    assert empty.candidates_found == 0
+    assert empty.will_resume is False
+
+    config = _config()
+    _save(models, config, step=128, run_id="run-a", hidden=(64,))
+    rejected = plan_resume(models, config, mode="continue", run_id="run-b")
+    assert rejected.candidates_found == 1
+    assert rejected.will_resume is False
+    assert rejected.rejected
+
+
+def test_explicit_reference_still_overrides_the_newest_step(data_root):
+    models = data_root / "models"
+    config = _config()
+    older = _save(models, config, step=128, run_id="run-a")
+    _save(models, config, step=1024, run_id="run-a")
+    plan = plan_resume(
+        models, config, mode="continue", run_id="run-b", checkpoint=older["id"]
+    )
+    assert plan.model_id == older["id"]
+    assert plan.restored_step == 128

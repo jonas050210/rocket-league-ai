@@ -32,21 +32,21 @@ python -m pytest -q
 | Beobachtungs-Spiegelung: 180° um z, Invarianzen, Boost-Pad-Reihenfolge | `test_obs_mirror.py` | bestanden |
 | Seitengleichgewicht: gespiegelte Trajektorien, 0 Aktionsabweichungen, Klassifikation | `test_side_balance.py` | bestanden |
 | Benchmark: parallele/sequenzielle Messung, Speed-up, Inferenz, Klemmen | `test_benchmark.py` | bestanden |
-| Resume-Pläne: Auswahl, Fallback, Ablehnungen, Config-Merge, Modi | `test_resume.py` | bestanden |
+| Resume-Pläne: automatische Auswahl nach Trainingsschritt (nicht Dateiname), Fallback, Ablehnungen, Config-Merge, Modi, explizite Referenz | `test_resume.py` | bestanden |
 | Echte Fortsetzung: unterbrochener Lauf, Restore, Report, Snapshot-Immutabilität | `test_continuation.py` | bestanden (slow) |
 | Report: nicht Gemessenes, Schritt-Zählung, Before/After-Paarung, Persistenz | `test_report.py` | bestanden |
 | GUI: alle Ansichten headless gerendert (jsdom), Plan-Vorschau, Token | `test_gui_smoke.py`, `tests/gui/smoke.mjs` | bestanden |
 | Beobachtung: v1/v2-Größen, Feldrahmen, Padding, Determinismus | `test_obs.py` | bestanden |
 | Beobachtung v2: Größen, Torrichtung, Padding, Determinismus | `test_obs_v2.py` | bestanden |
-| Checkpoints: atomar, Promotion, Löschschutz, best-Zeiger, Prune-Schutz | `test_checkpoints.py` | bestanden |
+| Checkpoints: atomar (auch bei Save-Fehler), latest-Zeiger, Promotion, Löschschutz, best-Zeiger, Retention mit Ankern und Ladbarkeitsprüfung, Auswahl nach Schritt | `test_checkpoints.py` | bestanden |
 | Gegnerpool: Kapazität, PFSP-Gewichte, Elo, Serialisierung,unveränderliche und serialisierte Gewichte | `test_league.py` | bestanden |
 | Curriculum: Aufstiegskriterien, Fenster, Resume-Zähler | `test_curriculum.py` | bestanden |
 | SQLite-Store: Runs, Metriken, Logs, Episoden, Evaluationsdetails (CI) | `test_store.py` | bestanden |
 | HTTP-API inkl. Auth (Header/Bearer/SSE-Token), CORS opt-in, 409 bei parallelem Lauf, Resume-Vorschau, Checkpoint-Validierung, Reports, Suite, Budget-Grenzen, Pfad-Ablehnung, Statik, Preflight, Dry-Run, Presets | `test_api.py` | bestanden |
 | Evaluation: Ergebnis, Seed-Reproduzierbarkeit, Wilson-Intervall, v1-Checkpoints, best-Regel | `test_evaluation.py` | bestanden |
 | Evaluation v2: CI-Grenzen, Layout-Erkennung, v1-Checkpoint-Evaluation, Suiten, Seiten | `test_evaluation_v2.py` | bestanden |
-| Trainer: fehlende Run-Zeile, Resume-Restore, Architektur-Mismatch, best-Regel, Pool-Gewichte im Checkpoint | `test_trainer.py` | bestanden |
-| CLI: Train-Run-Registrierung, `--plan-only`, `resume-plan`, `report`, Suite-Evaluation, `live --preflight/--dry-run/--list` | `test_cli.py` | bestanden |
+| Trainer: fehlende Run-Zeile, automatischer Resume, Abbruch bei unbrauchbaren Checkpoints, Final-Dedupe, Ctrl+C-Save, fehlgeschlagener Shutdown-Save, best-Regel, Pool-Gewichte im Checkpoint | `test_trainer.py` | bestanden |
+| CLI: automatischer Resume, Exit 3 bei unbrauchbaren Checkpoints, `--resume-mode fresh`, `--resume-from`, `--plan-only`, `resume-plan`, `report`, Suite-Evaluation, `live --preflight/--dry-run/--list` | `test_cli.py` | bestanden |
 | RLBot-Parität: Packet → Beobachtung (1v1, 3v3, Heatseeker) | `test_rlbot_adapter.py` | bestanden |
 | Bot: sicheres Laden (Pickle-Ablehnung), Inferenz, deterministische Aktionen, Spiegelung je Team, Fehlerrobustheit, `initialize`, fehlendes/externes Modell | `test_rlbot_bot.py` | bestanden |
 | JobManager: Steuerdateien, Subprozess-Umgebung | `test_jobs.py` | bestanden |
@@ -57,9 +57,11 @@ python -m pytest -q
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
 | Exposure-Settings: Loopback-Standard, Host-/Port-/CORS-Validierung, Token-Warnung, `serve` | `test_app_settings.py` | bestanden |
 
-**Gesamt: 464 passed, 0 failed, 0 skipped** (ca. 2 min, 2 vCPU), `ruff check src
-tests rlbot` sauber. Die einzigen verbleibenden Warnungen stammen aus
-`starlette`/`anyio` (Drittanbieter), nicht aus diesem Projekt.
+**Gesamt: 522 passed, 0 failed, 0 skipped** (ca. 2 min, 2 vCPU, mit
+installiertem jsdom für den GUI-Smoke-Test), `ruff check src tests rlbot`
+sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (521 passed,
+1 skipped). Die einzige Warnung stammt aus `starlette`/`anyio`
+(Drittanbieter), nicht aus diesem Projekt.
 
 Der GUI-Test braucht node und jsdom; fehlen sie, wird er übersprungen statt zu
 fehlschlagen:

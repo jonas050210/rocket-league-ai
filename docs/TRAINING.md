@@ -178,41 +178,95 @@ berichtet; der deterministische Wert ist die Deployment-Metrik.
 
 * Checkpoints liegen unter `data/models/<model-id>/` und enthalten Modell,
   Optimizer, Policy-Konfiguration, Schrittstand und Trainingskonfiguration.
-* Schreiben ist atomar (temporäre Datei + `os.replace`).
+* Schreiben ist atomar: `model.pt` und `manifest.json` werden in eine
+  temporäre Datei geschrieben, mit `fsync` gesichert und per `os.replace`
+  veröffentlicht. Ein abgebrochener Schreibvorgang hinterlässt kein
+  halbes, aber als gültig gelistetes Checkpoint-Verzeichnis; ein Fehler kann
+  den vorherigen Checkpoint nicht beschädigen.
 * Vorhandene IDs werden nie überschrieben; bei Kollision wird ein Suffix
   angehängt.
+* `latest.json` hält den zuletzt **erfolgreich** abgeschlossenen Speichervorgang
+  (ID, Schritt, Lauf, Label, Zeitpunkt) fest. Die Auswahl des neuesten
+  Checkpoints nutzt dieses Metadaten-Feld und den im Manifest gespeicherten
+  Trainingsschritt – nicht den Zeitstempel im Verzeichnisnamen.
 * Der stabile Zeiger (`stable.json`) wird nur durch eine explizite Promotion
   gesetzt; die vorherige stabile Version wird archiviert, nicht gelöscht.
-* `keep_checkpoints` begrenzt Kandidaten; stabile Modelle und der letzte
-  Checkpoint bleiben immer erhalten.
-* `best.json` ist ein reiner Messzeiger: Er zeigt auf den Checkpoint mit der
-  besten dokumentierten Evaluation (Siegquote, Wilson-Intervall in der
-  Evaluationstabelle). Er wird nie schlechter und ersetzt **nicht** die
-  stabile Promotion. Ein Checkpoint ohne Sieg wird nicht als „best“
-  markiert.
-### Fortsetzung: drei explizite Modi
+* `keep_checkpoints` begrenzt die Zahl der regulären, aufeinanderfolgenden
+  Checkpoints (die neuesten nach Trainingsschritt bleiben). Zusätzlich geschützt
+  und nie von der Aufräumroutine entfernt werden: das stabile Modell, **jeder**
+  Best-Checkpoint (`best*.json`), das Ziel von `latest.json` sowie der neueste
+  `final`-/`interrupt`-Checkpoint. Vor jedem Löschen prüft die Routine, dass
+  mindestens ein ladbarer Checkpoint übrig bleibt; sind alle Dateien defekt,
+  wird nichts gelöscht. Das Aufräumen ist auf den eigenen Lauf begrenzt, damit
+  ein neuer Lauf nicht die Historie eines anderen löscht.
+* `best.json` (und je Messprotokoll ein eigenes `best-*.json`) ist ein reiner
+  Messzeiger: Er zeigt auf den Checkpoint mit der besten dokumentierten
+  Evaluation (Siegquote, Wilson-Intervall in der Evaluationstabelle). Er wird
+  nie schlechter und ersetzt **nicht** die stabile Promotion. Ein Checkpoint
+  ohne Sieg wird nicht als „best“ markiert.
+* Ein normal abgeschlossener Lauf schreibt einen `final`-Checkpoint. Existiert
+  auf demselben Schritt bereits ein Checkpoint (z. B. durch die abschließende
+  Evaluation oder weil ein fortgesetzter Lauf keine weiteren Schritte mehr
+  macht), wird dessen Manifest atomar mit dem Label `final` aktualisiert,
+  statt ein zweites identisches Modell zu schreiben. Dasselbe gilt für den
+  `interrupt`-Checkpoint beim Beenden per Ctrl+C.
+
+### Fortsetzung: automatisch, aber explizit unterscheidbar
 
 | Modus | Bedeutung | Was wiederhergestellt wird |
 | --- | --- | --- |
-| `fresh` | Standard, wenn nichts angegeben wird | nichts – neue Policy, Schritt 0 |
-| `continue` | Lauf fortsetzen | Gewichte, Optimizer, Schrittstand, Iteration, RNG (numpy/torch/python/CUDA), Curriculum-Stufe, Gegnerpool inkl. Gewichten, geerbte Config-Felder (`gamma`, `learning_rate`, …), Elternlauf |
+| `continue` | **Standard**, auch ohne Angabe | Gewichte, Optimizer, Schrittstand, Iteration, RNG (numpy/torch/python/CUDA), Curriculum-Stufe, Gegnerpool inkl. Gewichten, geerbte Config-Felder (`gamma`, `learning_rate`, …), Elternlauf |
+| `fresh` | nur auf ausdrücklichen Wunsch | nichts – neue Policy, Schritt 0; vorhandene Checkpoints werden bewusst ignoriert |
 | `transfer` | Fine-Tuning auf neuer Aufgabe | nur die Gewichte; Schrittzähler, Optimizer, RNG und Curriculum beginnen neu |
+
+`rlai train` und `rlai headless` suchen beim Start automatisch den neuesten
+gültigen, kompatiblen Checkpoint und setzen den Lauf fort. Die Auswahl prüft
+Architektur, Beobachtungsversion und Modus vor dem Laden; der höchste
+Trainingsschritt gewinnt, bei gleichem Schritt der zuletzt erfolgreich
+gespeicherte Checkpoint. `--auto-resume` bleibt als veralteter Kompatibilitäts-
+Schalter akzeptiert, ist aber ohne Wirkung, weil das Verhalten jetzt der
+Standard ist.
+
+Unterscheidung beim Start:
+
+* **Kein Checkpoint vorhanden:** der Lauf startet wie bisher mit einer neuen
+  Policy; Log und CLI sagen ausdrücklich „no checkpoint found … fresh
+  training“.
+* **Checkpoints vorhanden, aber keiner ist kompatibel oder ladbar:** der Lauf
+  wird mit den Ablehnungsgründen abgelehnt (CLI-Exitcode 3, Trainer-
+  `ValueError`, API 400). Es wird **nicht** stillschweigend ein neues Modell
+  initialisiert. Bewusst neu starten: `--resume-mode fresh`; nur Gewichte
+  übernehmen: `--resume-mode transfer`.
+* **Neuester Checkpoint defekt, älterer gültig:** die automatische Fortsetzung
+  fällt mit Warnung auf den älteren gültigen Kandidaten zurück
+  (`fallback_used`).
+* **Namentlich angeforderter Checkpoint unbrauchbar:** niemals Ersatz durch
+  einen anderen (CLI-Exitcode 2, API 400).
 
 ```bash
 # Vorschau ohne Training – zeigt Kandidaten, Ablehnungen und was fehlt
 python -m rlai.cli resume-plan --config-file configs/1v1-vs-chaser.json --run-id <run-id>
 python -m rlai.cli train --config-file ... --plan-only
 
-# neuester gültiger, kompatibler Checkpoint der Lauf-Linie
-python -m rlai.cli train --config-file ... --auto-resume --run-id <kind> --max-steps 40000
+# Standard: neuester gültiger, kompatibler Checkpoint wird automatisch fortgesetzt
+python -m rlai.cli train --config-file ... --run-id <kind> --max-steps 40000
 
 # explizit, oder bewusst nur Gewichte
 python -m rlai.cli train --config-file ... --resume-from <model-id> --resume-mode continue
 python -m rlai.cli train --config-file ... --resume-from <model-id> --resume-mode transfer
 
+# bewusst neu anfangen (ignoriert vorhandene Checkpoints)
+python -m rlai.cli train --config-file ... --resume-mode fresh
+
 # neue Phase auf denselben Gewichten: geerbte Felder bewusst ändern
-python -m rlai.cli train --config-file ... --auto-resume --override-config reward
+python -m rlai.cli train --config-file ... --override-config reward
 ```
+
+Die API verhält sich genauso: Fehlt `resume_mode` in `POST /api/runs`, wird
+automatisch fortgesetzt, wenn ein nutzbarer Checkpoint existiert; gibt es
+keinen, startet der Lauf frisch. Existieren nur unbrauchbare Checkpoints,
+antwortet die API mit 400. Ein explizites `resume_mode: "continue"` verlangt
+weiterhin einen nutzbaren Checkpoint, `"fresh"` ignoriert ihn bewusst.
 
 Betriebsparameter (`episode_seconds`, `rollout_steps`, `total_steps`, Worker,
 Evaluation, `reset_mode`) folgen immer der Anfrage; lernkritische Felder
@@ -243,6 +297,23 @@ Regeln, die `src/rlai/resume.py` durchsetzt:
   (`allow_concurrent` setzt das bewusst außer Kraft).
 * `parent_run` und `resumed_step` werden in der Datenbank gespeichert; der
   Report zählt deshalb nur die Schritte, die dieser Prozess wirklich gemacht hat.
+
+### Ctrl+C und sicheres Beenden
+
+Der Trainer fängt `SIGINT` (Ctrl+C) ab, schließt zuerst die Worker-Prozesse und
+schreibt danach den letzten Zustand als Checkpoint mit dem Label `interrupt`.
+Die Sitzung wird als `stopped` beendet, der Run-Status und der Report werden
+normal geschrieben; der nächste Start findet diesen Checkpoint automatisch.
+Während des Schreibens wird ein erstes Signal zurückgestellt, damit der
+Checkpoint, der `latest.json`-Zeiger und die Buchhaltung konsistent bleiben.
+Ein zweites Ctrl+C während des Aufräumens wird nur gezählt und kann das
+Schreiben nicht mehr abbrechen.
+
+Schlägt das Schreiben beim Beenden fehl, bleibt der vorherige Checkpoint
+unangetastet. Ergebnis und Report melden dann ausdrücklich `resumable: false`
+und „the latest state could NOT be saved“; der Lauf wird **nicht** als
+resumierbar ausgegeben. `result["checkpoint"]` nennt in diesem Fall keinen
+neuen Stand.
 
 ### Report nach jedem Lauf
 

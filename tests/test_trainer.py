@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 
@@ -194,3 +195,262 @@ def test_league_states_can_be_turned_off(data_root):
         "ratings but no weights" in record["message"]
         for record in store.tail_logs(child.run_id, 0, 100)
     )
+
+
+def _write_resumable_checkpoint(models_dir, config, *, step=512, hidden=None):
+    from rlai.policy import PolicyConfig
+
+    base = config.policy_config()
+    policy = PolicyConfig(
+        obs_size=base.obs_size,
+        hidden=tuple(hidden or base.hidden),
+        activation=base.activation,
+    )
+    model = policy.build()
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=1e-5)
+    loss = model(torch.zeros(1, policy.obs_size))[0].pow(2).sum()
+    loss.backward()
+    optimizer.step()
+    return checkpoints.save_checkpoint(
+        models_dir,
+        model_state=model.state_dict(),
+        policy_config=policy.to_dict(),
+        optimizer_state=optimizer.state_dict(),
+        step=step,
+        run_id="parent-run",
+        mode=config.mode,
+        training_config=config.to_dict(),
+        extra={
+            "iteration": step // 64,
+            "obs_version": config.obs_version,
+            "rng": {
+                "numpy": np.random.default_rng(step).bit_generator.state,
+                "torch_cpu": torch.get_rng_state(),
+                "python": [1, 2, 3],
+            },
+            "curriculum": {"index": 1, "iterations": 1, "total_iterations": 2},
+            "league": {"capacity": 8, "agent_elo": 1000.0, "entries": []},
+        },
+        label="final",
+    )
+
+
+def test_automatic_resume_without_an_explicit_reference(data_root):
+    config = _config()
+    manifest = _write_resumable_checkpoint(data_root / "models", config, step=512)
+    store = Store(data_root / "rlai.sqlite3")
+    trainer = Trainer(config, "child-run", store)
+    trainer._load_resume()
+    assert trainer.step == 512
+    assert trainer.start_step == 512
+    assert trainer.resume_plan is not None
+    assert trainer.resume_plan.model_id == manifest["id"]
+    assert trainer.resume_mode == "continue"
+
+
+def test_no_checkpoint_starts_fresh_and_says_so(data_root):
+    store = Store(data_root / "rlai.sqlite3")
+    trainer = Trainer(_config(), "first-run", store)
+    trainer._load_resume()
+    assert trainer.step == 0
+    assert trainer.resume_mode == "fresh"
+    messages = [row["message"] for row in store.tail_logs("first-run", limit=100)]
+    assert any("no checkpoint found" in message for message in messages)
+    assert any("fresh training" in message for message in messages)
+
+
+def test_automatic_resume_refuses_to_replace_unusable_progress(data_root):
+    config = _config()
+    _write_resumable_checkpoint(data_root / "models", config, step=512, hidden=(32,))
+    trainer = Trainer(config, "cannot-resume", Store(data_root / "rlai.sqlite3"))
+    with pytest.raises(ValueError, match="Refusing to start a fresh model"):
+        trainer._load_resume()
+    # the trainer did not pretend to have restored anything
+    assert trainer.step == 0
+    assert trainer.start_step == 0
+
+
+def test_a_final_save_does_not_duplicate_the_checkpoint_at_the_same_step(data_root):
+    store = Store(data_root / "rlai.sqlite3")
+    config = _config()
+    trainer = Trainer(config, "dup-run", store)
+    trainer.step = 64
+    first = trainer._save(label="periodic")
+    second = trainer._save(label="final", force=True)
+    assert first is not None and second is not None
+    assert second["id"] == first["id"]
+    assert len(checkpoints.list_models(data_root / "models")) == 1
+    manifest = checkpoints.get_model(data_root / "models", first["id"])
+    assert manifest["label"] == "final"
+    assert checkpoints.latest_model(data_root / "models")["id"] == first["id"]
+
+
+def test_normal_completion_writes_a_discoverable_final_checkpoint(data_root):
+    config = _config()
+    policy = config.policy_config()
+    checkpoint = checkpoints.save_checkpoint(
+        data_root / "models",
+        model_state=policy.build().state_dict(),
+        policy_config=policy.to_dict(),
+        step=config.total_steps,
+        mode=config.mode,
+        label="resume",
+    )
+    store = Store(data_root / "rlai.sqlite3")
+    trainer = Trainer(
+        config,
+        "complete-run",
+        store,
+        resume_from=str(data_root / "models" / checkpoint["path"]),
+    )
+    result = trainer.run()
+    assert result["status"] == "completed"
+    assert result["resumable"] is True
+    assert result["interrupted"] is False
+
+    latest = checkpoints.latest_model(data_root / "models")
+    assert latest is not None
+    assert latest["label"] == "final"
+    assert latest["step"] == config.total_steps
+    # the restored checkpoint was relabelled, not written a second time
+    assert len(checkpoints.list_models(data_root / "models")) == 1
+
+    from rlai.resume import plan_resume
+
+    plan = plan_resume(data_root / "models", config, mode="continue", run_id="next-run")
+    assert plan.will_resume is True
+    assert plan.model_id == latest["id"]
+    assert plan.restored_step == config.total_steps
+
+
+class _InterruptingTrainer(Trainer):
+    """Raise KeyboardInterrupt once, as Ctrl+C would during the loop."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fired = False
+
+    def _log_iteration(self, *args, **kwargs):
+        super()._log_iteration(*args, **kwargs)
+        if not self.fired:
+            self.fired = True
+            raise KeyboardInterrupt
+
+
+def _interrupt_config() -> TrainingConfig:
+    return TrainingConfig(
+        run_name="unit",
+        total_steps=100_000,
+        rollout_steps=64,
+        n_workers=1,
+        minibatch_size=64,
+        checkpoint_interval=1000,
+        eval_interval=0,
+        policy={"hidden": [16]},
+        device="cpu",
+    )
+
+
+def test_ctrl_c_saves_a_resumable_checkpoint_and_closes_the_run(data_root):
+    config = _interrupt_config()
+    store = Store(data_root / "rlai.sqlite3")
+    trainer = _InterruptingTrainer(config, "interrupted-run", store)
+
+    result = trainer.run()
+
+    assert result["status"] == "stopped"
+    assert result["interrupted"] is True
+    assert result["resumable"] is True
+    assert result["step"] == 64
+    assert store.get_run("interrupted-run")["status"] == "stopped"
+    sessions = store.list_sessions("interrupted-run")
+    assert sessions[0]["status"] == "stopped"
+    assert sessions[0]["duration_s"] > 0.0
+
+    latest = checkpoints.latest_model(data_root / "models")
+    assert latest is not None
+    assert latest["step"] == 64
+    assert latest["label"] == "interrupt"
+    assert latest["id"] == result["checkpoint"]
+    report = store.get_report("interrupted-run")["report"]
+    assert report["status"] == "stopped"
+    assert report["final_checkpoint"]["step"] == 64
+    assert report["final_checkpoint"]["valid"] is True
+
+    # the next process discovers the interrupted checkpoint without being told
+    resumed = Trainer(config, "next-run", store)
+    resumed._load_resume()
+    assert resumed.step == 64
+    assert resumed.resume_plan.model_id == latest["id"]
+
+
+class _FailingInterruptTrainer(_InterruptingTrainer):
+    def _save(self, *, label: str = "", force: bool = False):
+        if label == "interrupt":
+            raise OSError("disk full while writing shutdown checkpoint")
+        return super()._save(label=label, force=force)
+
+
+def test_a_failed_shutdown_save_does_not_claim_the_run_is_resumable(data_root):
+    store = Store(data_root / "rlai.sqlite3")
+    trainer = _FailingInterruptTrainer(_interrupt_config(), "failed-save", store)
+
+    result = trainer.run()
+
+    assert result["status"] == "stopped"
+    assert result["interrupted"] is True
+    assert result["resumable"] is False
+    assert "could NOT be saved" in result["message"]
+    assert result["checkpoint"] is None
+    assert checkpoints.list_models(data_root / "models") == []
+    report = store.get_report("failed-save")["report"]
+    assert report["final_checkpoint"]["available"] is False
+    assert "no checkpoint" in report["final_checkpoint"]["reason"]
+    assert report["resume"]["resumable"] is False
+
+
+def test_the_interrupt_guard_defers_one_signal_and_ignores_later_ones():
+    from rlai.trainer import _InterruptGuard
+
+    guard = _InterruptGuard()
+    with pytest.raises(KeyboardInterrupt):
+        with guard.deferred():
+            guard._handle(None, None)
+            guard._handle(None, None)  # a second Ctrl+C must not abort cleanup
+    assert guard.count == 2
+
+    # once shutdown has begun, no signal can interrupt the save any more
+    guard.begin_shutdown()
+    guard._handle(None, None)
+    guard._handle(None, None)
+    assert guard.count == 4
+
+
+class _SignalDuringSaveTrainer(Trainer):
+    """Simulate Ctrl+C arriving while a periodic checkpoint is written."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.signalled = False
+
+    def _save(self, *, label: str = "", force: bool = False):
+        if not self.signalled:
+            self.signalled = True
+            self._interrupt_guard._handle(None, None)
+        return super()._save(label=label, force=force)
+
+
+def test_ctrl_c_during_a_save_finishes_the_save_then_relabels_it(data_root):
+    config = _interrupt_config().model_copy(update={"checkpoint_interval": 1})
+    store = Store(data_root / "rlai.sqlite3")
+    trainer = _SignalDuringSaveTrainer(config, "mid-save", store)
+
+    result = trainer.run()
+
+    assert result["status"] == "stopped"
+    assert result["resumable"] is True
+    models = checkpoints.list_models(data_root / "models")
+    assert len(models) == 1
+    assert models[0]["label"] == "interrupt"
+    assert models[0]["step"] == 64
+    assert checkpoints.latest_model(data_root / "models")["id"] == models[0]["id"]
