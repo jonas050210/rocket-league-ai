@@ -204,12 +204,23 @@ berichtet; der deterministische Wert ist die Deployment-Metrik.
   Evaluation (Siegquote, Wilson-Intervall in der Evaluationstabelle). Er wird
   nie schlechter und ersetzt **nicht** die stabile Promotion. Ein Checkpoint
   ohne Sieg wird nicht als „best“ markiert.
-* Ein normal abgeschlossener Lauf schreibt einen `final`-Checkpoint. Existiert
-  auf demselben Schritt bereits ein Checkpoint (z. B. durch die abschließende
-  Evaluation oder weil ein fortgesetzter Lauf keine weiteren Schritte mehr
-  macht), wird dessen Manifest atomar mit dem Label `final` aktualisiert,
-  statt ein zweites identisches Modell zu schreiben. Dasselbe gilt für den
-  `interrupt`-Checkpoint beim Beenden per Ctrl+C.
+* **Während des Trainings wird kein Routine-Checkpoint mehr geschrieben.**
+  Es gibt genau zwei Auslöser:
+  * Erreicht der Lauf regulär `total_steps`, wird **ein** `final`-Checkpoint
+    geschrieben (vor der abschließenden Evaluation, damit die Gewichte auch
+    dann auf der Platte liegen, wenn die Messung unterbrochen wird).
+  * Wird der Lauf abgebrochen – Stop-Anforderung über `control.json`,
+    Ctrl+C/SIGINT oder SIGTERM (z. B. durch den Job-Manager) –, wird **ein**
+    `interrupt`-Checkpoint des aktuellen Zustands geschrieben.
+  Existiert auf demselben Schritt bereits ein Checkpoint (etwa weil ein
+  fortgesetzter Lauf keine weiteren Schritte mehr macht), wird dessen Manifest
+  atomar mit dem neuen Label aktualisiert, statt ein zweites identisches
+  Modell zu schreiben. `checkpoint_interval` bleibt aus
+  Kompatibilitätsgründen in der Konfiguration, hat aber keine Wirkung mehr.
+* Periodische Evaluationen schreiben keinen Checkpoint und sind deshalb nicht
+  mit einer Modell-ID verknüpft; nur die abschließende Evaluation eines
+  regulär beendeten Laufs hängt am `final`-Checkpoint. `best.json` wird
+  entsprechend nur noch dort aktualisiert.
 
 ### Fortsetzung: automatisch, aber explizit unterscheidbar
 

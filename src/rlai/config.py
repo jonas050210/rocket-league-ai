@@ -95,6 +95,10 @@ class TrainingConfig(BaseModel):
     #: snapshot, at most ``OpponentPool.capacity`` of them).  Ratings are always
     #: stored; turn this off only when checkpoint size matters more.
     league_states: bool = True
+    #: Retained for configuration compatibility and accepted by old config
+    #: files, but no longer used: routine training writes no periodic
+    #: checkpoints.  A completed run writes exactly one ``final`` checkpoint
+    #: and a stop/Ctrl+C/SIGTERM writes exactly one ``interrupt`` checkpoint.
     checkpoint_interval: int = Field(default=10, ge=1, le=10000)
     #: additional recovery checkpoints kept per run (newest training steps).
     #: The latest resume point, stable model, every best checkpoint and the

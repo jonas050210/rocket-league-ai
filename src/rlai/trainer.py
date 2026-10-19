@@ -91,50 +91,67 @@ def _outcome_counts(episodes: list[dict]) -> tuple[int, int, int]:
 
 
 class _InterruptGuard:
-    """Turn Ctrl+C into a safe stop instead of an immediate crash.
+    """Turn Ctrl+C / SIGTERM into a safe stop instead of an immediate crash.
 
-    The first SIGINT raises :class:`KeyboardInterrupt` (so a blocking worker
+    The first signal raises :class:`KeyboardInterrupt` (so a blocking worker
     wait is interrupted promptly).  Inside :meth:`deferred` the signal is
     remembered instead: checkpoint writing must finish before the exception is
     raised, otherwise an interruption in the middle of a save could leave the
     process to be killed before updating its own bookkeeping.  Every further
-    signal during cleanup is recorded but ignored, so a second Ctrl+C cannot
+    signal during cleanup is recorded but ignored, so a second signal cannot
     interrupt the checkpoint and report of the first one.
+
+    ``SIGTERM`` is handled the same way because that is what a supervisor
+    (including the GUI job manager) sends to cancel a run; without a handler
+    the process would die without writing its interrupt checkpoint.
     """
 
     def __init__(self) -> None:
         self.count = 0
         self.installed = False
-        self._original = None
+        self._originals: dict[int, object] = {}
         self._defer_depth = 0
         self._deferred = False
         self.shutting_down = False
+        #: last signal number that reached :meth:`_handle` (for messages)
+        self.last_signum: int | None = None
 
     def begin_shutdown(self) -> None:
-        """From now on Ctrl+C is noted but never allowed to abort cleanup."""
+        """From now on signals are noted but never allowed to abort cleanup."""
         self.shutting_down = True
+
+    def describe(self) -> str:
+        """Human-readable reason for the message written at shutdown."""
+        if self.last_signum == getattr(signal, "SIGTERM", None):
+            return "a termination request (SIGTERM)"
+        return "a keyboard interrupt (Ctrl+C)"
 
     def install(self) -> None:
         if self.installed or threading.current_thread() is not threading.main_thread():
             return
         try:
-            self._original = signal.getsignal(signal.SIGINT)
-            signal.signal(signal.SIGINT, self._handle)
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                self._originals[signum] = signal.getsignal(signum)
+                signal.signal(signum, self._handle)
             self.installed = True
         except (ValueError, OSError):  # pragma: no cover - platform specific
-            self.installed = False
+            self.restore()
 
     def restore(self) -> None:
-        if not self.installed:
+        if not self._originals:
             return
-        try:
-            signal.signal(signal.SIGINT, self._original)
-        except (ValueError, OSError):  # pragma: no cover - platform specific
-            pass
+        for signum, original in self._originals.items():
+            try:
+                signal.signal(signum, original)
+            except (ValueError, OSError):  # pragma: no cover - platform specific
+                pass
+        self._originals.clear()
         self.installed = False
 
     def _handle(self, signum, frame) -> None:
         self.count += 1
+        if signum is not None:
+            self.last_signum = int(signum)
         if self.shutting_down:
             return
         if self._defer_depth:
@@ -1209,25 +1226,37 @@ class Trainer:
             f"(95% CI {(result.get('win_rate_ci95') or [0, 0])[0]:.2f}-"
             f"{(result.get('win_rate_ci95') or [0, 0])[1]:.2f}) in {seconds:.1f}s",
         )
-        manifest = self._save()
-        if manifest is not None:
-            self.last_checkpoint_id = manifest["id"]
-        if not self.last_checkpoint_id or not (
+        # Training writes no routine periodic checkpoints.  A periodic
+        # evaluation therefore keeps its metrics but has no model artefact to
+        # attach them to.  Only the final evaluation of a completed run is
+        # linked to the single final checkpoint (written at the same step,
+        # either just before this call or by the fallback below).
+        if phase == "after" and self.last_checkpoint_step != self.step:
+            self._save(label="final", force=True)
+        model_id = self.last_checkpoint_id if phase == "after" else None
+        games_played = (
             int(result.get("wins") or 0)
             + int(result.get("losses") or 0)
             + int(result.get("draws") or 0)
-        ):
+        )
+        if games_played:
+            rows = result.get("rows") or [
+                dict(result, model_id=model_id, run_id=self.run_id)
+            ]
+            for row in rows:
+                row.setdefault("model_id", model_id)
+                row.setdefault("run_id", self.run_id)
+                row["phase"] = phase
+                row.setdefault("protocol", protocol)
+                self.store.add_evaluation(row)
+        score = result.get("win_rate") or 0.0
+        if games_played:
+            self.run_best_score = max(self.run_best_score, float(score))
+        if phase == "periodic" and games_played:
+            self._track_eval_stall(result)
+        if not games_played or model_id is None:
             return result
 
-        model_id = self.last_checkpoint_id
-        rows = result.get("rows") or [dict(result, model_id=model_id, run_id=self.run_id)]
-        for row in rows:
-            row.setdefault("model_id", model_id)
-            row.setdefault("run_id", self.run_id)
-            row["phase"] = phase
-            row.setdefault("protocol", protocol)
-            self.store.add_evaluation(row)
-        score = result.get("win_rate") or 0.0
         self.store.set_model_eval_score(model_id, float(score))
         # A 0 % win rate is not a "best" model: keep the pointer empty until the
         # policy actually won a game, so the GUI never offers a checkpoint as
@@ -1255,22 +1284,21 @@ class Trainer:
                 f"new best for protocol {key}: {model_id} (win rate "
                 f"{float(score):.2f} vs {result.get('opponent')})",
             )
-        self.run_best_score = max(self.run_best_score, float(score))
-        if phase == "periodic":
-            self._track_eval_stall(result)
         return result
 
-    def _save_after_interrupt(self) -> tuple[bool, str]:
+    def _save_after_interrupt(self, reason: str | None = None) -> tuple[bool, str]:
         """Stop the workers, then persist the latest resumable state.
 
-        Called from the ``KeyboardInterrupt`` handler.  Closing the pool first
-        releases the simulator processes; only then is the checkpoint written,
-        so no worker can still be running while the state is snapshotted.  A
-        failure to write is reported as such - the run must not claim to be
-        resumable when its latest state is not on disk.
+        Called from the ``KeyboardInterrupt`` handler and from the graceful
+        ``stop`` control path.  Closing the pool first releases the simulator
+        processes; only then is the checkpoint written, so no worker can still
+        be running while the state is snapshotted.  A failure to write is
+        reported as such - the run must not claim to be resumable when its
+        latest state is not on disk.
         """
+        reason = reason or self._interrupt_guard.describe()
         self._interrupt_guard.begin_shutdown()
-        self._warn("training interrupted by Ctrl+C; stopping workers and saving state")
+        self._warn(f"training interrupted by {reason}; stopping workers and saving state")
         if self.pool is not None:
             try:
                 self.pool.close()
@@ -1283,7 +1311,7 @@ class Trainer:
             self.resumable = False
             previous = self.last_checkpoint_id or "none"
             message = (
-                "interrupted by user (Ctrl+C); the latest state could NOT be saved "
+                f"interrupted by {reason}; the latest state could NOT be saved "
                 f"({self.interrupt_checkpoint_error}); the previous checkpoint "
                 f"{previous} was left untouched"
             )
@@ -1291,13 +1319,13 @@ class Trainer:
             return False, message
         if manifest is None:  # pragma: no cover - force=True always returns one
             self.resumable = False
-            message = "interrupted by user (Ctrl+C); no checkpoint could be written"
+            message = f"interrupted by {reason}; no checkpoint could be written"
             self._log("ERROR", message)
             return False, message
         self.interrupt_checkpoint_id = str(manifest.get("id"))
         self.resumable = True
         message = (
-            "interrupted by user (Ctrl+C); resumable checkpoint "
+            f"interrupted by {reason}; resumable checkpoint "
             f"{self.interrupt_checkpoint_id} saved at step {manifest.get('step')}"
         )
         self._log("INFO", message)
@@ -1584,8 +1612,6 @@ class Trainer:
                 if self.config.eval_interval and self.iteration % self.config.eval_interval == 0:
                     self._run_evaluation()
 
-                if self.iteration % self.config.checkpoint_interval == 0:
-                    self._save()
                 self.store.update_run(
                     self.run_id,
                     step=self.step,
@@ -1613,16 +1639,30 @@ class Trainer:
                     self._flush_metrics()
                     self._iterations_since_flush = 0
 
-            if self.config.eval_interval and self.step > self.start_step:
-                self._run_evaluation(phase="after")
-            elif self.config.eval_interval:
-                self._warn(
-                    "no final evaluation: the run completed no training step, so an "
-                    "'after' measurement would be identical to the baseline"
-                )
-            self._save(label="final", force=True)
-            self.resumable = bool(self.final_manifest)
-            exit_message = exit_message or "training completed"
+            if exit_status == "stopped":
+                # A cancelled run persists its exact state as the interrupt
+                # checkpoint.  This happens before any closing evaluation: the
+                # supervisor that requested the stop waits a bounded time for
+                # the process, and a multi-minute measurement could otherwise
+                # be terminated before the weights reach the disk.
+                self._interrupted = True
+                _, exit_message = self._save_after_interrupt("a stop request")
+                self.resumable = self.interrupt_checkpoint_id is not None
+            else:
+                # Reaching total_steps normally is the one point at which a
+                # completed run publishes a checkpoint.  It is written before
+                # the closing measurement so the final weights are on disk
+                # even if that evaluation is interrupted.
+                self._save(label="final", force=True)
+                if self.config.eval_interval and self.step > self.start_step:
+                    self._run_evaluation(phase="after")
+                elif self.config.eval_interval:
+                    self._warn(
+                        "no final evaluation: the run completed no training step, so an "
+                        "'after' measurement would be identical to the baseline"
+                    )
+                self.resumable = bool(self.final_manifest)
+                exit_message = exit_message or "training completed"
         except KeyboardInterrupt:
             # Ctrl+C: stop the workers, then write whatever state exists.  The
             # exception is swallowed so the session, run row and report are

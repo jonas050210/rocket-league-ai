@@ -100,3 +100,31 @@ def test_legacy_190_observation_policy_evaluates(models_dir):
     )
     assert sampled["stochastic"] is True
     assert sampled["games"] == 1
+
+
+def test_touch_count_is_a_per_step_delta():
+    """``ball_touches`` counts contacts since the last state was sent.
+
+    The engine zeroes it after every state read, so a contact on two
+    consecutive decision steps is two contacts - not one, which is what the
+    old "only add the difference when the counter grew" logic reported.
+    """
+    from types import SimpleNamespace
+
+    from rlai.evaluation import count_touches
+
+    class Counter:
+        def __init__(self, value):
+            self.ball_touches = value
+
+    state = SimpleNamespace(cars={"blue-0": Counter(1), "orange-0": Counter(0)})
+    env = SimpleNamespace(state=state)
+    agents = ["blue-0"]
+
+    assert count_touches(env, agents) == 1
+    state.cars["blue-0"].ball_touches = 1  # another contact in the next step
+    assert count_touches(env, agents) == 1
+    state.cars["blue-0"].ball_touches = 2  # two callbacks in one step
+    assert count_touches(env, agents) == 2
+    state.cars["blue-0"].ball_touches = 0  # engine reset, no contact
+    assert count_touches(env, agents) == 0

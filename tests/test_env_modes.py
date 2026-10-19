@@ -99,3 +99,31 @@ def test_seed_reproducibility():
         return np.stack(trace)
 
     assert np.allclose(rollout(3), rollout(3), atol=1e-5)
+
+
+def test_touch_snapshot_keeps_cars_apart_when_totals_match():
+    """Per-car counters must not alias when their sum is unchanged.
+
+    A blue touch (blue 1, orange 0) followed by an orange touch (blue 0,
+    orange 1) has the same total; the old cache keyed on that total and kept
+    reporting the blue touch, misattributing the orange car's contact.
+    """
+    from types import SimpleNamespace
+
+    from rlai.envs import touch_snapshot
+
+    def state(blue, orange):
+        return SimpleNamespace(
+            cars={
+                "blue-0": SimpleNamespace(ball_touches=blue),
+                "orange-0": SimpleNamespace(ball_touches=orange),
+            }
+        )
+
+    first = touch_snapshot(state(1, 0))
+    second = touch_snapshot(state(0, 1))
+    assert first == {"blue-0": 1, "orange-0": 0}
+    assert second == {"blue-0": 0, "orange-0": 1}
+    # the returned dict is a snapshot, not a view of a reused cache
+    first["blue-0"] = 99
+    assert touch_snapshot(state(0, 1)) == second

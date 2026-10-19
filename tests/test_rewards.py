@@ -89,7 +89,10 @@ def test_touch_reward_is_an_event_not_a_constant():
     # touches are directional now: with the ball at rest the base factor pays
     # 0.3 * weight; a touch that drives the ball at the goal pays in full
     assert all(value >= 0.25 for value in touching.values())
-    # the same (unchanged) state must not pay the touch bonus twice
+    # the engine zeroes the counter after every state read, so the next step
+    # starts at zero and must not pay the same contact again
+    for agent in agents:
+        state.cars[agent].ball_touches = 0
     after = reward.get_rewards(agents, state, {}, {}, shared)
     assert all(abs(value) < 0.25 for value in after.values())
 
@@ -105,3 +108,29 @@ def test_reward_components_match_the_documented_order():
     assert len(parts) == len(_COMPONENTS)
     assert value == np.float32(value) or isinstance(value, float)
     assert abs(sum(parts) - value) < 1e-6
+
+def test_consecutive_steps_count_every_contact():
+    """``ball_touches`` is a per-step count, not a running total.
+
+    The simulator zeroes the counter after each state read (rlgym's own
+    ``Car.ball_touches`` docstring: "number of ball touches since last state
+    was sent").  Treating it as cumulative dropped the second of two contacts
+    that happened on consecutive decision steps.
+    """
+    env = _env()
+    reward = SoccerReward(env.spec, RewardWeights(touch=1.0, progress=0.0, ball_progress=0.0))
+    state = copy.deepcopy(env.env.state)
+    agents = list(state.cars)
+    shared = {}
+    reward.reset(agents, state, shared)
+    for agent in agents:
+        state.cars[agent].ball_touches = 0
+    for _ in range(2):
+        for agent in agents:
+            state.cars[agent].ball_touches = 1  # one contact this step
+        reward.get_rewards(agents, state, {}, {}, shared)
+        for agent in agents:
+            state.cars[agent].ball_touches = 0  # what the engine does next
+    for agent in agents:
+        assert shared["reward_stats_by_agent"][agent]["touches"] == 2
+

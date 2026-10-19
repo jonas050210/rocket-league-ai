@@ -275,7 +275,7 @@ def test_a_final_save_does_not_duplicate_the_checkpoint_at_the_same_step(data_ro
     config = _config()
     trainer = Trainer(config, "dup-run", store)
     trainer.step = 64
-    first = trainer._save(label="periodic")
+    first = trainer._save(label="candidate")
     second = trainer._save(label="final", force=True)
     assert first is not None and second is not None
     assert second["id"] == first["id"]
@@ -427,7 +427,7 @@ def test_the_interrupt_guard_defers_one_signal_and_ignores_later_ones():
 
 
 class _SignalDuringSaveTrainer(Trainer):
-    """Simulate Ctrl+C arriving while a periodic checkpoint is written."""
+    """Simulate Ctrl+C arriving while the final checkpoint is written."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -441,7 +441,9 @@ class _SignalDuringSaveTrainer(Trainer):
 
 
 def test_ctrl_c_during_a_save_finishes_the_save_then_relabels_it(data_root):
-    config = _interrupt_config().model_copy(update={"checkpoint_interval": 1})
+    config = _interrupt_config().model_copy(
+        update={"total_steps": 2048, "rollout_steps": 256, "minibatch_size": 256}
+    )
     store = Store(data_root / "rlai.sqlite3")
     trainer = _SignalDuringSaveTrainer(config, "mid-save", store)
 
@@ -452,5 +454,59 @@ def test_ctrl_c_during_a_save_finishes_the_save_then_relabels_it(data_root):
     models = checkpoints.list_models(data_root / "models")
     assert len(models) == 1
     assert models[0]["label"] == "interrupt"
-    assert models[0]["step"] == 64
+    assert models[0]["step"] == 2048
     assert checkpoints.latest_model(data_root / "models")["id"] == models[0]["id"]
+
+
+def test_routine_training_writes_no_periodic_checkpoints(data_root):
+    """Only a finished run publishes a checkpoint, not every interval."""
+    config = _config().model_copy(
+        update={"total_steps": 2048, "checkpoint_interval": 1}
+    )
+    store = Store(data_root / "rlai.sqlite3")
+    trainer = Trainer(config, "one-checkpoint", store)
+
+    result = trainer.run()
+
+    assert result["status"] == "completed"
+    models = checkpoints.list_models(data_root / "models")
+    assert len(models) == 1, [m["label"] for m in models]
+    assert models[0]["label"] == "final"
+    assert models[0]["step"] == config.total_steps
+    assert result["checkpoint"] == models[0]["id"]
+
+
+def test_a_stop_request_writes_an_interrupt_checkpoint(data_root):
+    config = _config().model_copy(update={"total_steps": 100_000})
+    store = Store(data_root / "rlai.sqlite3")
+    trainer = Trainer(config, "cancelled-run", store)
+    trainer.control_path.write_text('{"stop": true}', encoding="utf-8")
+
+    result = trainer.run()
+
+    assert result["status"] == "stopped"
+    assert result["interrupted"] is True
+    assert result["resumable"] is True
+    models = checkpoints.list_models(data_root / "models")
+    assert len(models) == 1
+    assert models[0]["label"] == "interrupt"
+    assert models[0]["step"] == 0
+    assert result["checkpoint"] == models[0]["id"]
+    report = store.get_report("cancelled-run")["report"]
+    assert report["final_checkpoint"]["valid"] is True
+
+
+def test_the_interrupt_guard_also_catches_sigterm():
+    import signal
+
+    from rlai.trainer import _InterruptGuard
+
+    guard = _InterruptGuard()
+    guard.begin_shutdown()  # no exception may escape during cleanup
+    guard._handle(signal.SIGTERM, None)
+    assert "SIGTERM" in guard.describe()
+
+    ctrl_c = _InterruptGuard()
+    ctrl_c.begin_shutdown()
+    ctrl_c._handle(signal.SIGINT, None)
+    assert "Ctrl+C" in ctrl_c.describe()
