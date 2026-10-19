@@ -26,7 +26,7 @@ Details: `docs/TESTING.md`.
 | Seitengeglichene Evaluation + Gegner-Suiten | implementiert | `tests/test_evaluation_v2.py`, `tests/test_side_balance.py` |
 | Beobachtungs-Spiegelung (180° um z) | implementiert | `tests/test_obs_mirror.py`, `tests/test_side_balance.py` |
 | Modell-Registry, Promotion, Schutzregeln | implementiert | `tests/test_checkpoints.py` |
-| Dashboard + Steuerung + Logs + Reports | implementiert | 9 Routen headless gerendert (jsdom), API-Tests |
+| Dashboard + Steuerung + Logs + Reports | implementiert | alle Ansichten headless gerendert (jsdom), API-Tests |
 | RLBot-v5-Adapter inkl. Seiten-Spiegelung | implementiert, **nicht im Spiel verifiziert** | `tests/test_rlbot_adapter.py`, `tests/test_rlbot_bot.py` |
 | Windows-/Epic-Anleitung | dokumentiert | `docs/SETUP_WINDOWS.md` |
 
@@ -48,8 +48,9 @@ freigeschaltet. Training startet **nie** automatisch – weder beim Start der Ap
 noch nach einem Absturz, noch wenn ein Checkpoint auftaucht. Jeder Lauf muss im
 Tab *Training* explizit gestartet und bestätigt werden.
 
-Erster sinnvoller Lauf: Preset **1v1 vs chaser** oder eine kleine eigene
-Konfiguration. Ein Smoke-Test dauert wenige Sekunden:
+Erster sinnvoller Lauf: im Web-Dashboard unter *Training* die Ziel-Schritte
+wählen und starten (1v1 ist der einzige Modus des Workflows; alle übrigen
+Parameter kommen aus den Standardwerten), oder per CLI:
 
 ```bash
 python -m rlai.cli train --config-file configs/smoke-1v1.json
@@ -163,30 +164,53 @@ Details: `docs/TRAINING.md`.
 
 ## Web-Dashboard
 
-Neun Ansichten: Dashboard, Training, Monitoring, **Reports**, **Report**, Models,
-Evaluation, Live match, Settings. Es gibt keine Dummy-Buttons: nicht verfügbare
-Aktionen sind deaktiviert und erklären sich, fehlende Abhängigkeiten werden als
-Diagnose angezeigt.
+Vier Hauptansichten – **Dashboard, Training, Stats, Bot Lab** – plus die
+Systemgruppe **Models, Live match, Settings** in der Sidebar. **Monitoring**
+(Telemetrie eines Laufs) und der **Report** sind als Detailansichten über
+Links erreichbar (tiefe Links wie `#/monitoring?run=<id>` oder `#/report?run=<id>`).
+Alte Adressen leiten weiter: `#/reports` → Stats, `#/evaluation` → Bot Lab/Serien,
+`#/teams` → Bot Lab/Teams, `#/memory` → Bot Lab/Memory. Es gibt keine
+Dummy-Buttons: nicht verfügbare Aktionen sind deaktiviert und erklären sich,
+fehlende Abhängigkeiten werden als Diagnose angezeigt.
 
-* **Training** enthält ein Fortsetzungs-Panel: Modus (fresh/continue/transfer),
-  Checkpoint-Auswahl („automatisch" = neuester kompatibler), Vorschau
-  „Was würde wiederhergestellt?" (inkl. abgelehnter Checkpoints mit Gründen und
-  geerbter Config-Felder), Schalter für einen zweiten parallelen Lauf und
-  Evaluations-Regler (Gegner-Suite, Seiten, Spiegelung, Baseline vor dem Lauf,
-  Seitenrandomisierung). Gestartet wird erst nach einem Bestätigungsdialog.
+* **Dashboard** zeigt Zustand (läuft/stopped/unterbrochen), aktuellen und
+  kumulierten Training-Zeitwert, Schritt gegen Ziel mit Fortschrittsbalken,
+  gemessenen Durchsatz, den neuesten Checkpoint mit Fortsetzungsstatus
+  („Nächster Lauf setzt fort von …" – automatisch, keine Auswahl) und die
+  letzten Läufe, Evaluationen und Modelle.
+* **Training** ist auf den 1v1-Workflow reduziert: Ziel-Schritte (primärer
+  Regler, mit Vorschlägen), optionaler Laufname und ein Start-Button mit
+  Bestätigungsdialog. Alle technischen Parameter (LR, Batch/Minibatch,
+  PPO-Epochen/Clip, Gamma/GAE, Architektur, Worker, Sim-Einstellungen) sind
+  keine Benutzerfelder mehr; die Werte kommen aus den stabilen Standardwerten
+  plus der Hardware-/Konfigurationslogik und bleiben in der Backend-Config.
+  Das Fortsetzungs-Panel zeigt vor dem Start, was der Server finden würde
+  (welcher Checkpoint, welche Schritte, welche Zustände werden wiederhergestellt)
+  – ein passender Checkpoint wird nie stillschweigend überschrieben, und ohne
+  Checkpoint startet der Lauf neu; beides wird im Dialog benannt. Die
+  erweiterten Optionen (paralleler Lauf, Evaluations-Regler) sind für die
+  Entwicklung im Bot Lab (Serien) verfügbar.
 * **Monitoring** zeigt zusätzlich die Iterationskosten (Collect, Simulation,
   Inferenz, Update, Evaluation, Checkpoint), Curriculum-Stufe, Pool-Größe und
   bei Fortsetzungen, ab welchem Schritt gezählt wird.
-* **Reports** listet alle Läufe mit Status, Schritten, Dauer, Durchsatz,
-  finaler Evaluation und Checkpoint-Gültigkeit, erlaubt den Vergleich
-  ausgewählter Läufe (inkl. „nicht vergleichbar"-Warnung) und kann Reports
-  älterer Läufe aus der Datenbank neu berechnen.
+* **Stats** konsolidiert Läufe, Lernkurven, Durchsatz über die Zeit,
+  Session-Historie, Checkpoints und Evaluationen; nicht gemessene Kennzahlen
+  werden als nicht verfügbar ausgewiesen, nicht mit Nullen aufgefüllt. Der
+  Abschnitt *Lauf-Reports* listet alle Läufe mit Status, Schritten, Dauer,
+  Durchsatz, finaler Evaluation und Checkpoint-Gültigkeit, erlaubt den
+  Vergleich ausgewählter Läufe (inkl. „nicht vergleichbar"-Warnung) und kann
+  Reports älterer Läufe aus der Datenbank neu berechnen.
+* **Bot Lab** bündelt die Experimentierfläche in Unterabschnitten:
+  *Experimente* (Modell-Auswahl, Gegner, Spiele – erst nach Bestätigung
+  ausgeführt), *Serien* (Einzelserien und Suiten mit Seiten, Spiegelung,
+  Phasen-Label, Protokoll-Chips, Konfidenzintervallen und getrennten
+  Stärke-/Diagnose-Baselines), *Schwierigkeit* (Gegnerprofile und
+  Verhaltensprofile; Prozentwerte sind Design-Ziele, keine Messwerte),
+  *Teams* (Bot-Editor, gespeicherte Teams) und *Memory* (Bekanntheitsliste,
+  Rivalen, Export/Reset – Spiel-Zustand, nie Modellgewichte).
 * **Models** prüft einen Checkpoint gegen eine Konfiguration
   (`POST /api/models/{id}/validate`) und zeigt, ob `continue` bzw. `transfer`
   möglich ist und welcher Zustand fehlt.
-* **Evaluation** startet Einzelserien oder Suiten mit Seiten, Spiegelung,
-  Sampling und Phasen-Label, zeigt Protokoll-Chips, Konfidenzintervalle und
-  trennt Stärke- von Diagnoseergebnissen.
 * **Settings** misst den Durchsatz wahlweise parallel/sequenziell und mit oder
   ohne Inferenzanteil und verwaltet das API-Token (localStorage, Header
   `x-rlai-token`; der SSE-Strom nutzt `?token=`, weil `EventSource` keine
@@ -199,10 +223,10 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q                    # 277 passed, ca. 34 s (2 vCPU, keine GPU)
+python -m pytest -q                    # 466 passed, ca. 2 min (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **277 passed** in ca. 34 s. Abgedeckt: Modi,
+Ergebnis in dieser Umgebung: **466 passed** in ca. 2 min. Abgedeckt: Modi,
 Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
 PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,
 Validierung und best-Zeiger, Gegnerpool (inkl. **Unveränderlichkeit** und

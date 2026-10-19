@@ -19,7 +19,9 @@ const {
   emptyState,
   lineChart,
   fmtNumber,
+  fmtDuration,
   pct,
+  renderComparison,
 } = window.RLAI;
 
 /** ISO timestamp (UTC) -> local time string. */
@@ -104,10 +106,11 @@ views.stats = async () => {
     return;
   }
   const selected = params.get("run") || runs[0].id;
-  const [stats, resources, overview] = await Promise.all([
+  const [stats, resources, overview, reports] = await Promise.all([
     api(`/api/stats?run_id=${encodeURIComponent(selected)}`),
     api("/api/system/resources"),
     api("/api/stats/overview?limit=12"),
+    api("/api/reports?limit=100"),
   ]);
   if (!stats || stats.available === false) {
     $("#view").innerHTML = `
@@ -191,6 +194,31 @@ views.stats = async () => {
       <td>${esc(fmtLocalTime(row.started_at))}</td>
     </tr>`).join("");
 
+  // one full report per finished/stopped/failed run; stored summaries keep
+  // the history table cheap without re-reading the run reports
+  const reportByRun = {};
+  (reports || []).forEach((item) => { reportByRun[item.run_id] = item; });
+  const reportRows = runs.map((run) => {
+    const report = reportByRun[run.id];
+    const summary = (report && report.summary) || {};
+    const steps = summary.steps || {};
+    const after = (summary.evaluation || {}).after || {};
+    const finalCheckpoint = summary.final_checkpoint || {};
+    return `<tr>
+      <td><input type="checkbox" class="compare-check" value="${esc(run.id)}" aria-label="Select ${esc(run.name)} for comparison" /></td>
+      <td><strong>${esc(run.name)}</strong><small>${esc(run.id)}${run.parent_run ? ` · continues ${esc(run.parent_run)}` : ""}</small></td>
+      <td>${pill(run.status)}</td>
+      <td class="table-strong">${fmtNumber(steps.completed ?? run.step)}<small> of ${fmtNumber(steps.target ?? run.total_steps)}</small></td>
+      <td>${report ? fmtDuration(summary.duration_s) : `<span class="muted">no report</span>`}</td>
+      <td>${report ? (summary.steps_per_second === null || summary.steps_per_second === undefined ? "—" : fmtNumber(summary.steps_per_second, 1)) : "—"}</td>
+      <td>${after && after.available !== false ? `${pct(after.win_rate)} <small>vs ${esc(after.opponent || "?")}</small>` : `<span class="muted">not measured</span>`}</td>
+      <td>${finalCheckpoint && finalCheckpoint.available !== false ? (finalCheckpoint.valid ? chip("valid", "stable") : chip("invalid", "rejected")) : `<span class="muted">none</span>`}</td>
+      <td class="actions">
+        ${report ? `<a class="button ghost" href="#/report?run=${encodeURIComponent(run.id)}">${icon("file")} Report</a>` : `<button class="button ghost" data-rebuild="${esc(run.id)}">${icon("refresh")} Rebuild</button>`}
+      </td>
+    </tr>`;
+  }).join("");
+
   $("#view").innerHTML = `
     <div class="page-heading">
       <div>
@@ -247,8 +275,13 @@ views.stats = async () => {
     <div class="two-col">
       ${metricChart("Episodic return", curves["charts/episodic_return"], { hint: "optimisation signal, not playing strength" })}
       ${metricChart("Episode win rate", curves["charts/win_rate"], { hint: "share of finished episodes that were won" })}
+      ${metricChart("Throughput (steps / s)", curves["time/sps"], { hint: "environment steps per second, measured per iteration" })}
       ${metricChart("Policy loss", curves["losses/policy"], { hint: "PPO surrogate loss" })}
+    </div>
+
+    <div class="two-col">
       ${metricChart("Explained variance", curves["losses/explained_variance"], { hint: "how well the critic predicts the returns" })}
+      ${metricChart("Evaluation win rate", curves["eval/win_rate"], { hint: "measured playing strength at periodic evaluations" })}
     </div>
 
     <div class="two-col">
@@ -352,6 +385,19 @@ views.stats = async () => {
           <tbody>${historyRows}</tbody></table></div>`
           : emptyState("No runs", "Nothing has been trained yet.", "training")}
       </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header"><div><h2>Run reports</h2><p>A report is written for every run that finishes, is stopped or fails — including the values that could not be measured, labelled as unavailable.</p></div></div>
+      <div class="table-wrap"><table class="compact">
+        <thead><tr><th></th><th>Run</th><th>Status</th><th>Steps</th><th>Duration</th><th>Steps / s</th><th>Final eval</th><th>Checkpoint</th><th></th></tr></thead>
+        <tbody>${reportRows}</tbody>
+      </table></div>
+      <div class="compare-picker">
+        <button class="button secondary" id="compare-button">${icon("chart")} Compare selected</button>
+        <span class="subtle">Tick two or more runs. Runs with different modes or observation layouts are flagged as not comparable.</span>
+      </div>
+      <div id="compare-result" style="padding:0 20px 18px"></div>
     </section>`;
 
   const select = $("#stats-run");
@@ -360,4 +406,34 @@ views.stats = async () => {
       location.hash = `#/stats?run=${encodeURIComponent(select.value)}`;
     });
   }
+
+  $$("[data-rebuild]").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await api(`/api/runs/${encodeURIComponent(button.dataset.rebuild)}/report?rebuild=true`);
+      toast("Report rebuilt from the recorded metrics");
+      location.hash = `#/report?run=${encodeURIComponent(button.dataset.rebuild)}`;
+    } catch (error) {
+      toast(error.message, "error");
+      button.disabled = false;
+    }
+  }));
+
+  $("#compare-button")?.addEventListener("click", async () => {
+    const selected = $$(".compare-check").filter((box) => box.checked).map((box) => box.value);
+    const node = $("#compare-result");
+    if (selected.length < 2) {
+      toast("Select at least two runs to compare", "error");
+      return;
+    }
+    node.innerHTML = `<div class="loading-state" style="min-height:60px"><span class="spinner"></span> Comparing…</div>`;
+    try {
+      node.innerHTML = renderComparison(await api("/api/runs/compare", {
+        method: "POST",
+        body: JSON.stringify({ run_ids: selected }),
+      }));
+    } catch (error) {
+      node.innerHTML = `<div class="callout error"><div class="callout-copy"><strong>Comparison failed</strong><p>${esc(error.message)}</p></div></div>`;
+    }
+  });
 };

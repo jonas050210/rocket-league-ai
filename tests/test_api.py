@@ -40,15 +40,17 @@ def test_modes_and_defaults(client):
     }
     defaults = client.get("/api/config/defaults").json()
     assert defaults["training"]["mode"] in {m["id"] for m in modes}
-    assert len(defaults["presets"]) >= 7
-    for preset in defaults["presets"]:
-        config = preset["config"]
-        assert config["obs_version"] in {1, 2}
-        assert config["total_steps"] >= config["rollout_steps"] * config["n_workers"]
-        assert 0 <= config["eval_interval"] <= 100_000
-    curriculum = next(p for p in defaults["presets"] if p["id"] == "1v1-curriculum")
-    assert curriculum["config"]["curriculum"] is True
-    assert curriculum["config"]["eval_interval"] > 0
+    # the simplified workflow offers exactly one automatic configuration:
+    # 1v1 with the stable backend defaults and the machine-checked worker count
+    assert "presets" not in defaults
+    default_run = defaults["default_run"]
+    assert default_run["mode"] == "soccer-1v1"
+    config = default_run["config"]
+    assert config["mode"] == "soccer-1v1"
+    assert config["obs_version"] in {1, 2}
+    assert config["total_steps"] >= config["rollout_steps"] * config["n_workers"]
+    assert default_run["device"] in {"auto", "cpu", "cuda", "mps"}
+    assert default_run["workers"]["recommended_workers"] >= 1
 
 
 def test_validate_accepts_and_rejects(client):
@@ -288,6 +290,97 @@ def test_resume_plan_endpoint_is_read_only(client, models_dir):
     assert plan["will_resume"] is False
     assert plan["explicit_unavailable"] is True
     assert plan["rejected"][0]["reasons"]
+
+
+def test_start_plan_endpoint_is_read_only(client, models_dir):
+    """The simplified form asks this what a start would do, before it starts."""
+    # without a checkpoint: the plan says a fresh model will be initialised
+    payload = client.post("/api/runs/start-plan", json={"total_steps": 4096}).json()
+    assert payload["will_resume"] is False
+    assert payload["resume_mode"] == "fresh"
+    assert payload["config"]["mode"] == "soccer-1v1"
+    assert payload["config"]["total_steps"] == 4096
+    assert payload["device"] in {"cpu", "cuda", "mps"}
+    assert payload["workers"]["recommended_workers"] >= 1
+    # the run name is honoured but optional
+    named = client.post(
+        "/api/runs/start-plan", json={"total_steps": 4096, "run_name": "smoke test"}
+    ).json()
+    assert named["config"]["run_name"] == "smoke test"
+    # technical values keep their backend defaults; the user never sent them
+    assert payload["config"]["learning_rate"] == 3e-4
+    assert payload["config"]["n_workers"] == 2
+    # out-of-range budgets are rejected like every other config
+    assert client.post("/api/runs/start-plan", json={"total_steps": 1}).status_code == 422
+
+    # with a compatible checkpoint: the plan says which checkpoint would be
+    # restored, using the same logic the actual start would use
+    config = TrainingConfig.model_validate(_config_from(client))
+    manifest = _compatible_checkpoint(models_dir, config)
+    payload = client.post("/api/runs/start-plan", json={"total_steps": 8192}).json()
+    assert payload["will_resume"] is True
+    assert payload["resume_mode"] == "continue"
+    assert payload["resume"]["model_id"] == manifest["id"]
+    assert payload["resume"]["restored_step"] == 2048
+    assert any("optimiser state" in item for item in payload["resume"]["restores"])
+
+
+def test_simplified_start_run_payload(client, models_dir, monkeypatch):
+    """The redesigned form posts only the user-controlled values.
+
+    Everything else comes from the backend defaults; the confirmation gate
+    and the checkpoint-continuation safety rules must keep applying.
+    """
+    started = {}
+
+    def fake_start(config, run_id, resume_from=None, **kwargs):
+        started["config"] = config
+        started["resume_from"] = resume_from
+        started.update(kwargs)
+
+    monkeypatch.setattr(client.app.state.jobs, "start_training", fake_start)
+
+    # fresh start: a slim payload without any technical parameter
+    response = client.post(
+        "/api/runs",
+        json={"total_steps": 4096, "run_name": "slim run", "confirm": True},
+    )
+    assert response.status_code == 200, response.text
+    config = started["config"]
+    assert config.mode == "soccer-1v1"
+    assert config.total_steps == 4096
+    assert config.run_name == "slim run"
+    # defaults filled in by the server, not by the user
+    assert config.learning_rate == 3e-4
+    assert config.minibatch_size == 1024
+    assert started["resume_mode"] == "fresh"
+    assert started["resume_from"] is None
+
+    # a slim payload that was not confirmed still refuses to start
+    started.clear()
+    response = client.post("/api/runs", json={"total_steps": 4096, "confirm": False})
+    assert response.status_code == 400
+    assert "not confirmed" in response.json()["detail"]
+    assert started == {}
+
+    # continue is only honoured when a compatible checkpoint exists;
+    # without one it is refused instead of silently starting from scratch
+    response = client.post(
+        "/api/runs",
+        json={"total_steps": 4096, "resume_mode": "continue", "confirm": True},
+    )
+    assert response.status_code == 400, response.text
+
+    manifest = _compatible_checkpoint(
+        models_dir, TrainingConfig.model_validate(_config_from(client))
+    )
+    response = client.post(
+        "/api/runs",
+        json={"total_steps": 4096, "resume_mode": "continue", "confirm": True},
+    )
+    assert response.status_code == 200, response.text
+    assert started["resume_mode"] == "continue"
+    assert started["resume_from"].endswith(manifest["path"])
 
 
 def test_model_validation_endpoint(client, models_dir):

@@ -1,4 +1,10 @@
-/* Rocket League AI — local control room. Every value comes from the API. */
+/* Rocket League AI — 1v1 training dashboard.
+ *
+ * Navigation: Dashboard, Training, Stats, Bot Lab (primary) plus Models,
+ * Live match and Settings (system).  Live telemetry (monitoring) and the full
+ * run report stay available as deep links.  Every value on screen comes from
+ * the API; anything that was never measured is labelled, never invented.
+ */
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (v) =>
@@ -200,14 +206,34 @@ function downsample(points, limit = 240) {
 }
 
 // ---------------------------------------------------------------- navigation
+const NAV_LABELS = {
+  dashboard: "Dashboard",
+  training: "Training",
+  stats: "Stats",
+  lab: "Bot Lab",
+  monitoring: "Telemetry",
+  report: "Run report",
+  models: "Models",
+  live: "Live match",
+  settings: "Settings",
+  reports: "Run reports",
+  evaluation: "Bot Lab",
+  teams: "Bot Lab",
+  memory: "Bot Lab",
+};
+
 function currentRoute() {
   const hash = location.hash.replace(/^#\/?/, "").split("?")[0];
   return hash || "dashboard";
 }
 
+function routeQuery() {
+  return new URLSearchParams(location.hash.split("?")[1] || "");
+}
+
 function setActiveNav(route) {
   $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.route === route));
-  const label = { dashboard: "Dashboard", training: "Training", stats: "Stats", monitoring: "Monitoring", reports: "Reports", report: "Run report", models: "Models", evaluation: "Evaluation", lab: "Evaluation lab", teams: "Teams & bots", memory: "Player memory", live: "Live match", settings: "Settings" }[route] || "Dashboard";
+  const label = NAV_LABELS[route] || "Dashboard";
   $("#breadcrumb").textContent = label;
   document.title = `${label} · Rocket League AI`;
 }
@@ -241,25 +267,134 @@ async function render() {
   }
 }
 
-// ---------------------------------------------------------------- dashboard
 const views = {};
 
+/** Routes that moved: old deep links still work and point at the new home. */
+const REDIRECTS = {
+  reports: "#/stats",
+  evaluation: "#/lab?tab=series",
+  teams: "#/lab?tab=teams",
+  memory: "#/lab?tab=memory",
+};
+Object.entries(REDIRECTS).forEach(([route, target]) => {
+  views[route] = () => {
+    if (location.hash.replace(/^#/, "") !== target.replace(/^#/, "")) location.hash = target;
+    return Promise.resolve();
+  };
+});
+
+// ---------------------------------------------------------------- shared bits
+function splitList(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function runControlButtons(run, { telemetry = true } = {}) {
+  const pauseable = ["running", "starting"].includes(run.status);
+  const stoppable = ["running", "starting", "paused"].includes(run.status);
+  const resumable = run.status === "paused";
+  return `<div class="run-actions">
+    ${telemetry ? `<a class="button ghost" href="#/monitoring?run=${encodeURIComponent(run.id)}" title="Open live telemetry" aria-label="Open live telemetry for ${esc(run.name)}">${icon("chart")}</a>` : ""}
+    <a class="button ghost" href="#/report?run=${encodeURIComponent(run.id)}" title="Open run report" aria-label="Open run report for ${esc(run.name)}">${icon("file")}</a>
+    ${pauseable ? `<button class="button ghost" data-run-action="pause" data-run="${esc(run.id)}" title="Pause" aria-label="Pause run">${icon("pause")}</button>` : ""}
+    ${resumable ? `<button class="button ghost" data-run-action="resume" data-run="${esc(run.id)}" title="Resume" aria-label="Resume run">${icon("play")}</button>` : ""}
+    ${stoppable ? `<button class="button danger" data-run-action="stop" data-run="${esc(run.id)}" title="Stop" aria-label="Stop run">${icon("stop")}</button>` : ""}
+  </div>`;
+}
+
+function wireRunControls(scope) {
+  $$("[data-run-action]", scope).forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.run;
+      try {
+        await api(`/api/runs/${encodeURIComponent(id)}/${button.dataset.runAction}`, { method: "POST" });
+        toast(`Run ${button.dataset.runAction === "stop" ? "stop requested" : button.dataset.runAction === "pause" ? "paused" : "resumed"}`);
+        setTimeout(render, 800);
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    });
+  });
+}
+
+function confirmAction(title, body, action) {
+  const dialog = $("#confirm-dialog");
+  $("#confirm-title").textContent = title;
+  $("#confirm-body").textContent = body;
+  dialog.showModal();
+  const handler = async (event) => {
+    if (!event.target.closest("#confirm-ok")) return;
+    event.preventDefault();
+    dialog.close();
+    try {
+      await action();
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  };
+  dialog.addEventListener("click", handler, { once: false });
+  dialog.addEventListener("close", () => dialog.removeEventListener("click", handler), { once: true });
+}
+
+// ---------------------------------------------------------------- dashboard
 views.dashboard = async () => {
-  const [system, runs, models, evaluations, diagnostics] = await Promise.all([
+  const [system, runs, models, evaluations, diagnostics, plan] = await Promise.all([
     api("/api/system"),
     api("/api/runs?limit=6"),
     api("/api/models"),
     api("/api/evaluations?limit=5"),
     api("/api/diagnostics"),
+    api("/api/runs/start-plan", { method: "POST", body: JSON.stringify({}) }),
   ]);
   const info = system.info;
   const active = system.active_run;
+  const last = runs[0] || null;
+
+  // live numbers for the active run (real backend state, never estimates)
+  let activeStats = null;
+  let sps = null;
+  if (active) {
+    const [runStats, metrics] = await Promise.all([
+      api(`/api/stats?run_id=${encodeURIComponent(active.id)}`).catch(() => null),
+      api(`/api/runs/${encodeURIComponent(active.id)}/metrics?names=time/sps&limit=1`).catch(() => []),
+    ]);
+    activeStats = runStats;
+    sps = metrics.length ? metrics[metrics.length - 1].value : null;
+  }
+
   const totalSteps = active ? Number(active.total_steps || 0) : 0;
   const step = active ? Number(active.step || 0) : 0;
   const progress = totalSteps ? Math.min(100, (step / totalSteps) * 100) : 0;
+  const timing = (activeStats && activeStats.timing) || {};
+  const headlineStatus = active
+    ? active.status
+    : last
+      ? last.status
+      : "idle";
   $("#model-count").textContent = models.length;
   $("#workspace-mode").textContent = active ? `${active.mode} · ${active.status}` : "no active run";
   $("#app-version").textContent = `RLAI ${system.version || ""}`.trim() || "RLAI";
+
+  const statusFoot = active
+    ? `${esc(active.mode)} · ${esc(active.id)}`
+    : last
+      ? `last: ${esc(last.name)} · ${esc(last.id)}`
+      : "no run recorded yet";
+
+  const timeValue = active
+    ? timing.current_session_s !== null && timing.current_session_s !== undefined
+      ? esc(fmtDurationShort(timing.current_session_s))
+      : "—"
+    : last && last.duration_s
+      ? esc(fmtDurationShort(last.duration_s))
+      : "—";
+  const timeFoot = active
+    ? `accumulated ${timing.accumulated_s !== null && timing.accumulated_s !== undefined ? fmtDurationShort(timing.accumulated_s) : "—"} · ${fmtNumber(timing.session_count)} session(s)`
+    : last && last.duration_s
+      ? `${esc(last.status)} at step ${fmtNumber(last.step)}`
+      : "nothing trained yet";
 
   const runRows = runs.length
     ? runs
@@ -268,24 +403,12 @@ views.dashboard = async () => {
             <td><strong>${esc(run.name)}</strong><small>${esc(run.mode)} · ${esc(run.id)}</small></td>
             <td>${pill(run.status)}</td>
             <td class="table-strong">${fmtNumber(run.step)} / ${fmtNumber(run.total_steps)}</td>
-            <td>${esc(run.created_at.replace("T", " ").slice(0, 19))}</td>
-            <td><a class="text-button" href="#/monitoring?run=${encodeURIComponent(run.id)}">Inspect ${icon("arrow")}</a></td>
+            <td>${esc((run.created_at || "").replace("T", " ").slice(0, 19))}</td>
+            <td class="actions"><a class="button ghost" href="#/monitoring?run=${encodeURIComponent(run.id)}">Inspect ${icon("arrow")}</a></td>
           </tr>`
         )
         .join("")
     : "";
-
-  const readiness = (diagnostics.checks || [])
-    .filter((check) => check.required || !check.ok)
-    .slice(0, 6)
-    .map(
-      (check) => `<div class="readiness-row">
-        <span class="readiness-icon ${check.ok ? "" : "unknown"}">${icon(check.ok ? "check" : "warning")}</span>
-        <div><strong>${esc(check.name.replace("package:", ""))}</strong><small>${esc(check.detail || "")}</small></div>
-        <span class="ready-tag ${check.ok ? "" : "muted"}">${check.ok ? "OK" : check.required ? "MISSING" : "OPTIONAL"}</span>
-      </div>`
-    )
-    .join("");
 
   const evaluationsHtml = evaluations.length
     ? evaluations
@@ -298,47 +421,89 @@ views.dashboard = async () => {
         .join("")
     : "";
 
+  const readyChecks = (diagnostics.checks || []).filter((check) => !check.ok);
+  const readinessHtml = readyChecks.length
+    ? readyChecks
+        .slice(0, 6)
+        .map(
+          (check) => `<div class="readiness-row">
+        <span class="readiness-icon ${check.ok ? "" : "unknown"}">${icon(check.ok ? "check" : "warning")}</span>
+        <div><strong>${esc(check.name.replace("package:", ""))}</strong><small>${esc(check.detail || "")}</small></div>
+        <span class="ready-tag ${check.ok ? "" : "muted"}">${check.ok ? "OK" : check.required ? "MISSING" : "OPTIONAL"}</span>
+      </div>`
+        )
+        .join("")
+    : `<div class="readiness-row">
+        <span class="readiness-icon">${icon("check")}</span>
+        <div><strong>All required dependencies present</strong><small>Full checks in Settings.</small></div>
+        <span class="ready-tag">OK</span>
+      </div>`;
+
+  const stable = models.find((m) => m.stable) || null;
+  const newestModel = models.length ? models[0] : null;
+
+  // what the *next* run would do — computed by the server, shown verbatim
+  const nextRun = plan && plan.will_resume
+    ? `<div class="callout success">
+        <div class="callout-copy"><strong>Next run continues from ${esc(plan.resume.model_id)}</strong>
+        <p>Restored at step ${fmtNumber(plan.resume.restored_step)}. ${esc(plan.summary || "")} Checkpoints are immutable; nothing is overwritten.</p></div>
+      </div>`
+    : `<div class="callout">
+        <div class="callout-copy"><strong>Next run starts a new model</strong>
+        <p>No compatible checkpoint available yet. When a checkpoint exists, the run continues from it automatically.</p></div>
+      </div>`;
+
+  const endedRun = !active && last && ["stopped", "interrupted", "failed"].includes(last.status)
+    ? `<div class="callout ${last.status === "failed" ? "error" : "warning"}">
+        <div class="callout-copy"><strong>Training ${esc(last.status)} at step ${fmtNumber(last.step)}</strong>
+        <p>${esc(last.message || "The last run ended.")} ${last.last_checkpoint_id ? `The next run will continue from ${esc(last.last_checkpoint_id)} — stopping never deletes a checkpoint.` : "No checkpoint was written, so the next run starts fresh."}</p></div>
+        <a class="button secondary" href="#/training">Continue training</a>
+      </div>`
+    : "";
+
   $("#view").innerHTML = `
     <div class="page-heading">
       <div>
-        <span class="eyebrow">Local control room</span>
+        <span class="eyebrow">1v1 training</span>
         <h1>Dashboard</h1>
         <p>Live state of the trainer, the simulator and the model registry.</p>
       </div>
       <div class="heading-actions">
-        <a class="button primary" href="#/training">${icon("plus")} New training run</a>
+        <a class="button primary" href="#/training">${icon("play")} Start training</a>
       </div>
     </div>
 
+    ${endedRun}
+
     <div class="stat-grid">
       <div class="stat-card accent">
-        <div class="stat-label"><span>Active run</span>${icon("activity")}</div>
+        <div class="stat-label"><span>Status</span>${icon("activity")}</div>
+        <div class="stat-value" style="font-size:22px">${active ? pill(headlineStatus) : `<span class="status-pill ${statusClass(headlineStatus)}">${esc(headlineStatus)}</span>`}</div>
+        <div class="stat-foot">${statusFoot}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label"><span>Progress</span>${icon("chart")}</div>
         <div class="stat-value">${active ? fmtNumber(step) : "—"}${active ? `<small>/ ${fmtNumber(totalSteps)}</small>` : ""}</div>
-        <div class="stat-foot">${active ? pill(active.status) : "no run in progress"}</div>
+        <div class="stat-foot">${active ? `${progress.toFixed(1)} % of target` : "no active run"}</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label"><span>CPU</span>${icon("cpu")}</div>
-        <div class="stat-value">${Math.round(info.cpu_percent || 0)}<small>%</small></div>
-        <div class="stat-foot">${info.cpu_count} logical cores · ${info.cpu_physical || "?"} physical</div>
+        <div class="stat-label"><span>Throughput</span>${icon("bolt")}</div>
+        <div class="stat-value">${active && sps !== null ? fmtNumber(sps) : "—"}${active && sps !== null ? "<small> steps/s</small>" : ""}</div>
+        <div class="stat-foot">environment steps / s</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label"><span>Memory</span>${icon("layers")}</div>
-        <div class="stat-value">${info.memory_available_gb}<small>GB free</small></div>
-        <div class="stat-foot">${info.memory_total_gb} GB total</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label"><span>Models</span>${icon("models")}</div>
-        <div class="stat-value">${models.length}</div>
-        <div class="stat-foot">${models.filter((m) => m.stable).length} stable · ${models.filter((m) => !m.stable).length} candidates</div>
+        <div class="stat-label"><span>Training time</span>${icon("clock")}</div>
+        <div class="stat-value" style="font-size:20px">${timeValue}</div>
+        <div class="stat-foot">${timeFoot}</div>
       </div>
     </div>
 
     <div class="two-col">
       <section class="panel active-run">
         <div class="panel-header">
-          <div><h2>${active ? esc(active.name) : "No training run active"}</h2>
-          <p>${active ? `${esc(active.mode)} · ${esc(active.id)}` : "Training never starts automatically."}</p></div>
-          ${active ? pill(active.status) : `<span class="pill muted-pill">idle</span>`}
+          <div><h2>${active ? esc(active.name) : "Next run"}</h2>
+          <p>${active ? `${esc(active.mode)} · ${esc(active.id)}` : "Computed by the server from the current checkpoints."}</p></div>
+          ${active ? pill(active.status) : `<span class="pill muted-pill">ready</span>`}
         </div>
         <div class="panel-body">
           ${active ? `
@@ -347,28 +512,40 @@ views.dashboard = async () => {
               <div class="progress-track"><div class="progress-fill" style="width:${progress}%"></div></div>
             </div>
             <div class="metadata-list" style="padding-inline:0">
-              <div class="metadata-row"><span>Workers</span><strong>${esc(active.config?.n_workers ?? "—")}</strong></div>
-              <div class="metadata-row"><span>Device</span><strong>${esc(active.config?.device ?? "auto")}</strong></div>
               <div class="metadata-row"><span>Mode</span><strong>${esc(active.mode)}</strong></div>
-              <div class="metadata-row"><span>Message</span><strong>${esc(active.message || "—")}</strong></div>
+              <div class="metadata-row"><span>Workers / device</span><strong>${esc(active.config?.n_workers ?? "—")} / ${esc(active.config?.device ?? "auto")}</strong></div>
+              <div class="metadata-row"><span>Latest checkpoint</span><strong>${esc(active.last_checkpoint_id || "not written yet")}${active.last_checkpoint_at ? ` · ${esc(active.last_checkpoint_at.replace("T", " ").slice(0, 19))}` : ""}</strong></div>
+              ${active.parent_run ? `<div class="metadata-row"><span>Continues</span><strong>${esc(active.parent_run)} from step ${fmtNumber(active.resumed_step)}</strong></div>` : ""}
+              ${active.message ? `<div class="metadata-row"><span>Message</span><strong>${esc(active.message)}</strong></div>` : ""}
             </div>
             <div class="button-row">
-              <a class="button secondary" href="#/monitoring?run=${encodeURIComponent(active.id)}">${icon("monitoring")} Monitor</a>
-              <button class="button ghost" data-action="pause" data-run="${esc(active.id)}" ${["paused", "stopping"].includes(active.status) ? "disabled" : ""}>${icon("pause")} Pause</button>
-              <button class="button danger" data-action="stop" data-run="${esc(active.id)}" ${active.status === "stopping" ? "disabled" : ""}>${icon("stop")} Stop</button>
-            </div>` : `
-            <div class="empty-state" style="padding:8px 0 24px">
-              <span class="empty-symbol">${icon("training")}</span>
-              <h2>Nothing is training</h2>
-              <p>Choose a mode and start a run. The first baseline is 1v1 against the scripted chaser.</p>
+              <a class="button secondary" href="#/monitoring?run=${encodeURIComponent(active.id)}">${icon("monitoring")} Telemetry</a>
+              <a class="button ghost" href="#/report?run=${encodeURIComponent(active.id)}">${icon("file")} Report</a>
+              ${["running", "starting"].includes(active.status) ? `<button class="button ghost" data-run-action="pause" data-run="${esc(active.id)}">${icon("pause")} Pause</button>` : ""}
+              ${active.status === "paused" ? `<button class="button ghost" data-run-action="resume" data-run="${esc(active.id)}">${icon("play")} Resume</button>` : ""}
+              ${["running", "starting", "paused"].includes(active.status) ? `<button class="button danger" data-run-action="stop" data-run="${esc(active.id)}">${icon("stop")} Stop</button>` : ""}
+            </div>`
+            : `
+            ${nextRun}
+            <div class="button-row">
               <a class="button primary" href="#/training">${icon("play")} Configure a run</a>
+              <a class="button ghost" href="#/stats">${icon("chart")} Statistics</a>
             </div>`}
         </div>
       </section>
 
       <section class="panel">
-        <div class="panel-header"><div><h2>Readiness</h2><p>Real dependency checks from this machine.</p></div></div>
-        <div class="readiness-list">${readiness || emptyState("No diagnostics", "The diagnostics endpoint returned no checks.", "info")}</div>
+        <div class="panel-header"><div><h2>Machine</h2><p>Measured on this machine, not estimated.</p></div></div>
+        <div class="panel-body">
+          <div class="metadata-list" style="padding-inline:0">
+            <div class="metadata-row"><span>CPU</span><strong>${Math.round(info.cpu_percent || 0)} % · ${info.cpu_count} logical cores</strong></div>
+            <div class="metadata-row"><span>Memory</span><strong>${info.memory_available_gb} GB free of ${info.memory_total_gb} GB</strong></div>
+            <div class="metadata-row"><span>Device</span><strong>${info.torch?.cuda_available ? `CUDA · ${esc(info.torch.devices?.[0] || "")}` : "CPU (GPU optional)"}</strong></div>
+            <div class="metadata-row"><span>Data</span><strong>${esc(info.data_dir)}</strong></div>
+          </div>
+          <div class="readiness-list" style="margin-top:12px">${readinessHtml}</div>
+          <a class="text-button" href="#/settings" style="margin-top:10px">Diagnostics &amp; benchmark ${icon("arrow")}</a>
+        </div>
       </section>
     </div>
 
@@ -376,330 +553,308 @@ views.dashboard = async () => {
       <section class="panel">
         <div class="panel-header">
           <div><h2>Recent runs</h2><p>Latest training processes, including failures.</p></div>
-          <a class="text-button" href="#/monitoring">All runs ${icon("arrow")}</a>
+          <a class="text-button" href="#/stats">All runs ${icon("arrow")}</a>
         </div>
         ${runs.length ? `<div class="table-wrap"><table class="compact"><thead><tr><th>Run</th><th>Status</th><th>Steps</th><th>Created</th><th></th></tr></thead><tbody>${runRows}</tbody></table></div>` : emptyState("No runs yet", "Start a training run to populate this table.", "training")}
       </section>
 
       <section class="panel">
         <div class="panel-header">
-          <div><h2>Recent evaluations</h2><p>Deterministic matches against fixed opponents.</p></div>
-          <a class="text-button" href="#/evaluation">Details ${icon("arrow")}</a>
+          <div><h2>Recent evaluations</h2><p>Measured matches against fixed opponents.</p></div>
+          <a class="text-button" href="#/lab?tab=series">Details ${icon("arrow")}</a>
         </div>
-        ${evaluations.length ? `<div class="table-wrap"><table class="compact"><thead><tr><th>Model</th><th>Record</th><th>Win rate</th><th>Goals</th></tr></thead><tbody>${evaluationsHtml}</tbody></table></div>` : emptyState("No evaluations", "Evaluate a checkpoint to compare models honestly.", "evaluation")}
+        ${evaluations.length ? `<div class="table-wrap"><table class="compact"><thead><tr><th>Model</th><th>Record</th><th>Win rate</th><th>Goals</th></tr></thead><tbody>${evaluationsHtml}</tbody></table></div>` : emptyState("No evaluations", "Evaluate a checkpoint in the Bot Lab to compare models honestly.", "evaluation")}
       </section>
-    </div>`;
+    </div>
 
-  $$("[data-action]", $("#view")).forEach((button) => {
-    button.addEventListener("click", async () => {
-      const id = button.dataset.run;
-      try {
-        await api(`/api/runs/${encodeURIComponent(id)}/${button.dataset.action}`, { method: "POST" });
-        toast(`Run ${button.dataset.action === "stop" ? "stop requested" : "paused"}`);
-        setTimeout(render, 800);
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    });
-  });
+    <section class="panel" style="margin-top:18px">
+      <div class="panel-header">
+        <div><h2>Models</h2><p>Immutable checkpoints; the stable pointer is only moved explicitly.</p></div>
+        <a class="text-button" href="#/models">All checkpoints ${icon("arrow")}</a>
+      </div>
+      <div class="panel-body">
+        <div class="model-strip">
+          <div class="model-strip-item">
+            <span class="tiny-label">Checkpoints</span>
+            <strong>${models.length}</strong>
+            <small>${models.filter((m) => m.stable).length} stable · ${models.filter((m) => !m.stable).length} candidates</small>
+          </div>
+          <div class="model-strip-item">
+            <span class="tiny-label">Latest</span>
+            <strong>${newestModel ? esc(newestModel.id) : "—"}</strong>
+            <small>${newestModel ? `step ${fmtNumber(newestModel.step)} · ${esc((newestModel.created_at || "").replace("T", " ").slice(0, 19))}` : "train a run first"}</small>
+          </div>
+          <div class="model-strip-item">
+            <span class="tiny-label">Stable</span>
+            <strong>${stable ? esc(stable.id) : "none"}</strong>
+            <small>${stable ? `step ${fmtNumber(stable.step)}` : "promote one from Models"}</small>
+          </div>
+        </div>
+      </div>
+    </section>`;
+
+  wireRunControls($("#view"));
 };
 
+/** "2m 05s" style duration for the dashboard cards (short, no rounding to hours). */
+function fmtDurationShort(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m ${String(s).padStart(2, "0")}s`;
+  return `${s} s`;
+}
+
 // ---------------------------------------------------------------- training
+/**
+ * The training view is deliberately tiny: one budget number, an optional
+ * name, and a start button.  Everything else (PPO parameters, network,
+ * workers, device) keeps its backend default; the server computes the
+ * continuation plan and the machine-checked worker count, and the view shows
+ * them read-only.  Nothing starts without the confirmation dialog and the
+ * server-side confirm=true gate.
+ */
+const trainingState = {
+  plan: null, // last /api/runs/start-plan response
+  planTimer: null,
+};
+
+function clearTrainingState() {
+  if (trainingState.planTimer) {
+    clearTimeout(trainingState.planTimer);
+    trainingState.planTimer = null;
+  }
+}
+
+async function fetchStartPlan(totalSteps, runName) {
+  const body = { total_steps: Number(totalSteps) };
+  if (runName) body.run_name = runName;
+  return api("/api/runs/start-plan", { method: "POST", body: JSON.stringify(body) });
+}
+
+/**
+ * Render the continuation state exactly as the server computed it.
+ * ``will_resume`` → the run continues from that checkpoint; otherwise a new
+ * model is initialised and the reasons are shown, never hidden.
+ */
+function resumeStateHtml(plan) {
+  if (!plan) {
+    return `<div class="loading-state" style="min-height:48px"><span class="spinner"></span> Checking checkpoints…</div>`;
+  }
+  const resume = plan.resume || {};
+  if (plan.will_resume) {
+    return `<div class="callout success">
+      <div class="callout-copy">
+        <strong>Will continue from ${esc(resume.model_id || resume.checkpoint_path)}</strong>
+        <p>Step counter restored at ${fmtNumber(resume.restored_step)} · parent run ${esc(resume.parent_run || "unknown")}${resume.fallback_used ? " · fallback after a rejected checkpoint" : ""}.</p>
+        <div class="chip-row">${(resume.restores || []).map((item) => chip(item, "stable")).join("")}</div>
+        ${(resume.missing || []).length ? `<p class="subtle">Not stored in this checkpoint: ${resume.missing.map((item) => esc(item)).join(", ")}.</p>` : ""}
+        ${reasonList("Warnings", resume.warnings)}
+      </div>
+    </div>`;
+  }
+  return `<div class="callout ${resume.rejected && resume.rejected.length ? "warning" : ""}">
+    <div class="callout-copy">
+      <strong>Will start a new model</strong>
+      <p>No compatible checkpoint is available, so training starts from scratch with a fresh policy. Existing checkpoints are never touched.</p>
+      ${reasonList("Why", resume.warnings)}
+      ${(resume.rejected || []).length ? `<div class="table-wrap"><table class="compact">
+        <thead><tr><th>Rejected checkpoint</th><th>Step</th><th>Reason</th></tr></thead>
+        <tbody>${resume.rejected.map((item) => `<tr>
+          <td><strong>${esc(item.id || item.path || "?")}</strong></td>
+          <td>${fmtNumber(item.step)}</td>
+          <td>${(item.reasons || []).map((reason) => esc(reason)).join("<br>")}</td>
+        </tr>`).join("")}</tbody></table></div>` : ""}
+    </div>
+  </div>`;
+}
+
+/** The pre-start summary: what will actually run on this machine. */
+function startSummaryHtml(plan) {
+  if (!plan) return `<div class="metadata-row"><span>Summary</span><strong>computing…</strong></div>`;
+  const workers = plan.workers || {};
+  const clamped = workers.clamped ? ` <small>(requested ${workers.requested_workers}, clamped to fit this machine)</small>` : "";
+  return `
+    <div class="metadata-row"><span>Mode</span><strong>1v1 (soccer-1v1)</strong></div>
+    <div class="metadata-row"><span>Device</span><strong>${esc(String(plan.device).toUpperCase())} (automatic)</strong></div>
+    <div class="metadata-row"><span>Workers</span><strong>${fmtNumber(workers.recommended_workers)}${clamped}</strong></div>
+    <div class="metadata-row"><span>CPU / memory</span><strong>${workers.cpu_count} logical cores · ${Math.round((workers.memory_available_mb || 0) / 1024)} GB free</strong></div>
+    ${reasonList("Resource warnings", plan.warnings)}
+    ${(plan.notes || []).length ? `<p class="subtle">${plan.notes.map((n) => esc(n)).join(" ")}</p>` : ""}`;
+}
+
 views.training = async () => {
-  const [modes, defaults, runs, models] = await Promise.all([
-    api("/api/modes"),
+  const [defaults, runs] = await Promise.all([
     api("/api/config/defaults"),
-    api("/api/runs?limit=20"),
-    api("/api/models"),
+    api("/api/runs?limit=50"),
   ]);
-  app.cache.modes = modes;
+  const base = defaults.default_run || {};
+  const baseConfig = base.config || {};
   app.cache.defaults = defaults;
-  app.cache.models = models;
-  const config = defaults.training;
-  const params = new URLSearchParams(location.hash.split("?")[1] || "");
-  const resumeFrom = params.get("resume") || "";
-  const resumeMode = params.get("mode") || (resumeFrom ? "continue" : "fresh");
-  const modeOptions = modes
-    .map((mode) => `<option value="${mode.id}" ${mode.id === config.mode ? "selected" : ""}>${esc(mode.name)} (${mode.players} cars)</option>`)
-    .join("");
-  const presets = defaults.presets
-    .map(
-      (preset, index) => `<button class="preset-card" type="button" data-preset="${index}">
-        <span class="preset-top"><strong>${esc(preset.name)}</strong><span class="pill muted-pill">${esc(preset.config.mode)}</span></span>
-        <p>${esc(preset.description)}</p></button>`
-    )
-    .join("");
+
+  const stepSuggestions = [250_000, 1_000_000, 5_000_000];
+
+  const runRows = runs.length
+    ? runs
+        .map(
+          (run) => `<div class="run-row">
+            <div class="run-main">
+              <strong>${esc(run.name)}</strong>
+              <small>${esc(run.mode)} · step ${fmtNumber(run.step)} / ${fmtNumber(run.total_steps)}${run.parent_run ? ` · continues ${esc(run.parent_run)}` : ""}</small>
+            </div>
+            ${pill(run.status)}
+            ${runControlButtons(run)}
+          </div>`
+        )
+        .join("")
+    : "";
 
   $("#view").innerHTML = `
     <div class="page-heading">
-      <div><span class="eyebrow">Training engine</span><h1>New run</h1>
-      <p>PPO with parallel RocketSim environments. Configuration is validated by the server before anything starts.</p></div>
-      <div class="heading-actions"><a class="button ghost" href="#/monitoring">${icon("monitoring")} Existing runs</a></div>
+      <div><span class="eyebrow">1v1 training</span><h1>Training</h1>
+      <p>One setting matters to you: how far the run goes. Everything else is chosen automatically and stays in the backend configuration.</p></div>
+      <div class="heading-actions"><a class="button ghost" href="#/stats">${icon("chart")} History &amp; stats</a></div>
     </div>
 
     <div class="callout success">
       <div class="callout-copy"><strong>Starting a run is explicit</strong>
-      <p>Nothing starts, resumes or is scheduled by itself — not on launch, not after a crash, not when a checkpoint appears. Every run below starts only when you press the button and confirm.</p></div>
+      <p>Nothing starts, resumes or is scheduled by itself — not on launch, not after a crash, not when a checkpoint appears. The server refuses any start without your confirmation.</p></div>
     </div>
 
-    <section class="panel" style="margin-bottom:18px">
-      <div class="panel-header"><div><h2>Presets</h2><p>Staged recipes: ball control → 1v1 → teams → Heatseeker.</p></div></div>
-      <div class="preset-grid" style="padding:0 20px 18px">${presets}</div>
-    </section>
+    <div class="training-layout">
+      <form id="training-form" class="panel training-form" novalidate>
+        <div class="panel-header"><div><h2>New 1v1 run</h2><p>The automatic configuration is validated by the server before anything starts.</p></div><span class="state-chip stable">1v1</span></div>
 
-    <form id="training-form" class="config-layout">
-      <section class="panel">
-        <div class="panel-header"><div><h2>Run configuration</h2><p>Values map 1:1 to the server-side schema.</p></div><span class="state-chip" id="form-mode-chip">${esc(config.mode)}</span></div>
+        <div class="panel-body">
+          <label class="field full">
+            <span>Training steps</span>
+            <input name="total_steps" id="total-steps" type="number" min="2000" max="5000000000" step="1000" value="${baseConfig.total_steps ?? 200000}" required />
+            <small>Budget across all workers. More steps train longer; checkpoints are written every 10 iterations, so progress is never lost.</small>
+          </label>
+          <div class="step-suggestions" aria-label="Suggested budgets">
+            ${stepSuggestions.map((s) => `<button type="button" class="button ghost step-suggestion" data-steps="${s}">${fmtNumber(s)}</button>`).join("")}
+          </div>
+          <label class="field full">
+            <span>Run name <em>(optional)</em></span>
+            <input name="run_name" id="run-name" type="text" maxlength="80" placeholder="e.g. 1v1 baseline" value="" />
+            <small>Used in stats and reports; defaults to “1v1 baseline”.</small>
+          </label>
+        </div>
 
         <div class="resume-block">
           <div class="resume-head">
-            <div><h3>Continuation</h3><p>Pick explicitly how this run starts. The plan is validated against the checkpoint before anything is restored.</p></div>
-            <span class="state-chip" id="resume-chip">${esc(resumeMode)}</span>
+            <div><h3>Continuation — automatic</h3>
+            <p>The latest valid, compatible checkpoint of this 1v1 lineage is detected and continued; otherwise a new model is initialised. Nothing is overwritten.</p></div>
+            <span class="state-chip" id="resume-chip">checking…</span>
           </div>
-          <div class="form-grid">
-            <label class="field"><span>Start from</span>
-              <select name="resume_mode">
-                <option value="fresh" ${resumeMode === "fresh" ? "selected" : ""}>Fresh — new random policy, nothing restored</option>
-                <option value="continue" ${resumeMode === "continue" ? "selected" : ""}>Continue — weights, optimiser, step, RNG, curriculum</option>
-                <option value="transfer" ${resumeMode === "transfer" ? "selected" : ""}>Transfer — weights only, step counter restarts at 0</option>
-              </select>
-              <small>Continue keeps the step budget; transfer fine-tunes an existing policy on a new task.</small>
-            </label>
-            <label class="field"><span>Checkpoint</span>
-              <select name="resume_from" ${models.length ? "" : "disabled"}>
-                <option value="">Automatic — newest valid, compatible checkpoint of this lineage</option>
-                ${models.map((model) => `<option value="${esc(model.id)}" ${model.id === resumeFrom ? "selected" : ""}>${esc(model.id)} · step ${fmtNumber(model.step)} · ${esc(model.mode || "?")}${model.stable ? " · stable" : ""}${model.best ? " · best" : ""}</option>`).join("")}
-              </select>
-              <small id="resume-from-hint">${models.length ? "Automatic selection refuses an incompatible checkpoint instead of starting from scratch." : "No checkpoints exist yet, so only fresh training is possible."}</small>
-            </label>
-          </div>
-          <div class="resume-actions">
-            <button class="button ghost" type="button" id="plan-button">${icon("shield")} Preview what would be restored</button>
-            <label class="field approval-check inline"><input type="checkbox" name="allow_concurrent" /><span>Allow a second run next to an active one (they share the CPU)</span></label>
-          </div>
-          <div id="resume-plan">${models.length || resumeMode !== "fresh" ? "" : `<p class="subtle">Fresh training ignores every checkpoint.</p>`}</div>
+          <div id="resume-state">${resumeStateHtml(null)}</div>
         </div>
 
-        <div class="form-grid">
-          <label class="field full"><span>Run name</span><input name="run_name" value="${esc(config.run_name)}" maxlength="80" required /></label>
-          <label class="field"><span>Game mode</span><select name="mode">${modeOptions}</select></label>
-          <label class="field"><span>Observation layout</span><select name="obs_version">${[[2, "v2 · field frame (198)"], [1, "v1 · legacy (190)"]].map(([value, label]) => `<option value="${value}" ${Number(config.obs_version) === value ? "selected" : ""}>${label}</option>`).join("")}</select><small>v1 only for older checkpoints and comparisons.</small></label>
-          <label class="field"><span>Device</span><select name="device">${["auto", "cpu", "cuda", "mps"].map((d) => `<option ${d === config.device ? "selected" : ""}>${d}</option>`).join("")}</select></label>
-          <label class="field"><span>Environment workers</span><input name="n_workers" type="number" min="1" max="32" value="${config.n_workers}" /><small>One RocketSim arena per worker process.</small></label>
-          <label class="field"><span>Total environment steps</span><input name="total_steps" type="number" min="2000" step="2000" value="${config.total_steps}" /><small>Budget across all workers.</small></label>
-          <label class="field"><span>Rollout steps per worker</span><input name="rollout_steps" type="number" min="32" max="8192" value="${config.rollout_steps}" /></label>
-          <label class="field"><span>Episode limit (seconds)</span><input name="episode_seconds" type="number" min="5" max="600" value="${config.episode_seconds}" /><small>Episodes also end on a goal.</small></label>
-          <label class="field"><span>Learning rate</span><input name="learning_rate" type="number" step="0.00001" min="0.000001" value="${config.learning_rate}" /></label>
-          <label class="field"><span>Entropy coefficient</span><input name="entropy_coef" type="number" step="0.001" min="0" value="${config.entropy_coef}" /></label>
-          <label class="field"><span>Gamma</span><input name="gamma" type="number" step="0.001" min="0.8" max="0.9999" value="${config.gamma}" /></label>
-          <label class="field"><span>Opponent</span><select name="opponent">${["chase", "random", "idle"].map((o) => `<option ${o === config.opponent ? "selected" : ""}>${o}</option>`).join("")}</select><small>Ignored when self-play or the curriculum selects the opponent.</small></label>
-          <label class="field"><span>Checkpoint every N iterations</span><input name="checkpoint_interval" type="number" min="1" max="10000" value="${config.checkpoint_interval}" /></label>
-          <label class="field"><span>Seed</span><input name="seed" type="number" value="${config.seed}" /><small>Controls kickoffs and action sampling.</small></label>
-          <label class="field"><span>Evaluation every N iterations</span><input name="eval_interval" type="number" min="0" max="100000" value="${config.eval_interval}" /><small>0 disables periodic evaluation.</small></label>
-          <label class="field"><span>Evaluation games</span><input name="eval_games" type="number" min="1" max="100" value="${config.eval_games}" /><small>Fewer games mean a wider confidence interval.</small></label>
-          <label class="field"><span>Evaluation match seconds</span><input name="eval_match_seconds" type="number" min="5" max="600" value="${config.eval_match_seconds}" /></label>
-          <label class="field"><span>Evaluation opponent</span><select name="eval_opponent">${["chase", "random", "idle", "self"].map((o) => `<option ${o === config.eval_opponent ? "selected" : ""}>${o}</option>`).join("")}</select><small>idle/random are diagnostic baselines, not strength measures.</small></label>
-          <label class="field"><span>Evaluation suite (optional)</span><input name="eval_opponents" value="${esc((config.eval_opponents || []).join(","))}" placeholder="chase,mixed,self" /><small>Comma-separated. Strength opponents are reported separately from diagnostics.</small></label>
-          <label class="field"><span>Evaluation sides</span><select name="eval_sides">${[["blue", "blue only"], ["orange", "orange only"], ["blue,orange", "both (side-balanced)"]].map(([value, label]) => `<option value="${value}" ${(config.eval_sides || ["blue"]).join(",") === value ? "selected" : ""}>${label}</option>`).join("")}</select><small>Both sides alternate per game and mirror the observation.</small></label>
-          <label class="field full approval-check"><input type="checkbox" name="eval_mirror" ${config.eval_mirror === false ? "" : "checked"} /><span>Mirror the observation when the policy plays orange (car-frame features, verified equivalent).</span></label>
-          <label class="field full approval-check"><input type="checkbox" name="eval_before" ${config.eval_before === false ? "" : "checked"} /><span>Measure a baseline evaluation before training so before/after is comparable.</span></label>
-          <label class="field full approval-check"><input type="checkbox" name="side_randomization" ${config.side_randomization ? "checked" : ""} /><span>Randomise which side the learner plays during training rollouts.</span></label>
-          <label class="field full approval-check"><input type="checkbox" name="self_play" ${config.self_play ? "checked" : ""} /><span>Self-play with an opponent pool of frozen snapshots (PFSP-weighted Elo pool).</span></label>
-          <label class="field full approval-check"><input type="checkbox" name="curriculum" ${config.curriculum ? "checked" : ""} /><span>Curriculum: promote through measured stage targets (idle → chaser → mixed → self-play).</span></label>
+        <div class="resume-block" style="margin-top:10px">
+          <div class="resume-head">
+            <div><h3>Before it starts</h3>
+            <p>Computed for this machine by the server; the same values are logged with the run.</p></div>
+          </div>
+          <div class="metadata-list" id="start-summary">${startSummaryHtml(null)}</div>
         </div>
-        <details class="advanced-config">
-          <summary>PPO details</summary>
-          <div class="form-grid" style="padding:12px 0 0">
-            <label class="field"><span>Epochs per rollout</span><input name="epochs" type="number" min="1" max="30" value="${config.epochs}" /></label>
-            <label class="field"><span>Minibatch size</span><input name="minibatch_size" type="number" min="64" max="65536" value="${config.minibatch_size}" /></label>
-            <label class="field"><span>Clip coefficient</span><input name="clip_coef" type="number" step="0.01" min="0.01" max="1" value="${config.clip_coef}" /></label>
-            <label class="field"><span>Value clip</span><input name="clip_value" type="number" step="0.01" min="0" max="10" value="${config.clip_value}" /><small>0 disables value clipping.</small></label>
-            <label class="field"><span>Target KL</span><input name="target_kl" type="number" step="0.005" min="0" max="10" value="${config.target_kl}" /><small>Early-stop threshold; 0 disables it.</small></label>
-            <label class="field"><span>GAE lambda</span><input name="gae_lambda" type="number" step="0.01" min="0.8" max="0.999" value="${config.gae_lambda}" /></label>
-            <label class="field"><span>Value coefficient</span><input name="value_coef" type="number" step="0.05" min="0" max="10" value="${config.value_coef}" /></label>
-            <label class="field"><span>Max gradient norm</span><input name="max_grad_norm" type="number" step="0.1" min="0.1" max="10" value="${config.max_grad_norm}" /></label>
-            <label class="field"><span>Tick skip</span><input name="tick_skip" type="number" min="1" max="16" value="${config.tick_skip}" /><small>Simulator ticks per decision.</small></label>
-            <label class="field"><span>Pool snapshot every N iterations</span><input name="snapshot_interval" type="number" min="1" max="1000" value="${config.snapshot_interval}" /><small>Frozen copies for self-play.</small></label>
-            <label class="field"><span>Store pool weights in checkpoints</span><select name="league_states">${[[true, "yes — a resume keeps the real opponents"], [false, "no — ratings only (smaller files)"]].map(([value, label]) => `<option value="${value}" ${Boolean(config.league_states) === value ? "selected" : ""}>${label}</option>`).join("")}</select><small>About one policy size per snapshot (max 8).</small></label>
-            <label class="field"><span>Keep checkpoints</span><input name="keep_checkpoints" type="number" min="1" max="100" value="${config.keep_checkpoints}" /></label>
-          </div>
-        </details>
-        <details class="advanced-config">
-          <summary>Reward weights</summary>
-          <div class="form-grid" style="padding:12px 0 0">
-            ${["goal", "concede", "touch", "progress", "alignment", "approach", "boost", "defense", "bump"]
-              .map((key) => `<label class="field"><span>${key}</span><input name="reward_${key}" type="number" step="0.01" min="0" value="${config.reward[key] ?? 0}" /></label>`)
-              .join("")}
-          </div>
-          <p class="subtle">Goals dominate; progress and alignment are potential-based shaping. Reward components are logged with the run.</p>
-        </details>
+
         <div class="config-actions">
-          <button class="button ghost" type="button" id="validate-button">${icon("shield")} Validate only</button>
-          <button class="button primary" type="submit">${icon("play")} Start training</button>
+          <button class="button primary" type="submit" id="start-button">${icon("play")} Start training</button>
         </div>
-      </section>
+      </form>
 
       <section class="panel">
         <div class="panel-header"><div><h2>Runs</h2><p>Pause or stop without losing the last checkpoint.</p></div></div>
-        ${runs.length ? `<div class="run-list">
-          ${runs.map((run) => `<div class="run-row">
-            <div class="run-main">
-              <strong>${esc(run.name)}</strong>
-              <small>${esc(run.mode)} · step ${fmtNumber(run.step)}</small>
-            </div>
-            ${pill(run.status)}
-            <div class="run-actions">
-              <a class="button ghost" href="#/monitoring?run=${encodeURIComponent(run.id)}" title="Open telemetry">${icon("chart")}</a>
-              <button class="button ghost" data-run-action="pause" data-run="${esc(run.id)}" ${["running", "starting"].includes(run.status) ? "" : "disabled"} title="Pause">${icon("pause")}</button>
-              <button class="button danger" data-run-action="stop" data-run="${esc(run.id)}" ${["running", "starting", "paused"].includes(run.status) ? "" : "disabled"} title="Stop">${icon("stop")}</button>
-            </div>
-          </div>`).join("")}
-        </div>` : emptyState("No runs yet", "Your first configuration is on the left.")}
+        ${runRows ? `<div class="run-list">${runRows}</div>` : emptyState("No runs yet", "Your first run starts from the form on the left.")}
       </section>
-    </form>`;
+    </div>`;
 
-  const form = $("#training-form");
-  form.elements.mode.addEventListener("change", () => {
-    $("#form-mode-chip").textContent = form.elements.mode.value;
-  });
-  $$("[data-preset]").forEach((button) => {
-    button.addEventListener("click", () => fillForm(form, defaults.presets[Number(button.dataset.preset)].config));
-  });
-  $$("[data-run-action]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      try {
-        await api(`/api/runs/${encodeURIComponent(button.dataset.run)}/${button.dataset.runAction}`, { method: "POST" });
-        toast(`Run ${button.dataset.runAction === "stop" ? "stopping" : "pause requested"}`);
-        setTimeout(render, 700);
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    });
-  });
+  wireRunControls($("#view"));
 
-  const configFromForm = () => {
-    const data = new FormData(form);
-    const reward = {};
-    Object.keys(config.reward).forEach((key) => {
-      const value = data.get(`reward_${key}`);
-      if (value !== null && value !== "") reward[key] = Number(value);
-    });
-    return {
-      run_name: String(data.get("run_name") || "").trim() || "training run",
-      mode: data.get("mode"),
-      device: data.get("device"),
-      n_workers: Number(data.get("n_workers")),
-      total_steps: Number(data.get("total_steps")),
-      rollout_steps: Number(data.get("rollout_steps")),
-      episode_seconds: Number(data.get("episode_seconds")),
-      learning_rate: Number(data.get("learning_rate")),
-      entropy_coef: Number(data.get("entropy_coef")),
-      gamma: Number(data.get("gamma")),
-      opponent: data.get("opponent"),
-      checkpoint_interval: Number(data.get("checkpoint_interval")),
-      seed: Number(data.get("seed")),
-      epochs: Number(data.get("epochs")),
-      minibatch_size: Number(data.get("minibatch_size")),
-      clip_coef: Number(data.get("clip_coef")),
-      gae_lambda: Number(data.get("gae_lambda")),
-      tick_skip: Number(data.get("tick_skip")),
-      keep_checkpoints: Number(data.get("keep_checkpoints")),
-      obs_version: Number(data.get("obs_version")),
-      clip_value: Number(data.get("clip_value")),
-      target_kl: Number(data.get("target_kl")),
-      value_coef: Number(data.get("value_coef")),
-      max_grad_norm: Number(data.get("max_grad_norm")),
-      snapshot_interval: Number(data.get("snapshot_interval")),
-      league_states: data.get("league_states") === "true",
-      eval_interval: Number(data.get("eval_interval")),
-      eval_games: Number(data.get("eval_games")),
-      eval_match_seconds: Number(data.get("eval_match_seconds")),
-      eval_opponent: data.get("eval_opponent"),
-      eval_opponents: splitList(data.get("eval_opponents")),
-      eval_sides: splitList(data.get("eval_sides")).length ? splitList(data.get("eval_sides")) : ["blue"],
-      eval_mirror: data.get("eval_mirror") === "on",
-      eval_before: data.get("eval_before") === "on",
-      side_randomization: data.get("side_randomization") === "on",
-      self_play: data.get("self_play") === "on",
-      curriculum: data.get("curriculum") === "on",
-      reward,
-    };
-  };
+  const stepsInput = $("#total-steps");
+  const nameInput = $("#run-name");
 
-  const resumeFromForm = () => {
-    const data = new FormData(form);
-    const mode = data.get("resume_mode") || "fresh";
-    const reference = mode === "fresh" ? "" : String(data.get("resume_from") || "");
-    return { mode, reference, allowConcurrent: data.get("allow_concurrent") === "on" };
-  };
-
-  $("#validate-button").addEventListener("click", async () => {
-    try {
-      const result = await api("/api/config/validate", { method: "POST", body: JSON.stringify(configFromForm()) });
-      const warning = result.warnings && result.warnings.length ? ` — ${result.warnings[0]}` : "";
-      toast(`Configuration valid · ${result.config.mode} · ${fmtNumber(result.config.total_steps)} steps${warning}`);
-    } catch (error) {
-      toast(error.message, "error");
+  const applyPlan = (plan) => {
+    trainingState.plan = plan;
+    const state = $("#resume-state");
+    const summary = $("#start-summary");
+    const chipNode = $("#resume-chip");
+    if (state) state.innerHTML = resumeStateHtml(plan);
+    if (summary) summary.innerHTML = startSummaryHtml(plan);
+    if (chipNode) {
+      chipNode.textContent = plan && plan.will_resume ? "will continue" : plan ? "new model" : "checking…";
+      chipNode.className = `state-chip ${plan && plan.will_resume ? "stable" : ""}`;
     }
-  });
+  };
 
-  const planPreview = async () => {
-    const node = $("#resume-plan");
-    const { mode, reference } = resumeFromForm();
-    if (mode === "fresh") {
-      node.innerHTML = `<p class="subtle">Fresh training: no checkpoint is read, no state is restored. Existing checkpoints stay untouched.</p>`;
+  const refreshPlan = (immediate = false) => {
+    clearTrainingState();
+    if (immediate) {
+      applyPlan(null);
+      fetchStartPlan(stepsInput.value, nameInput.value)
+        .then(applyPlan)
+        .catch((error) => {
+          applyPlan(null);
+          toast(error.message, "error");
+        });
       return;
     }
-    node.innerHTML = `<div class="loading-state" style="min-height:60px"><span class="spinner"></span> Validating checkpoints…</div>`;
-    try {
-      const plan = await api("/api/resume/plan", {
-        method: "POST",
-        body: JSON.stringify({ config: configFromForm(), mode, checkpoint: reference || null }),
-      });
-      node.innerHTML = renderResumePlan(plan);
-    } catch (error) {
-      node.innerHTML = `<div class="callout error"><div class="callout-copy"><strong>Plan failed</strong><p>${esc(error.message)}</p></div></div>`;
-    }
+    // debounce: typing a new budget should not hammer the planning endpoint
+    trainingState.planTimer = setTimeout(() => {
+      fetchStartPlan(stepsInput.value, nameInput.value)
+        .then(applyPlan)
+        .catch(() => { /* keep the last plan; the start is validated anyway */ });
+    }, 350);
   };
 
-  $("#plan-button").addEventListener("click", planPreview);
-  form.elements.resume_mode.addEventListener("change", () => {
-    const { mode } = resumeFromForm();
-    $("#resume-chip").textContent = mode;
-    form.elements.resume_from.disabled = mode === "fresh" || !models.length;
-    planPreview();
+  $$(".step-suggestion").forEach((button) => {
+    button.addEventListener("click", () => {
+      stepsInput.value = button.dataset.steps;
+      refreshPlan();
+    });
   });
-  form.elements.resume_from.addEventListener("change", planPreview);
-  if (resumeMode !== "fresh") planPreview();
+  stepsInput.addEventListener("input", () => refreshPlan());
+  nameInput.addEventListener("input", () => refreshPlan());
+  refreshPlan(true);
 
-  form.addEventListener("submit", async (event) => {
+  $("#training-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const submit = form.querySelector('button[type="submit"]');
-    const payload = configFromForm();
-    const { mode, reference, allowConcurrent } = resumeFromForm();
-    if (mode !== "fresh") {
-      payload.resume_mode = mode;
-      if (reference) payload.resume_from = reference;
-    } else {
-      payload.resume_mode = "fresh";
+    const submit = $("#start-button");
+    const totalSteps = Number(stepsInput.value);
+    if (!Number.isFinite(totalSteps) || totalSteps < 2000) {
+      toast("Training steps must be at least 2,000.", "error");
+      stepsInput.focus();
+      return;
     }
-    payload.allow_concurrent = allowConcurrent;
-    // the server refuses a start that was not confirmed; this flag is only
-    // set after the user accepted the dialog below
-    payload.confirm = true;
+    const runName = nameInput.value.trim();
+    const plan = trainingState.plan;
+    const resuming = Boolean(plan && plan.will_resume);
     const summary = [
-      `Mode ${payload.mode} · ${fmtNumber(payload.total_steps)} steps · ${payload.n_workers} worker(s) · device ${payload.device}.`,
-      mode === "fresh"
-        ? "Fresh training: no checkpoint is restored."
-        : `${mode === "continue" ? "Continue" : "Transfer"} from ${reference || "the newest compatible checkpoint"}.`,
-      allowConcurrent ? "Concurrent runs are allowed; they will compete for CPU." : "",
+      `1v1 · ${fmtNumber(totalSteps)} environment steps.`,
+      resuming
+        ? `Will continue from ${plan.resume.model_id} at step ${fmtNumber(plan.resume.restored_step)} (weights, optimiser and step counter are restored).`
+        : "Will start a new model — no compatible checkpoint is available.",
+      `Device ${String(plan?.device || "auto")} · ${fmtNumber(plan?.workers?.recommended_workers)} worker(s) on this machine.`,
       "Training starts immediately and keeps running until it is stopped or the budget is reached.",
-    ].filter(Boolean).join(" ");
-    confirmAction(`Start ${mode} training`, summary, async () => {
+    ].join(" ");
+    confirmAction("Start 1v1 training", summary, async () => {
       submit.disabled = true;
       try {
+        const payload = {
+          total_steps: totalSteps,
+          mode: "soccer-1v1",
+          resume_mode: resuming ? "continue" : "fresh",
+          allow_concurrent: false,
+        };
+        // the server refuses a start that was not confirmed; this flag is only
+        // set after the user accepted the dialog above
+        payload.confirm = true;
+        if (runName) payload.run_name = runName;
         const run = await api("/api/runs", { method: "POST", body: JSON.stringify(payload) });
-        toast(`Run ${run.id} started (${mode})`);
+        toast(`Run ${run.id} started (${payload.resume_mode})`);
         location.hash = `#/monitoring?run=${encodeURIComponent(run.id)}`;
       } catch (error) {
         toast(error.message, "error");
@@ -707,79 +862,13 @@ views.training = async () => {
       }
     });
   });
+
+  app.cleanup = () => clearTrainingState();
 };
-
-function splitList(value) {
-  return String(value ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-/** Render a resume plan exactly as the server computed it — no invented state. */
-function renderResumePlan(plan) {
-  if (!plan) return "";
-  if (plan.mode === "fresh" || !plan.will_resume) {
-    return `<div class="callout ${plan.explicit_unavailable ? "error" : "warning"}">
-      <div class="callout-copy">
-        <strong>${plan.will_resume ? "Resume planned" : plan.explicit_unavailable ? "This checkpoint cannot be used" : "Nothing to resume from"}</strong>
-        <p>${esc(plan.explicit_unavailable ? "The requested checkpoint was rejected. No other checkpoint is substituted for an explicit request." : "Training would start from scratch with a fresh policy.")}</p>
-        ${reasonList("Warnings", plan.warnings)}
-        ${(plan.rejected || []).length ? `<div class="table-wrap"><table class="compact">
-          <thead><tr><th>Rejected checkpoint</th><th>Step</th><th>Reason</th></tr></thead>
-          <tbody>${plan.rejected.map((item) => `<tr>
-            <td><strong>${esc(item.id || item.absolute_path || "?")}</strong></td>
-            <td>${fmtNumber(item.step)}</td>
-            <td>${(item.reasons || []).map((reason) => esc(reason)).join("<br>")}</td>
-          </tr>`).join("")}</tbody></table></div>` : ""}
-      </div></div>`;
-  }
-  return `<div class="callout success">
-    <div class="callout-copy">
-      <strong>${plan.mode === "transfer" ? "Transfer from" : "Continue from"} ${esc(plan.model_id || plan.checkpoint_path)}</strong>
-      <p>Step counter ${plan.mode === "transfer" ? `restarts at 0 (parent was at ${fmtNumber(plan.parent_step)})` : `restored at ${fmtNumber(plan.restored_step)}`} · parent run ${esc(plan.parent_run || "unknown")}${plan.fallback_used ? " · fallback after a rejected checkpoint" : ""}.</p>
-      <div class="chip-row">${(plan.restores || []).map((item) => chip(item, "stable")).join("")}</div>
-      ${(plan.missing || []).length ? `<p class="subtle">Not stored in this checkpoint: ${plan.missing.map((item) => esc(item)).join(", ")}.</p>` : ""}
-      ${reasonList("Warnings", plan.warnings)}
-      ${(plan.overrides || []).length ? `<div class="table-wrap"><table class="compact">
-        <thead><tr><th>Config field</th><th>Checkpoint</th><th>This form</th><th>Used</th></tr></thead>
-        <tbody>${plan.overrides.map((item) => `<tr>
-          <td><strong>${esc(item.field)}</strong></td>
-          <td>${esc(JSON.stringify(item.checkpoint))}</td>
-          <td>${esc(JSON.stringify(item.requested))}</td>
-          <td>${item.error ? `<span class="state-chip rejected">${esc(item.error)}</span>` : esc(JSON.stringify(item.used))}</td>
-        </tr>`).join("")}</tbody></table></div>
-        <p class="subtle">Inherited from the checkpoint: ${(plan.inherited || []).map((name) => esc(name)).join(", ") || "nothing"}.</p>` : ""}
-    </div></div>`;
-}
-
-function fillForm(form, config) {
-  const assign = (name, value) => {
-    const field = form.elements[name];
-    if (!field) return;
-    if (field.type === "checkbox") field.checked = Boolean(value);
-    else field.value = value ?? "";
-  };
-  Object.entries(config).forEach(([key, value]) => {
-    if (key === "reward") {
-      Object.entries(value).forEach(([rewardKey, rewardValue]) => assign(`reward_${rewardKey}`, rewardValue));
-    } else if (key === "eval_sides" || key === "eval_opponents") {
-      assign(key, Array.isArray(value) ? value.join(",") : value);
-    } else if (key === "league_states") {
-      assign(key, String(Boolean(value)));
-    } else if (key === "resume_mode" || key === "resume_from" || key === "allow_concurrent") {
-      /* continuation is chosen by the user, never by a preset */
-    } else if (key !== "policy") {
-      assign(key, value);
-    }
-  });
-  $("#form-mode-chip").textContent = config.mode;
-  toast("Preset loaded — review the values, then start");
-}
 
 // ---------------------------------------------------------------- monitoring
 views.monitoring = async () => {
-  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const params = routeQuery();
   const runs = await api("/api/runs?limit=50");
   if (!runs.length) {
     $("#view").innerHTML = `
@@ -813,7 +902,7 @@ views.monitoring = async () => {
           ${runs.map((run) => `<option value="${esc(run.id)}" ${run.id === runId ? "selected" : ""}>${esc(run.name)} · ${esc(run.id)}</option>`).join("")}
         </select>
         <a class="button ghost" href="#/report?run=${encodeURIComponent(runId)}">${icon("file")} Report</a>
-        <a class="button ghost" href="#/reports">${icon("chart")} All reports</a>
+        <a class="button ghost" href="#/stats">${icon("chart")} All stats</a>
       </div>
     </div>
 
@@ -1178,103 +1267,6 @@ function renderEpisodes(episodes) {
     </div></section>`;
 }
 
-views.reports = async () => {
-  const [reports, runs] = await Promise.all([
-    api("/api/reports?limit=100"),
-    api("/api/runs?limit=100"),
-  ]);
-  const byRun = {};
-  reports.forEach((item) => { byRun[item.run_id] = item; });
-  const rows = runs.map((run) => ({ run, report: byRun[run.id] }));
-
-  $("#view").innerHTML = `
-    <div class="page-heading">
-      <div><span class="eyebrow">Statistics</span><h1>Run reports</h1>
-      <p>A report is written for every run that finishes, is stopped or fails — including the values that could not be measured, labelled as unavailable.</p></div>
-      <div class="heading-actions"><a class="button ghost" href="#/training">${icon("training")} New run</a></div>
-    </div>
-
-    ${rows.length ? `<section class="panel">
-      <div class="panel-header"><div><h2>Runs</h2><p>${reports.length} report(s) stored for ${runs.length} run(s).</p></div></div>
-      <div class="table-wrap"><table>
-        <thead><tr><th></th><th>Run</th><th>Status</th><th>Mode</th><th>Steps</th><th>Duration</th><th>Steps / s</th><th>Final eval</th><th>Checkpoint</th><th></th></tr></thead>
-        <tbody>${rows.map(({ run, report }) => {
-          const summary = (report && report.summary) || {};
-          const steps = summary.steps || {};
-          const after = (summary.evaluation || {}).after || {};
-          const checkpoint = summary.final_checkpoint || {};
-          return `<tr>
-            <td><input type="checkbox" class="compare-check" value="${esc(run.id)}" /></td>
-            <td><strong>${esc(run.name)}</strong><small>${esc(run.id)}${run.parent_run ? ` · continues ${esc(run.parent_run)}` : ""}</small></td>
-            <td>${pill(run.status)}</td>
-            <td>${esc(run.mode)}</td>
-            <td class="table-strong">${fmtNumber(steps.completed ?? run.step)}<small> of ${fmtNumber(steps.target ?? run.total_steps)}</small></td>
-            <td>${report ? fmtDuration(summary.duration_s) : `<span class="muted">no report</span>`}</td>
-            <td>${report ? num(summary.steps_per_second, 1) : "—"}</td>
-            <td>${after && after.available !== false ? `${pct(after.win_rate)} <small>vs ${esc(after.opponent || "?")}</small>` : `<span class="muted">${esc((after && after.reason) || "not measured")}</span>`}</td>
-            <td>${checkpoint && checkpoint.available !== false ? (checkpoint.valid ? chip("valid", "stable") : chip("invalid", "rejected")) : `<span class="muted">none</span>`}</td>
-            <td class="actions">
-              ${report
-                ? `<a class="button ghost" href="#/report?run=${encodeURIComponent(run.id)}">${icon("file")} Report</a>`
-                : `<button class="button ghost" data-rebuild="${esc(run.id)}">${icon("refresh")} Rebuild</button>`}
-              <a class="button ghost" href="#/monitoring?run=${encodeURIComponent(run.id)}" title="Telemetry">${icon("chart")}</a>
-            </td></tr>`;
-        }).join("")}</tbody>
-      </table></div>
-      <div class="compare-picker">
-        <button class="button secondary" id="compare-button">${icon("chart")} Compare selected</button>
-        <span class="subtle">Tick two or more runs. Runs with different modes or observation layouts are flagged as not comparable.</span>
-      </div>
-      <div id="compare-result" style="padding:0 20px 18px"></div>
-    </section>` : emptyState("No runs yet", "Start a training run; its report appears here when it ends, is stopped or fails.", "file")}
-
-    <section class="panel" style="margin-top:18px">
-      <div class="panel-header"><div><h2>What a report contains</h2><p>Everything below comes from the run itself.</p></div></div>
-      <div class="panel-body"><ul class="guide-list">
-        <li>Steps at start and end, steps completed in this run, target and progress.</li>
-        <li>Wall-clock duration and two throughput numbers: wall-clock steps/s and per-iteration steps/s (collect + update only).</li>
-        <li>Device, worker count, platform and torch threads; the full configuration.</li>
-        <li>Resume mode, parent run, parent checkpoint and the restored step.</li>
-        <li>PPO losses, KL, entropy, clip fraction, explained variance and gradient norm (first/last/mean/min/max).</li>
-        <li>Where the time went: collection, simulation, inference, PPO update, evaluation, checkpointing.</li>
-        <li>Reward components, episode rewards and lengths, goals and truncations.</li>
-        <li>Before/after evaluation with opponent, games, record, goals, win rate, 95 % CI and the exact protocol.</li>
-        <li>Final checkpoint path, validity check and warnings; incomplete evaluations are listed, never hidden.</li>
-        <li>Historical curves and comparisons with other runs that used the same mode and observation layout.</li>
-      </ul></div>
-    </section>`;
-
-  $$("[data-rebuild]").forEach((button) => button.addEventListener("click", async () => {
-    button.disabled = true;
-    try {
-      await api(`/api/runs/${encodeURIComponent(button.dataset.rebuild)}/report?rebuild=true`);
-      toast("Report rebuilt from the recorded metrics");
-      location.hash = `#/report?run=${encodeURIComponent(button.dataset.rebuild)}`;
-    } catch (error) {
-      toast(error.message, "error");
-      button.disabled = false;
-    }
-  }));
-
-  $("#compare-button")?.addEventListener("click", async () => {
-    const selected = $$(".compare-check").filter((box) => box.checked).map((box) => box.value);
-    const node = $("#compare-result");
-    if (selected.length < 2) {
-      toast("Select at least two runs to compare", "error");
-      return;
-    }
-    node.innerHTML = `<div class="loading-state" style="min-height:60px"><span class="spinner"></span> Comparing…</div>`;
-    try {
-      node.innerHTML = renderComparison(await api("/api/runs/compare", {
-        method: "POST",
-        body: JSON.stringify({ run_ids: selected }),
-      }));
-    } catch (error) {
-      node.innerHTML = `<div class="callout error"><div class="callout-copy"><strong>Comparison failed</strong><p>${esc(error.message)}</p></div></div>`;
-    }
-  });
-};
-
 function renderComparison(payload) {
   const runs = payload.runs || [];
   return `<div class="callout ${payload.comparable ? "success" : "warning"}" style="margin:0 0 12px">
@@ -1297,7 +1289,7 @@ function renderComparison(payload) {
 }
 
 views.report = async () => {
-  const params = new URLSearchParams(location.hash.split("?")[1] || "");
+  const params = routeQuery();
   const runs = await api("/api/runs?limit=100");
   if (!runs.length) {
     $("#view").innerHTML = `${emptyState("No runs yet", "A report is written when a training run ends.", "file")}`;
@@ -1335,6 +1327,7 @@ views.report = async () => {
           ${runs.map((run) => `<option value="${esc(run.id)}" ${run.id === runId ? "selected" : ""}>${esc(run.name)} · ${esc(run.id)}</option>`).join("")}
         </select>
         <a class="button ghost" href="#/monitoring?run=${encodeURIComponent(runId)}">${icon("chart")} Telemetry</a>
+        <a class="button ghost" href="#/stats">${icon("chart")} Stats</a>
         <a class="button ghost" href="/api/runs/${encodeURIComponent(runId)}/report" target="_blank" rel="noopener">${icon("file")} JSON</a>
       </div>
     </div>
@@ -1472,7 +1465,7 @@ views.report = async () => {
         ${(checkpoint.validation && checkpoint.validation.reasons && checkpoint.validation.reasons.length)
           ? reasonList("Validation findings", checkpoint.validation.reasons)
           : `<p class="subtle">Weights are finite and match the recorded architecture.</p>`}
-        ${checkpoint.model_id ? `<a class="button ghost" href="#/training?resume=${encodeURIComponent(checkpoint.model_id)}&mode=continue">${icon("training")} Continue from this checkpoint</a>` : ""}
+        <a class="button ghost" href="#/training">${icon("training")} Continue training</a>
       </div>
     </section>` : ""}
 
@@ -1513,7 +1506,7 @@ views.models = async () => {
     <div class="page-heading">
       <div><span class="eyebrow">Model registry</span><h1>Models</h1>
       <p>Checkpoints are immutable; promotion only moves the stable pointer. Nothing is promoted automatically.</p></div>
-      <div class="heading-actions"><a class="button secondary" href="#/evaluation">${icon("evaluation")} Evaluate</a></div>
+      <div class="heading-actions"><a class="button secondary" href="#/lab?tab=series">${icon("evaluation")} Evaluate</a></div>
     </div>
 
     ${models.length ? `<section class="panel">
@@ -1530,14 +1523,13 @@ views.models = async () => {
             <td>${evaluation ? `${(evaluation.winRate * 100).toFixed(0)} % <small>vs ${esc(evaluation.item.opponent)}</small>` : "—"}</td>
             <td>${esc((model.created_at || "").replace("T", " ").slice(0, 19))}</td>
             <td class="actions">
-              <a class="button ghost" href="#/training?resume=${encodeURIComponent(model.id)}&mode=continue" title="Continue training from this checkpoint">${icon("training")} Continue</a>
+              <a class="button ghost" href="#/training" title="Start the next run; a compatible checkpoint is continued automatically">${icon("training")} Train next</a>
               <button class="button ghost" data-validate="${esc(model.id)}" title="Check compatibility with the default configuration">${icon("shield")} Validate</button>
               <button class="button ghost" data-evaluate="${esc(model.id)}">${icon("play")} Evaluate</button>
               <button class="button ghost" data-promote="${esc(model.id)}" ${model.stable ? "disabled" : ""}>${icon("check")} Promote</button>
               <button class="button danger" data-delete="${esc(model.id)}" ${model.stable ? "disabled" : ""} title="Delete checkpoint">${icon("delete")}</button>
             </td></tr>`;
-        }).join("")}</tbody>
-      </table></div>
+        }).join("")}</tbody></table></div>
     </section>` : emptyState("No checkpoints", "Checkpoints are written during training. Start a run first.", "models")}
 
     <section class="panel" style="margin-top:18px" id="model-validation-panel" hidden>
@@ -1607,7 +1599,7 @@ views.models = async () => {
 };
 
 /**
- * The evaluation form is shared by the Models and Evaluation views so both
+ * The evaluation form is shared by the Models and Bot Lab views so both
  * send exactly the same protocol fields (sides, mirroring, seeds, phase).
  */
 function evaluationFormHtml(models, prefix, title = "Evaluation", description) {
@@ -1678,132 +1670,11 @@ function wireEvaluationForm(prefix) {
           : `/api/models/${encodeURIComponent(request.model_id)}/evaluate`;
         const result = await api(url, { method: "POST", body: JSON.stringify(request) });
         toast(`Evaluation started (${result.kind}) · job ${result.job_id}. Results appear when the series finishes.`);
-        setTimeout(() => location.hash === "#/evaluation" && render(), 2500);
+        setTimeout(() => location.hash.startsWith("#/lab") && render(), 2500);
       }
     );
   });
 }
-
-function confirmAction(title, body, action) {
-  const dialog = $("#confirm-dialog");
-  $("#confirm-title").textContent = title;
-  $("#confirm-body").textContent = body;
-  dialog.showModal();
-  const handler = async (event) => {
-    if (!event.target.closest("#confirm-ok")) return;
-    event.preventDefault();
-    dialog.close();
-    try {
-      await action();
-    } catch (error) {
-      toast(error.message, "error");
-    }
-  };
-  dialog.addEventListener("click", handler, { once: false });
-  dialog.addEventListener("close", () => dialog.removeEventListener("click", handler), { once: true });
-}
-
-// ---------------------------------------------------------------- evaluation
-views.evaluation = async () => {
-  const [evaluations, models] = await Promise.all([api("/api/evaluations?limit=200"), api("/api/models")]);
-  const classify = (item) =>
-    (item.details && item.details.opponent_class) ||
-    (["idle", "random"].includes(String(item.opponent || "").trim()) ? "diagnostic" : "strength");
-  const strength = evaluations.filter((item) => classify(item) === "strength");
-  const diagnostic = evaluations.filter((item) => classify(item) === "diagnostic");
-  const bestPerModel = (rows) => {
-    const best = {};
-    rows.forEach((item) => {
-      const key = `${item.model_id || "unknown"}|${item.opponent}`;
-      const rate = item.wins / Math.max(item.games, 1);
-      if (!best[key] || rate > best[key].rate) best[key] = { ...item, rate };
-    });
-    return Object.values(best);
-  };
-  const bestStrength = bestPerModel(strength);
-  const modelsWithStrength = new Set(bestStrength.map((item) => item.model_id));
-
-  $("#view").innerHTML = `
-    <div class="page-heading"><div><span class="eyebrow">Benchmarks</span><h1>Evaluation</h1>
-    <p>Every result below is a real match series with fixed seeds and a recorded protocol. Draws are possible, and a high training reward is not evidence of strength.</p></div>
-    <div class="heading-actions"><a class="button ghost" href="#/reports">${icon("file")} Run reports</a></div></div>
-
-    ${models.length ? evaluationFormHtml(models, "series", "New match series", "Side-balanced, seeded and reproducible. Diagnostic baselines are reported separately from strength opponents.") : ""}
-
-    ${evaluations.length ? `
-    <div class="stat-grid" style="margin-top:18px">
-      <div class="stat-card accent"><div class="stat-label"><span>Series</span>${icon("evaluation")}</div><div class="stat-value">${evaluations.length}</div><div class="stat-foot">${strength.length} strength · ${diagnostic.length} diagnostic</div></div>
-      <div class="stat-card"><div class="stat-label"><span>Models with a strength result</span>${icon("models")}</div><div class="stat-value">${modelsWithStrength.size}</div><div class="stat-foot">of ${models.length} checkpoints</div></div>
-      <div class="stat-card"><div class="stat-label"><span>Games played</span>${icon("activity")}</div><div class="stat-value">${fmtNumber(evaluations.reduce((sum, item) => sum + item.games, 0))}</div><div class="stat-foot">simulated matches</div></div>
-      <div class="stat-card"><div class="stat-label"><span>Goals</span>${icon("trophy")}</div><div class="stat-value">${fmtNumber(evaluations.reduce((sum, item) => sum + item.goals_for, 0))}</div><div class="stat-foot">${evaluations.reduce((sum, item) => sum + item.goals_against, 0)} conceded</div></div>
-    </div>
-
-    <section class="panel" style="margin-top:18px">
-      <div class="panel-header"><div><h2>Playing strength</h2><p>Best recorded series per checkpoint and strength opponent. Diagnostic baselines (idle, random) are excluded: they measure that the pipeline works, not how good the policy is.</p></div></div>
-      ${bestStrength.length ? `<div class="table-wrap"><table>
-        <thead><tr><th>Model</th><th>Mode</th><th>Opponent</th><th>Win rate (95 % CI)</th><th>Record</th><th>Goal diff</th><th>Games</th><th>Protocol</th></tr></thead>
-        <tbody>${bestStrength.map((item) => `<tr>
-          <td><strong>${esc(item.model_id || "—")}</strong></td><td>${esc(item.mode)}</td><td>${esc(item.opponent)}</td>
-          <td class="table-strong">${pct(item.rate)}<small>${item.details?.win_rate_ci95 ? `${pct(item.details.win_rate_ci95[0])} – ${pct(item.details.win_rate_ci95[1])}` : "no interval"}</small></td>
-          <td>${item.wins}W · ${item.losses}L · ${item.draws}D</td>
-          <td>${item.goals_for - item.goals_against >= 0 ? "+" : ""}${item.goals_for - item.goals_against}</td>
-          <td>${item.games}</td>
-          <td><div class="chip-row">${protocolChips(item.details || item)}</div></td>
-        </tr>`).join("")}</tbody></table></div>`
-        : `<p class="report-note">No strength evaluation has been recorded yet. Run a series against chase, mixed, self or a model checkpoint.</p>`}
-    </section>
-
-    <section class="panel" style="margin-top:18px">
-      <div class="panel-header"><div><h2>History</h2><p>Latest first, with the phase label and the protocol each series used. Series with different protocols are not comparable.</p></div></div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Model</th><th>Mode</th><th>Opponent</th><th>Class</th><th>Phase</th><th>Record</th><th>Win rate (95 % CI)</th><th>Goals</th><th>Protocol</th><th>When</th></tr></thead>
-        <tbody>${evaluations.map((item) => {
-          const details = item.details || {};
-          const ci = details.win_rate_ci95;
-          const kind = classify(item);
-          return `<tr>
-          <td><strong>${esc(item.model_id || "—")}</strong><small>${fmtNumber(item.games)} games · seed ${item.seed ?? details.protocol?.seed ?? "—"}</small></td>
-          <td>${esc(item.mode)}</td><td>${esc(item.opponent)}</td>
-          <td>${chip(kind, kind === "strength" ? "stable" : "")}</td>
-          <td>${esc(item.phase || "—")}</td>
-          <td class="table-strong">${item.wins}W · ${item.losses}L · ${item.draws}D</td>
-          <td>${pct(item.wins / Math.max(item.games, 1))}<small>${ci ? `${pct(ci[0])} – ${pct(ci[1])}` : "no interval recorded"}</small></td>
-          <td>${item.goals_for} : ${item.goals_against}</td>
-          <td><div class="chip-row">${protocolChips(details)}</div></td>
-          <td>${esc((item.created_at || "").replace("T", " ").slice(0, 19))}</td>
-        </tr>`;
-        }).join("")}</tbody>
-      </table></div>
-    </section>
-
-    ${diagnostic.length ? `<section class="panel" style="margin-top:18px">
-      <div class="panel-header"><div><h2>Diagnostic baselines</h2><p>Against idle and random opponents. A win rate here says the observation, action and reward pipeline works — nothing about football skill.</p></div></div>
-      <div class="table-wrap"><table class="compact">
-        <thead><tr><th>Model</th><th>Opponent</th><th>Win rate</th><th>Record</th><th>Touches</th><th>Games</th><th>When</th></tr></thead>
-        <tbody>${diagnostic.map((item) => `<tr>
-          <td><strong>${esc(item.model_id || "—")}</strong></td><td>${esc(item.opponent)}</td>
-          <td class="table-strong">${pct(item.wins / Math.max(item.games, 1))}</td>
-          <td>${item.wins}W · ${item.losses}L · ${item.draws}D</td>
-          <td>${item.details?.touches ?? "—"}</td>
-          <td>${item.games}</td>
-          <td>${esc((item.created_at || "").replace("T", " ").slice(0, 19))}</td>
-        </tr>`).join("")}</tbody></table></div>
-    </section>` : ""}` : emptyState("No evaluations yet", "Use the form above to run a seeded, side-balanced series against a diagnostic baseline and a strength opponent.", "evaluation")}
-
-    <section class="panel" style="margin-top:18px">
-      <div class="panel-header"><div><h2>How these numbers are produced</h2></div></div>
-      <div class="panel-body"><ul class="guide-list">
-        <li>Each game is a real RocketSim match; the policy is loaded from the checkpoint and never retrained during evaluation.</li>
-        <li>Sides alternate per game when both are selected, and the orange-side observation is rotated 180° about z (car-frame features, verified equivalent). Disabling mirroring measures the raw, unrotated behaviour.</li>
-        <li>Game i always uses seed + i · 7919, so repeating a series with the same settings reproduces the same kickoffs.</li>
-        <li>The 95 % interval is a Wilson score interval over the played games; with few games it is wide, and that width is shown rather than hidden.</li>
-        <li>Results are only comparable when the protocol matches: same mode, opponent, game count, match length, sides, mirroring, sampling and observation version.</li>
-        <li>The best-model pointer is only moved by a series that produced at least one win under a recorded protocol.</li>
-      </ul></div>
-    </section>`;
-
-  wireEvaluationForm("series");
-};
 
 // ---------------------------------------------------------------- live
 views.live = async () => {
@@ -1834,7 +1705,7 @@ views.live = async () => {
         ${models.length ? `
         <div class="form-grid">
           <label class="field"><span>Model</span><select id="live-model">${models.map((m) => `<option value="${esc(m.id)}" ${m.stable ? "selected" : ""}>${esc(m.id)}${m.stable ? " (stable)" : ""}${m.best ? " · best" : ""}</option>`).join("")}</select></label>
-          <label class="field"><span>Mode</span><select id="live-mode">${modes.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("")}</select></label>
+          <label class="field"><span>Mode</span><select id="live-mode">${modes.map((m) => `<option value="${esc(m.id)}" ${m.id === "soccer-1v1" ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select></label>
         </div>
         <div class="config-actions">
           <button class="button primary" id="live-launch" ${status.launch_supported ? "" : "disabled"}>${icon("play")} Launch match</button>
@@ -1920,6 +1791,7 @@ views.live = async () => {
 views.settings = async () => {
   const [diagnostics, system] = await Promise.all([api("/api/diagnostics"), api("/api/system")]);
   const info = diagnostics.info;
+  const modes = app.cache.modes || (await api("/api/modes"));
   $("#view").innerHTML = `
     <div class="page-heading"><div><span class="eyebrow">Runtime</span><h1>Settings &amp; diagnostics</h1>
     <p>Detected hardware, installed versions and measured simulator throughput.</p></div></div>
@@ -1949,7 +1821,7 @@ views.settings = async () => {
       <section class="panel">
         <div class="panel-header"><div><h2>Throughput benchmark</h2><p>Measured now, not estimated.</p></div></div>
         <div class="form-grid">
-          <label class="field"><span>Mode</span><select id="bench-mode">${(app.cache.modes || await api("/api/modes")).map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("")}</select></label>
+          <label class="field"><span>Mode</span><select id="bench-mode">${modes.map((m) => `<option value="${esc(m.id)}" ${m.id === "soccer-1v1" ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select></label>
           <label class="field"><span>Workers</span><input id="bench-workers" type="number" min="1" max="8" value="${Math.max(1, Math.min(4, (info.cpu_count || 2) - 1))}" /></label>
           <label class="field"><span>Seconds per worker</span><input id="bench-seconds" type="number" min="0.5" max="10" step="0.5" value="3" /></label>
           <label class="field full approval-check"><input type="checkbox" id="bench-parallel" checked /><span>Run the workers in parallel processes and measure the wall clock between a start signal and the results (the honest number for training).</span></label>
@@ -2046,10 +1918,9 @@ views.settings = async () => {
 };
 
 // ---------------------------------------------------------------- exports
-// The feature views (stats, team builder, player memory, rivals, lab) live
-// in their own module and attach to the shared view registry.  They need
-// the API helper, the formatting helpers and the view registry itself, so
-// those are exported here.
+// The feature modules (stats, bot lab) live in their own files and attach to
+// the shared view registry.  They need the API helper, the formatting helpers
+// and the view registry itself, so those are exported here.
 window.RLAI = {
   views,
   api,
@@ -2072,6 +1943,16 @@ window.RLAI = {
   confirmAction,
   toast,
   currentRoute,
+  routeQuery,
+  splitList,
+  renderComparison,
+  renderResumePlan: resumeStateHtml,
+  resumeStateHtml,
+  fetchStartPlan,
+  evaluationFormHtml,
+  wireEvaluationForm,
+  protocolChips,
+  statRow,
 };
 
 // ---------------------------------------------------------------- bootstrap
