@@ -121,16 +121,17 @@ def test_a_continued_run_keeps_the_accumulated_time(data_root):
 
 def test_a_continued_run_does_not_count_the_stopped_time(data_root):
     """The time between the two runs is not training time."""
-    store = Store(data_root / "rlai.sqlite3")
-    config = _config(total_steps=2000)
-    first = _trainer(config, store, "run-d")
-    first.run()
-    first_total = store.session_totals("run-d")["accumulated_s"]
-
-    # "wait" between the two runs - the process was not training
     import time
 
-    time.sleep(0.2)
+    store = Store(data_root / "rlai.sqlite3")
+    config = _config(total_steps=2000)
+    started_wall = time.perf_counter()
+    first = _trainer(config, store, "run-d")
+    first.run()
+
+    # "wait" between the two runs - the process was not training
+    pause = 2.0
+    time.sleep(pause)
 
     manifests = checkpoints.list_models(data_root / "models")
     final = [m for m in manifests if m["label"] == "final"][0]
@@ -142,13 +143,19 @@ def test_a_continued_run_does_not_count_the_stopped_time(data_root):
         resume_mode="continue",
     )
     second.run()
+    wall_clock = time.perf_counter() - started_wall
 
     totals = store.session_totals("run-d2")
-    # the total is the sum of the two *measured* sessions - the 0.2 s of
-    # waiting in between is not part of it
+    # the total is the sum of the two *measured* sessions
     measured = sum(row["duration_s"] for row in totals["sessions"] if row["duration_s"])
     assert totals["accumulated_s"] == pytest.approx(measured)
-    assert totals["accumulated_s"] < first_total + 0.2 + 5.0
+    # ... and the pause is not part of it.  Comparing against the wall clock
+    # of the whole test is load-independent: a busy machine inflates the
+    # measured time and the wall clock alike, while an implementation that
+    # charged "time since the run started" would leave no gap at all.
+    # (The old assertion used a fixed 5 s bound and failed on a loaded
+    # machine with 26.4 s of accumulated time - all of it real training.)
+    assert wall_clock - totals["accumulated_s"] >= pause - 0.05
 
 
 def test_a_resume_from_an_old_checkpoint_reports_an_unknown_duration(data_root):

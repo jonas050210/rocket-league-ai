@@ -319,7 +319,7 @@ change on the user's 50M-step budget.
 
 ```
 ruff check src tests rlbot        # All checks passed
-pytest -q                         # 612 passed, 1 skipped (jsdom) — 171 s
+pytest -q                         # 616 passed, 1 skipped (jsdom) — 171 s
 ```
 
 (The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by
@@ -466,10 +466,37 @@ Drehung; dafür fehlt ein dichtes Kreditsignal, nicht Abdeckung.
 
 Konsequenz: `drill/recover` und `REACH_FACING_AWAY_SHARE` wurden nicht
 ausgeliefert (Kosten: +30 % Stufe-0-Iterationen bzw. schlechtere
-Trainingsergebnisse bei 700k), das gemessene `shot`-Szenario bleibt. Der
-nächste Schritt ist ein potential-basiertes Heading-Shaping (Differenz der
-Ausrichtung Auto→Ball, nicht der Zustand selbst) oder eine eigene
-Recovery-Stufe – beides braucht einen eigenen A/B gegen genau diese Zahlen.
+Trainingsergebnisse bei 700k), das gemessene `shot`-Szenario bleibt.
+
+### Heading als *Potential* – auch das hilft nicht, es schadet
+
+Der naheliegende nächste Schritt war Kredit-Zuordnung statt Abdeckung: die
+Ausrichtung Auto→Ball als **Potential** `Phi = forward · to_ball`, bezahlt
+als `gamma*Phi' - Phi` (teleskopiert, eine volle Drehung netto 0). Genau das
+ist der Unterschied zum alten, farmbaren `alignment`-Zustandsbonus.
+
+Gemessen mit `1v1-mastery-1v1`, `heading = 0.5`, `--steps 300000`, frisch,
+2 vCPU (Vergleich: identische Config, `heading = 0`, drei Läufe):
+
+| | `heading = 0` (3 Läufe) | `heading = 0.5` |
+| --- | --- | --- |
+| Promotionen in 300k | 1–2 (bis `shooting`) | **0** (Stufe `approach`) |
+| `approach`-Gate, Maximum | 0,92–1,00 | **0,17** (11 Auswertungen) |
+| Episoden / Tore | ~1 700 / 148–199 | 1 820 / 129:17 |
+
+Die Ursache ist der *Zielbegriff*, nicht die Buchhaltung: in einem
+`reach`-Start schaut das Auto bereits zum Ball (`Phi ≈ 1`). Das Potential
+kann dort also fast nur noch negatives Vorzeichen erzeugen – jede Drehung
+weg vom Ball kostet – und bestraft damit genau die Exploration, die den Ball
+erst findet. Ein Auto, das stehen bleibt und schaut, ist wieder die
+Optimallösung (die alte `alignment`-Falle, nur sauber teleskopierend).
+
+`heading` bleibt deshalb **standardmäßig 0**; der Term ist implementiert und
+per `"heading": 0.5` in der Rewards-Config einschaltbar, die drei
+Unit-Tests in `tests/test_rewards.py` halten Teleskopierung und
+Opt-in-Verhalten fest. Für `reengage` ist der nächste sinnvolle Hebel eine
+eigene **Recovery-Stufe** mit kurzem Horizont (der Aufstieg *ist* die
+Belohnung), nicht ein weiterer globaler Dichteterm.
 
 ### Warum 80k-Schritte-A/Bs nichts beweisen (Rauschkalibrierung)
 

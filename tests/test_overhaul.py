@@ -410,7 +410,15 @@ def test_touch_cooldown_stops_tap_farming_but_not_counting():
 
 def test_discounted_potentials_stay_bounded_in_discounted_sum():
     env = _env()
-    reward = SoccerReward(env.spec, RewardWeights(progress=0.0, touch=0.0), potential_gamma=0.995)
+    # the heading potential is excluded on purpose: with gamma < 1 a constant
+    # potential streams (1-gamma)*Phi per step, which is exactly what makes
+    # the opt-in ``discount_shaping`` mode unintuitive - this test isolates
+    # the ball_progress telescope
+    reward = SoccerReward(
+        env.spec,
+        RewardWeights(progress=0.0, touch=0.0, heading=0.0),
+        potential_gamma=0.995,
+    )
     state = copy.deepcopy(env.env.state)
     agents = list(state.cars)
     shared: dict = {}

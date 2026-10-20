@@ -90,6 +90,18 @@ durchgeführt.
   des Alignment-Maximums bei ~0,06 Berührungen/Episode) stehen auf 0 und
   existieren nur noch, damit alte Konfigurationen ihr Verhalten exakt
   reproduzieren.
+* **Ausrichtung als Potential (`heading`, Standard 0 = aus).** Die
+  Blickrichtung des Autos zum Ball als `gamma * Phi' - Phi` mit
+  `Phi = forward · to_ball`; eine volle Drehung ist netto 0, eine halbe
+  höchstens `2 * heading`. Gedacht war das gegen das `reengage`-Gate („das
+  Auto startet mit dem Rücken zum Ball"), **gemessen ist es ein
+  Rückschritt**: mit 0,5 promotete die erste Stufe in 300k Schritten kein
+  einziges Mal (Gate maximal 0,17 in 11 Auswertungen, ohne den Term zwei
+  Promotionen). In einem `reach`-Start schaut das Auto bereits zum Ball, das
+  Potential zahlt dort also nur dafür, sich *nicht* wegzudrehen – und
+  erstickt genau die Exploration, die den Ball findet. Der Term bleibt
+  implementiert und über `"heading": 0.5` in der Config einschaltbar
+  (`docs/STALL_ANALYSIS.md`).
 * **Ereignisse mit Richtung und Treffergenauigkeit.** Eine Berührung zahlt
   nach der Ballgeschwindigkeit Richtung Gegnertor; `shot` gibt es nur, wenn
   die Flugbahn-Projektion (mit Gravitation) auch zwischen Pfosten/Querlatte
