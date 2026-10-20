@@ -319,9 +319,23 @@ def test_incomplete_evaluations_are_listed(data_root):
 # ---------------------------------------------------------------- checkpoint
 
 
+def test_disabled_evaluation_is_not_reported_as_a_failure(data_root):
+    store = _store(data_root)
+    config = _config()  # eval_interval=0: no measurement was ever requested
+    run_id = store.create_run("no eval", config.mode, config.to_dict(), config.total_steps)
+    store.update_run(run_id, status="completed", step=config.total_steps)
+
+    report = build_run_report(store, run_id, models_dir=data_root / "models")
+    assert "disabled" in report["evaluation"]["after"]["reason"]
+    assert "disabled" in report["evaluation"]["before"]["reason"]
+    assert not any("final evaluation" in warning for warning in report["warnings"])
+
+
 def test_final_checkpoint_is_revalidated(data_root, tmp_path):
     store = _store(data_root)
-    config = _config()
+    # evaluation was requested, so this completed run *should* have a final
+    # measurement; its absence is a warning
+    config = _config(eval_interval=25, eval_before=True)
     run_id = store.create_run("ckpt", config.mode, config.to_dict(), config.total_steps)
     store.update_run(
         run_id,

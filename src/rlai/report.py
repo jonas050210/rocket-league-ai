@@ -251,6 +251,23 @@ def evaluation_section(store: Store, run_id: str, models_dir: Path | None) -> di
     """
     from .evaluation import classify_opponent
 
+    run_config = (store.get_run(run_id) or {}).get("config") or {}
+    # A run that never evaluated on purpose (eval_interval=0) must not be
+    # described as if the final measurement had failed: "run ended before the
+    # final evaluation completed" is a defect message, not a configuration.
+    if not int(run_config.get("eval_interval") or 0):
+        before_reason = after_reason = (
+            "evaluation is disabled for this run (eval_interval=0); "
+            "no before/after measurement exists"
+        )
+    else:
+        before_reason = (
+            "no baseline evaluation was run"
+            if bool(run_config.get("eval_before", True))
+            else "the baseline evaluation is disabled (eval_before=false)"
+        )
+        after_reason = "run ended before the final evaluation completed"
+
     rows = store.list_evaluations(limit=500, run_id=run_id)
     # list_evaluations returns newest first
     ordered = list(reversed(rows))
@@ -380,8 +397,8 @@ def evaluation_section(store: Store, run_id: str, models_dir: Path | None) -> di
 
     best = checkpoints.best_record(models_dir) if models_dir else {}
     return {
-        "before": before_slim or unavailable("no baseline evaluation was run"),
-        "after": after_slim or unavailable("run ended before the final evaluation completed"),
+        "before": before_slim or unavailable(before_reason),
+        "after": after_slim or unavailable(after_reason),
         "delta": delta,
         "pairs": pairs,
         "pair_count": len(pairs),
@@ -654,7 +671,11 @@ def build_run_report(
             warnings.append(
                 f"evaluation {item.get('id')} did not finish any game and is incomplete"
             )
-    if isinstance(evaluation.get("after"), dict) and not evaluation["after"].get("available", True):
+    if (
+        int(run_config.get("eval_interval") or 0)
+        and isinstance(evaluation.get("after"), dict)
+        and not evaluation["after"].get("available", True)
+    ):
         warnings.append(str(evaluation["after"].get("reason")))
     delta = evaluation.get("delta")
     if (
@@ -669,7 +690,12 @@ def build_run_report(
         warnings.append(f"before/after evaluation not comparable: {delta.get('reason')}")
     elif isinstance(delta, dict) and delta.get("available") and delta.get("warning"):
         warnings.append(str(delta["warning"]))
-    if isinstance(evaluation.get("before"), dict) and not evaluation["before"].get("available", True):
+    if (
+        int(run_config.get("eval_interval") or 0)
+        and bool(run_config.get("eval_before", True))
+        and isinstance(evaluation.get("before"), dict)
+        and not evaluation["before"].get("available", True)
+    ):
         warnings.append(str(evaluation["before"].get("reason")))
 
     resume_section = dict(resume or {})

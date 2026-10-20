@@ -319,11 +319,50 @@ change on the user's 50M-step budget.
 
 ```
 ruff check src tests rlbot        # All checks passed
-pytest -q                         # 527 passed, 1 skipped (jsdom) — 104 s
+pytest -q                         # 582 passed, 1 skipped (jsdom) — 165 s
 ```
 
 (The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by
 design when node/jsdom are unavailable.)
+
+## Nachtrag: größere Batches und No-Touch-Timeout (150k Schritte)
+
+Dieselbe Smoke-Konfiguration, aber mit `rollout_steps = 1024` (Batch 2048
+statt 1024), `no_touch_timeout_seconds = 10` und `minibatch_size = 512`,
+sonst unverändert (obs v4, 2 Worker, 20 s Horizont, drill resets, Gegner
+`idle`, keine Zwischen-Evaluationen, run `91fc2eff1fbb`, 135 s,
+`/tmp/rlai-learn`):
+
+| Metrik | vorher (`ls1`, 150 528 Schritte) | nachher (151 552 Schritte) |
+| --- | --- | --- |
+| Episoden | 540 | 942 |
+| Entscheidungen pro Episode | 278 (18,5 s) | 161 (10,7 s) |
+| Touches pro Episode | 0,548 | **1,355** |
+| Touches pro 1 000 Schritte | 1,97 | **8,4** |
+| Tore pro 1 000 Schritte | 0,086 | **0,475** |
+| Tore (Training) | 13:51 | **72:1** |
+| Truncations | – | 869 von 942 (92 %) |
+| Entropie | 4,34 → 4,15 | 4,21 (bei ln 90 = 4,50) |
+| Explained variance | 0,54–0,91 | 0,66 (letzte Iteration 0,64) |
+| approx KL / Clipfrac | – | 0,0005 / 0,001 |
+| Schritte/s | ~1 900 | ~1 116 |
+
+Der Vergleich ist **nicht** sauber kausal: beides sind kurze, einfach
+gesäte Läufe, und der No-Touch-Timeout verändert die Episodenlänge, also
+auch Touches-pro-Episode. Deshalb die zeitraumbezogenen Zeilen: pro 1 000
+Umgebungsschritte interagiert die Policy etwa viermal häufiger mit dem Ball
+und erzielt etwa fünfmal so viele Tore. Der Preis ist Durchsatz
+(größere Batches und der zusätzliche Done-Check kosten ~40 % Schritte/s),
+und die Entropie bleibt nahe am Maximum – nach 150k Schritten ist die
+Policy noch weit von „entschieden“ entfernt. Der Run belegt, dass die
+Pipeline mit den neuen Einstellungen ein dichteres Lernsignal liefert als
+der alte Smoke-Lauf; er belegt **keine** Spielstärke.
+
+Auffällig: 72:1 Tore statt 13:51. Der alte Lauf kassierte gegen einen
+`idle`-Gegner 51 Tore – fast ausschließlich Eigentore aus den
+`defense`-Drills, in denen der Ball auf das eigene Tor rollt und eine
+zufällige Policy ihn hineinschiebt. Der 10-s-Timeout beendet diese
+Situationen früher, bevor die Policy sich selbst besiegt.
 
 ## Reproduction commands (isolated data)
 
