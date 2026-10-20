@@ -202,11 +202,27 @@ def cmd_train(args: argparse.Namespace) -> int:
         # known; the trainer, the run row and the GUI progress bar all use
         # total_steps as the target (see rlai.resume.with_additional_steps).
         restored_step = plan.restored_step if plan else 0
+        ladder = list(config.escalation)
         try:
             config = with_additional_steps(config, restored_step, int(additional_steps))
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
+        unreachable = [
+            point for point in ladder if int(point.at_step) >= config.total_steps
+        ]
+        if unreachable:
+            print(
+                "WARNING: the target "
+                f"{config.total_steps} ends before task-ladder point(s) at "
+                + ", ".join(
+                    f"step {int(point.at_step)}"
+                    + (f" ({point.label})" if point.label else "")
+                    for point in unreachable
+                )
+                + " - they can never fire and were dropped for this run",
+                file=sys.stderr,
+            )
         print(
             f"NOTE: {int(additional_steps)} additional steps on top of step "
             f"{restored_step} -> target {config.total_steps}"

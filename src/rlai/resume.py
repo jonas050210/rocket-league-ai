@@ -395,6 +395,17 @@ def _resolve_additional_steps(
             else ""
         )
     )
+    if len(resolved.escalation) != len(config.escalation):
+        unreachable = "step " + ", step ".join(
+            str(int(point.at_step))
+            for point in config.escalation
+            if int(point.at_step) >= resolved.total_steps
+        )
+        plan.notes.append(
+            f"the task ladder has escalation point(s) at {unreachable}, beyond the "
+            f"new target of {resolved.total_steps}; they can never fire and are "
+            "dropped for this run"
+        )
     return resolved
 
 
@@ -439,7 +450,18 @@ def with_additional_steps(
     remainder = total % batch
     if remainder:
         total += batch - remainder
-    return config.model_copy(update={"total_steps": total, "lr_anneal_start": start})
+    update: dict = {"total_steps": total, "lr_anneal_start": start}
+    # A short run on a long task ladder (``--steps 1000000`` with the 20M
+    # ladder whose last point sits at step 12M) used to fail validation with
+    # "the last escalation point ... would never apply" before a single step
+    # was trained.  The point is right - it can never fire - so the point is
+    # not to reject the run but to drop the unreachable tail.  Points at or
+    # below the restored step are kept: the trainer applies those before the
+    # first rollout, which is exactly what a continuation should inherit.
+    kept = [point for point in config.escalation if int(point.at_step) < total]
+    if len(kept) != len(config.escalation):
+        update["escalation"] = kept
+    return config.model_copy(update=update)
 
 
 def plan_resume(

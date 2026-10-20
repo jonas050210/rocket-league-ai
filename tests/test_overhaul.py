@@ -428,11 +428,94 @@ def test_discounted_potentials_stay_bounded_in_discounted_sum():
     env.close()
 
 
+def test_rollouts_are_reproducible_from_the_episode_seed():
+    """Same configuration, weights and seed must produce the same rollout.
+
+    Action sampling used the worker's *process-global* torch RNG, which starts
+    from a different state in every worker: three runs of an identical
+    configuration and checkpoint measured 2.31 / 1.91 / 3.84 touches per
+    episode, so a change in a metric could not be attributed to a change in
+    the code.  Sampling now uses a generator seeded from the rollout seed;
+    the global torch seed must no longer matter.
+    """
+    import torch
+
+    from rlai.policy import PolicyConfig, TorchPolicy
+    from rlai.workers import collect_rollout
+
+    def rollout(global_torch_seed: int, seed: int) -> "np.ndarray":
+        torch.manual_seed(global_torch_seed)
+        env = MatchEnv(
+            get_mode("soccer-1v1"),
+            IdleOpponent(),
+            seed=3,
+            episode_seconds=5,
+            reset_mode="drill",
+        )
+        policy = TorchPolicy.from_config(
+            PolicyConfig(obs_size=198, hidden=(32, 32)), device="cpu"
+        )
+        out = collect_rollout(env, policy, 60, seed=seed, fresh=True)
+        env.close()
+        return out["actions"]
+
+    first = rollout(0, 1234)
+    second = rollout(999, 1234)
+    assert first.shape == second.shape
+    assert (first == second).all()
+    # a different episode seed still explores differently
+    third = rollout(0, 4321)
+    assert (first != third).any()
+
+
 # ---------------------------------------------------------------------------
 # Round 2: drill variety, obs v4, fast inference, per-worker opponents
 # ---------------------------------------------------------------------------
 
-def test_drill_scenarios_cover_attack_defense_and_race():
+def test_the_shooting_probe_situation_is_practised_in_training():
+    """The ``shooting`` gate must measure something the drill actually trains.
+
+    ``rlai.skills`` shoots from ``|y| = 3000..4000`` with a keeper in the goal
+    mouth.  Sampling ``attack`` uniformly over the whole field put the ball
+    beyond ``y = 3000`` in ~7 % of episodes and never spawned a keeper, so a
+    run scored 148 goals and still measured 0.00 at the gate.
+    """
+    from rlai.skills import SHOOTING_BALL_X, SHOOTING_BALL_Y
+
+    env = MatchEnv(
+        get_mode("soccer-1v1"), IdleOpponent(), seed=17, episode_seconds=10, reset_mode="drill"
+    )
+    resets = 200
+    covered = 0
+    shots = 0
+    for _ in range(resets):
+        env.reset()
+        ball = env.state.ball.position
+        keeper = env.state.cars[env.opponent_agents[0]].physics.position
+        in_probe_zone = (
+            abs(float(ball[1])) >= min(SHOOTING_BALL_Y)
+            and abs(float(ball[1])) <= max(SHOOTING_BALL_Y) + 200.0
+            and abs(float(ball[0])) <= max(abs(x) for x in SHOOTING_BALL_X)
+        )
+        keeper_on_line = abs(float(keeper[1])) >= 4700.0
+        if in_probe_zone and keeper_on_line:
+            covered += 1
+        if env.env.shared_info.get("drill_scenario") == "shot":
+            shots += 1
+            assert 2800.0 <= abs(float(ball[1])) <= 4200.0
+            assert abs(float(ball[0])) <= 1400.0
+            # the keeper stands in the goal mouth, on the line the probe uses
+            assert abs(float(keeper[1])) >= 4700.0
+            # the learning car is behind the ball, inside the probe's 700 uu
+            learner = env.state.cars[env.policy_agents[0]].physics.position
+            assert float(learner[1]) <= float(ball[1]) - 400.0
+    assert shots >= 15, f"only {shots}/{resets} shot scenarios"
+    # before the fix this share was 0.0: no episode had a keeper at all
+    assert covered / resets >= 0.15, f"only {covered}/{resets} shooting situations"
+    env.close()
+
+
+def test_drill_scenarios_cover_all_four_situations():
     from collections import Counter
 
     env = MatchEnv(
@@ -452,7 +535,7 @@ def test_drill_scenarios_cover_attack_defense_and_race():
             ) + 1.0
         if scenario == "race":
             assert abs(float(env.state.ball.position[1])) <= 1200.0
-    assert seen["attack"] and seen["defense"] and seen["race"]
+    assert seen["attack"] and seen["defense"] and seen["race"] and seen["shot"]
     env.close()
 
 

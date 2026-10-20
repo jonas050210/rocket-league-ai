@@ -27,6 +27,29 @@ def _config() -> TrainingConfig:
     )
 
 
+def test_identical_configurations_start_from_identical_weights(data_root):
+    """Policy init must depend on the config seed, not on process entropy.
+
+    ``torch``'s default generator starts from OS entropy, so two runs of the
+    same configuration began with different weights and the first metric
+    already disagreed.  ``Trainer.__init__`` seeds torch/python/numpy from
+    ``config.seed`` before the model exists.
+    """
+    store = Store(data_root / "rlai.sqlite3")
+    first = Trainer(_config(), "seeded-a", store)
+    second = Trainer(_config(), "seeded-b", store)
+    left = first.model.state_dict()
+    right = second.model.state_dict()
+    assert left.keys() == right.keys()
+    for key in left:
+        assert torch.equal(left[key], right[key]), key
+
+    other = Trainer(_config().model_copy(update={"seed": 43}), "seeded-c", store)
+    assert any(
+        not torch.equal(left[key], other.model.state_dict()[key]) for key in left
+    )
+
+
 def test_best_candidate_requires_an_actual_win():
     assert is_best_candidate({"wins": 0, "win_rate": 0.0}, float("-inf")) is False
     assert is_best_candidate({"wins": 0, "win_rate": 0.0}, -1.0) is False

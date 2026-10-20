@@ -110,6 +110,44 @@ def test_additional_steps_round_up_to_whole_rollout_batches():
     assert with_additional_steps(config, 0, 512).total_steps == 512
 
 
+def test_a_short_run_drops_task_ladder_points_that_can_never_fire():
+    """``--steps 1000000`` on the 20M ladder must not fail validation.
+
+    The ladder's last point sits at step 12M and ``TrainingConfig`` rejects a
+    point at or past ``total_steps`` (it would never apply).  A smoke run that
+    adds a million steps is not an error, though: the unreachable tail is
+    dropped, and every point the run *does* reach is kept - including points
+    at or below the restored step, which the trainer applies before the first
+    rollout.
+    """
+    from rlai.config import EscalationPoint
+
+    config = _config(
+        total_steps=20_000_000,
+        escalation=[
+            EscalationPoint(at_step=2_000_000, label="long horizon"),
+            EscalationPoint(at_step=6_000_000, label="stronger opponent"),
+            EscalationPoint(at_step=12_000_000, label="goal weight"),
+        ],
+    )
+    short = with_additional_steps(config, restored_step=0, additional_steps=1_000_000)
+    assert short.total_steps == 1_000_192  # rounded up to the 256-step batch
+    assert short.escalation == []
+    # the original configuration is untouched
+    assert len(config.escalation) == 3
+
+    continuing = with_additional_steps(
+        config, restored_step=5_000_000, additional_steps=2_000_000
+    )
+    # 7,000,064 is the next batch boundary: the 2M and 6M points already
+    # applied on resume, the 12M point is beyond the target
+    assert continuing.total_steps == 7_000_064
+    assert [int(point.at_step) for point in continuing.escalation] == [
+        2_000_000,
+        6_000_000,
+    ]
+
+
 def test_learning_rate_anneals_over_the_added_window():
     config = _config(
         total_steps=10_000,

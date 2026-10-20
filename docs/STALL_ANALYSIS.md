@@ -319,7 +319,7 @@ change on the user's 50M-step budget.
 
 ```
 ruff check src tests rlbot        # All checks passed
-pytest -q                         # 606 passed, 1 skipped (jsdom) — 171 s
+pytest -q                         # 612 passed, 1 skipped (jsdom) — 171 s
 ```
 
 (The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by
@@ -409,14 +409,42 @@ Wirkung im A/B (gleicher Checkpoint, je 80 000 Schritte, `/tmp/rlai-shootA`
 gegen `/tmp/rlai-shootB`): Episoden ohne Kontakt 30 % → 17 % in der ersten
 Hälfte, Kontakte/Episode 2,24 → 3,24.
 
+### Der zweite Teil des `shooting`-Engpasses: die Probe war im Training nicht enthalten
+
+Der Lauf mit 148:60 Toren meldete `shooting` **0,00**. Die Probe schießt aus
+`y = 3000–4000` mit einem Torwart auf der Linie; die `attack`-Drills zogen
+Ballpositionen aber uniform über das ganze Feld (`y ∈ −3500…3500`, also nur
+~7 % oberhalb von 3 000) und erzeugten **nie** einen Torwart. Der Fehler lag
+nicht in der Policy, sondern in der Verteilung.
+
+Seit dem vierten Drill-Szenario **`shot`** (20 %: Ball im Angriffsdrittel,
+Torwart in der Toröffnung, lernendes Auto 600–900 uu dahinter) enthält das
+Training genau diese Situation. Validierungslauf (`1v1-mastery-1v1`,
+`--steps 300000`, frisch, 476 s, 199:30 Tore):
+
+| Lauf | Schritte | Stufe am Ende | `progress` | `shooting` |
+| --- | --- | --- | --- | --- |
+| vorher (`f6d11b8f8ae6`) | 405 504 | `shooting` | 0,58 | **0,00** |
+| nachher | 301 056 | `shooting` | 1,00 [0,93; 1,00] | **0,54 [0,40; 0,67]** |
+
+Das Tor-Gate (≥ 0,30, CI-low ≥ 0,15) ist damit erstmals auf dem Punktwert
+**und** der unteren Konfidenzgrenze erfüllt; der Lauf scheiterte nur noch an
+der zweiten Bestätigung (`1/2`).
+
 ### Warum 80k-Schritte-A/Bs nichts beweisen (Rauschkalibrierung)
 
 Drei Läufe mit **identischer** effektiver Config und demselben Checkpoint
 (`rlai-shootB/C/D`, je 81 920 Schritte) ergaben: Kontakte/Episode in der
 zweiten Hälfte 2,31 / 1,91 / 3,84 und `progress`-Gate 0,25 / 0,71 / 0,13.
-Der Resume ist nicht bit-deterministisch (die Worker ziehen ihre Aktions-
-Stichproben aus eigenen Torch-RNGs), und 24 Gate-Trials haben ±18
-Prozentpunkte Konfidenzband. **Policy-Vergleiche brauchen die geseedete
+Damals war der Lauf nicht bit-deterministisch: die Worker zogen ihre
+Aktions-Stichproben aus eigenen, ungeseedeten Torch-RNGs. **Das ist behoben**
+– `Trainer.__init__` seedet die globalen RNGs aus `config.seed`, und
+`collect_rollout` sampelt aus einem aus dem Rollout-Seed geseedeten Generator
+(siehe `docs/TRAINING.md`, „Reproduzierbarkeit"). Zwei identische 4 096-
+Schritte-Läufe liefern jetzt identische Rollout-Serien; die damaligen 2,31 /
+1,91 / 3,84 Kontakte waren also tatsächlich Sampling-Rauschen und nicht
+Policy-Drift. Was bleibt: 24 Gate-Trials haben ±18 Prozentpunkte
+Konfidenzband. **Policy-Vergleiche brauchen die geseedete
 Match-Evaluation (`eval_interval`, feste Seeds), keine Trainings-Rollouts** –
 und selbst dort sind 10 Spiele nur eine grobe Auflösung.
 

@@ -115,16 +115,23 @@ class ResetMutator(KickoffMutator):
     almost never experiences the states that matter (ball close, ball near
     the goal, shooting angles), so goal credit has nothing to attach to.
 
-    ``drill`` starts sample one of three scenarios per episode:
+    ``drill`` starts sample one of four scenarios per episode:
 
-    * **attack** (55 %): ball at a random position (sometimes rolling),
+    * **attack** (45 %): ball at a random position (sometimes rolling),
       every car on its own defensive side of the ball - the last seconds of
       an attack, thousands of times;
-    * **defense** (25 %): ball rolling toward the learning team's goal
+    * **shot** (20 %): ball in the learning team's attacking third with a
+      car parked in the goal mouth.  This is the situation the ``shooting``
+      skill probe measures, and it used to be almost absent from training:
+      sampling ``attack`` uniformly puts the ball beyond ``y = 3000`` in
+      roughly 7 % of episodes and never puts a keeper in the goal, so a
+      policy could score 148 goals in a run and still fail the probe at
+      0.00 (measured in ``f6d11b8f8ae6``);
+    * **defense** (20 %): ball rolling toward the learning team's goal
       (``shared_info['drill_team']``, set by :class:`MatchEnv`), its cars
       goal-side of the ball - saves and clearances, which kickoff-only
       training against a passive opponent never teaches;
-    * **race** (20 %): slow ball near midfield, both teams at comparable
+    * **race** (15 %): slow ball near midfield, both teams at comparable
       distances - contested first touches and 50/50s.
 
     ``reach`` starts are the attack scenario with the learning team much
@@ -162,9 +169,25 @@ class ResetMutator(KickoffMutator):
             super().apply(state, shared_info)
             return
         drill_team = int(shared_info.get("drill_team", BLUE_TEAM))
+        learner_attack = 1.0 if drill_team == BLUE_TEAM else -1.0
         roll = random.random()
-        scenario = "attack" if roll < 0.55 else ("defense" if roll < 0.80 else "race")
-        if scenario == "defense":
+        if roll < 0.45:
+            scenario = "attack"
+        elif roll < 0.65:
+            scenario = "shot"
+        elif roll < 0.85:
+            scenario = "defense"
+        else:
+            scenario = "race"
+        if scenario == "shot":
+            # The attacking third, where the ``shooting`` probe measures: the
+            # ball is 2000-3300 uu from the goal line and a keeper stands in
+            # the goal mouth.  Without this the probe asked for a situation
+            # that training almost never produced.
+            ball_x = random.uniform(-1400.0, 1400.0)
+            ball_y = learner_attack * random.uniform(2800.0, 4200.0)
+            state.ball.linear_velocity = np.zeros(3, dtype=np.float32)
+        elif scenario == "defense":
             # ball in the learning team's half, travelling at its goal
             defend_sign = -1.0 if drill_team == BLUE_TEAM else 1.0  # own goal y sign
             ball_x = random.uniform(-2000.0, 2000.0)
@@ -201,14 +224,40 @@ class ResetMutator(KickoffMutator):
             # goal); for the defending team in the defense scenario the same
             # side is *between ball and own goal*, facing the incoming ball.
             attack = 1.0 if car.team_num == BLUE_TEAM else -1.0
+            if scenario == "shot" and int(car.team_num) != drill_team:
+                # the keeper: on its own goal line, shading towards the
+                # ball, facing it.  With the ``idle`` opponent used by the
+                # ``shooting`` stage it stays there - the same situation the
+                # probe measures.  (A ``chase`` opponent leaves the line,
+                # which makes the drill harder than the gate, not easier.)
+                keeper_x = float(
+                    np.clip(
+                        ball_x * 0.5 + random.uniform(-200.0, 200.0), -800.0, 800.0
+                    )
+                )
+                keeper_y = learner_attack * random.uniform(4800.0, 5000.0)
+                car.physics.position = np.array(
+                    [keeper_x, keeper_y, 17.0], dtype=np.float32
+                )
+                car.physics.linear_velocity = np.zeros(3, dtype=np.float32)
+                car.physics.angular_velocity = np.zeros(3, dtype=np.float32)
+                yaw = float(np.arctan2(ball_y - keeper_y, ball_x - keeper_x))
+                car.physics.euler_angles = np.array([0.0, yaw, 0.0], dtype=np.float32)
+                car.boost_amount = 0.0
+                continue
             if scenario == "defense" and int(car.team_num) == drill_team:
                 distance = random.uniform(500.0, 1800.0)
             elif scenario == "race":
                 distance = random.uniform(1200.0, 2000.0)
+            elif scenario == "shot":
+                distance = random.uniform(600.0, 900.0)
             else:
                 distance = random.uniform(700.0, 2600.0)
+            lateral = 600.0 if scenario == "shot" else 900.0
             car_y_raw = ball_y - attack * distance
-            car_x = float(np.clip(ball_x + random.uniform(-900.0, 900.0), -3800.0, 3800.0))
+            car_x = float(
+                np.clip(ball_x + random.uniform(-lateral, lateral), -3800.0, 3800.0)
+            )
             car_y = float(np.clip(car_y_raw, -4800.0, 4800.0))
             car.physics.position = np.array([car_x, car_y, 17.0], dtype=np.float32)
             car.physics.linear_velocity = np.zeros(3, dtype=np.float32)

@@ -626,6 +626,23 @@ class Curriculum:
                 observed = float(observed)
                 floor = max(0.0, float(baseline) - tolerance)
                 ok = observed >= floor
+                # Sampling noise decides whether a drop is a *regression* at
+                # all.  48 trials resolve a rate to about +/-0.14 at 95 %, so a
+                # true 0.90 lands below a 0.85 floor often enough that three
+                # retention gates in a row reset the confirmation counter on
+                # noise alone.  A drop is only conclusive when even the
+                # optimistic end of the confidence interval stays below the
+                # floor; an inconclusive drop still blocks the promotion (the
+                # point estimate is below the floor) but keeps the
+                # confirmations that were already earned.
+                ci = measurement.get("ci95")
+                ci_high = None
+                if isinstance(ci, (list, tuple)) and len(ci) == 2:
+                    try:
+                        ci_high = float(ci[1])
+                    except (TypeError, ValueError):
+                        ci_high = None
+                conclusive = (ci_high < floor) if ci_high is not None else not ok
                 rows.append(
                     {
                         "name": f"retention:{gate.name}",
@@ -636,6 +653,8 @@ class Curriculum:
                         "baseline": float(baseline),
                         "baseline_stage": self.gates.baseline_stage.get(gate.name),
                         "ci95": measurement.get("ci95"),
+                        "ci95_high": ci_high,
+                        "conclusive": bool(conclusive),
                         "ok": ok,
                         "reason": (
                             ""
@@ -643,6 +662,12 @@ class Curriculum:
                             else f"{observed:.3f} dropped below {floor:.3f} "
                             f"(mastered at {float(baseline):.3f} in "
                             f"{self.gates.baseline_stage.get(gate.name, 'an earlier stage')})"
+                            + (
+                                ""
+                                if conclusive
+                                else " - within sampling noise (95 % CI reaches "
+                                f"{ci_high:.3f}), not counted as a regression"
+                            )
                         ),
                     }
                 )
@@ -835,13 +860,20 @@ class Curriculum:
         gates_ok = all(row["ok"] for row in self.gate_rows())
         retention = self.retention_rows()
         retention_ok = all(row["ok"] for row in retention)
+        # A drop that is not distinguishable from sampling noise must not
+        # throw away earned confirmations; only a conclusive regression does.
+        conclusive_regression = any(
+            not row["ok"] and row.get("conclusive", True) for row in retention
+        )
         if gates_ok and retention_ok:
             self.gates.passes_in_a_row += 1
-        else:
-            if self.gates.passes_in_a_row:
-                self.gates.passes_in_a_row = 0
-            if not retention_ok:
-                self.last_event = "regression"
+        elif conclusive_regression:
+            self.gates.passes_in_a_row = 0
+            self.last_event = "regression"
+        elif not retention_ok:
+            self.last_event = "inconclusive"
+        elif self.gates.passes_in_a_row:
+            self.gates.passes_in_a_row = 0
         return self._try_promote()
 
     def _try_promote(self) -> str | None:
@@ -897,7 +929,12 @@ class Curriculum:
         for row in self.retention_rows():
             if row.get("observed") is None:
                 continue
-            values[f"curriculum/retention/{row['skill']}"] = float(row["observed"])
+            key = f"curriculum/retention/{row['skill']}"
+            values[key] = float(row["observed"])
+            # A chart that only shows the rate cannot tell a collapse from a
+            # noisy probe; these two series can.
+            values[f"{key}/ok"] = 1.0 if row["ok"] else 0.0
+            values[f"{key}/conclusive"] = 1.0 if row.get("conclusive") else 0.0
         return values
 
     def status(self) -> dict:
