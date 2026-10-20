@@ -83,7 +83,9 @@ python -m rlai.cli pretrain --config-file configs/1v1-mastery-1v1.json \
 
 Der Checkpoint hat `step = 0` und ist ein ganz normaler Checkpoint: `train`
 bzw. `python3 main.py --steps N` setzt ihn fort, echte Trainings-Checkpoints
-haben wegen ihres höheren Schritts weiter Vorrang. Gemessen (gleiche Config,
+haben wegen ihres höheren Schritts weiter Vorrang. Für längere Läufe gibt es
+`configs/1v1-selfplay.json` (10M Schritte, Selbstspiel-Pool, Batch 8192,
+fortsetzbar mit `--steps`). Gemessen (gleiche Config,
 gleicher Seed, 30.000 PPO-Schritte): **3,4 statt 0,8 Ballkontakte pro Episode
 und 45 statt 7 Tore**, mittlerer Return +4,9 statt 0,0; die reine
 BC-Policy gewinnt gegen `idle` 3 von 10 Spielen (4:0 Tore) und spielt gegen
@@ -279,10 +281,10 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q                    # 587 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
+python -m pytest -q                    # 589 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **587 passed, 1 skipped** in ca. 3 min (skip:
+Ergebnis in dieser Umgebung: **589 passed, 1 skipped** in ca. 3 min (skip:
 jsdom fehlt). Abgedeckt: Modi,
 Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
 PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,

@@ -394,6 +394,11 @@ def cmd_pretrain(args: argparse.Namespace) -> int:
             learning_rate=args.learning_rate,
             device=args.device,
             max_decisions=args.max_decisions,
+            dagger_rounds=args.dagger_rounds,
+            dagger_episodes=args.dagger_episodes,
+            dagger_beta=args.dagger_beta,
+            dagger_epochs=args.dagger_epochs,
+            dagger_learning_rate=args.dagger_learning_rate,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -671,6 +676,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop collecting after this many samples (quick experiments)",
     )
     pretrain.add_argument("--device", default=None, help="default: the config's device")
+    pretrain.add_argument(
+        "--dagger-rounds",
+        type=int,
+        default=0,
+        help=(
+            "DAgger rounds after the first imitation pass: the learner drives, "
+            "the expert labels the visited states, the dataset grows (0 = off)"
+        ),
+    )
+    pretrain.add_argument(
+        "--dagger-episodes",
+        type=int,
+        default=None,
+        help="episodes per DAgger round (default: a quarter of --episodes)",
+    )
+    pretrain.add_argument(
+        "--dagger-beta",
+        type=float,
+        default=0.5,
+        help="fraction of DAgger actions still taken by the expert (0..1)",
+    )
+    pretrain.add_argument(
+        "--dagger-epochs",
+        type=int,
+        default=1,
+        help="fine-tuning epochs per DAgger round (keep small)",
+    )
+    pretrain.add_argument(
+        "--dagger-learning-rate",
+        type=float,
+        default=None,
+        help="fine-tuning rate per DAgger round (default: --learning-rate / 10)",
+    )
     pretrain.set_defaults(func=cmd_pretrain)
 
     report = sub.add_parser("report", help="print the persisted training statistics report")

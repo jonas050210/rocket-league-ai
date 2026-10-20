@@ -56,6 +56,24 @@ class DemonstrationSet:
         return float(self.touches) / self.episodes if self.episodes else 0.0
 
 
+def _build_env(config: TrainingConfig) -> MatchEnv:
+    """Deterministic single-process env for demonstration collection.
+
+    The opponent is idle: the demonstrations should show the expert, not a
+    duel whose outcome depends on a second scripted policy.
+    """
+    return MatchEnv(
+        get_mode(config.mode),
+        build_opponent("idle"),
+        seed=int(config.seed),
+        episode_seconds=float(config.episode_seconds),
+        tick_skip=int(config.tick_skip),
+        obs_version=int(config.obs_version),
+        reset_mode=str(config.reset_mode),
+        no_touch_timeout_seconds=float(config.no_touch_timeout_seconds),
+    )
+
+
 def collect_demonstrations(
     config: TrainingConfig,
     *,
@@ -73,20 +91,8 @@ def collect_demonstrations(
     """
     if int(episodes) <= 0:
         raise ValueError("episodes must be positive")
-    spec = get_mode(config.mode)
     expert_policy = build_opponent(expert, seed=config.seed)
-    # The opponent is idle: the demonstrations should show the expert, not a
-    # duel whose outcome depends on a second scripted policy.
-    env = MatchEnv(
-        spec,
-        build_opponent("idle"),
-        seed=int(config.seed),
-        episode_seconds=float(config.episode_seconds),
-        tick_skip=int(config.tick_skip),
-        obs_version=int(config.obs_version),
-        reset_mode=str(config.reset_mode),
-        no_touch_timeout_seconds=float(config.no_touch_timeout_seconds),
-    )
+    env = _build_env(config)
     rows: list[np.ndarray] = []
     labels: list[int] = []
     touches = 0
@@ -144,6 +150,7 @@ def train_imitation(
     weight_decay: float = 1e-4,
     device: str = "cpu",
     seed: int = 0,
+    init_state: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Train the actor to predict the expert's action with cross-entropy.
 
@@ -159,6 +166,10 @@ def train_imitation(
         raise ValueError("epochs must be positive")
     torch.manual_seed(int(seed))
     model = policy_config.build().to(device)
+    if init_state is not None:
+        # DAgger fine-tunes the current policy instead of restarting from a
+        # random network: the new states are corrections, not a new task
+        model.load_state_dict(init_state)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay)
     )
@@ -209,6 +220,107 @@ def train_imitation(
     return state, metrics
 
 
+def _concat(first: DemonstrationSet, second: DemonstrationSet) -> DemonstrationSet:
+    """Aggregate datasets: every DAgger round *adds* states, it never replaces."""
+    return DemonstrationSet(
+        observations=np.concatenate([first.observations, second.observations], axis=0),
+        actions=np.concatenate([first.actions, second.actions], axis=0),
+        episodes=int(first.episodes) + int(second.episodes),
+        touches=int(first.touches) + int(second.touches),
+        details={**first.details, "dagger_rounds": int(first.details.get("dagger_rounds", 0)) + 1},
+    )
+
+
+def _actions_from_model(model: Any, observations: dict, agents: list[str], device: str) -> dict[str, int]:
+    import torch
+
+    batch = np.stack([np.asarray(observations[agent], dtype=np.float32) for agent in agents])
+    with torch.no_grad():
+        logits, _ = model(torch.as_tensor(batch, device=device))
+    return {
+        agent: int(index)
+        for agent, index in zip(agents, logits.argmax(dim=-1).detach().cpu().tolist())
+    }
+
+
+def collect_dagger_states(
+    config: TrainingConfig,
+    model: Any,
+    *,
+    episodes: int = 50,
+    expert: str = "chase",
+    beta: float = 0.5,
+    device: str = "cpu",
+    max_decisions: int | None = None,
+    progress: Any = None,
+) -> DemonstrationSet:
+    """DAgger round: the *learner* drives, the expert labels what it sees.
+
+    Behaviour cloning only sees states the expert visits.  The learner then
+    drifts into states the expert never showed it (the classic distribution
+    shift).  Here the learner rolls out its own trajectory, every visited
+    state is labelled by the expert, and the dataset grows with exactly the
+    mistakes the learner makes.  ``beta`` keeps a fraction of the actions
+    under expert control so the rollout does not wander into pure noise.
+    """
+    if int(episodes) <= 0:
+        raise ValueError("episodes must be positive")
+    beta = min(max(float(beta), 0.0), 1.0)
+    env = _build_env(config)
+    expert_policy = build_opponent(expert, seed=config.seed)
+    rng = np.random.default_rng(int(config.seed) + 7919)
+    budget = int(max_decisions) if max_decisions else None
+    rows: list[np.ndarray] = []
+    labels: list[int] = []
+    touches = 0
+    lengths: list[int] = []
+
+    for episode in range(int(episodes)):
+        obs = env.reset()
+        steps = 0
+        while True:
+            agents = env.policy_agents
+            learner = _actions_from_model(model, obs, agents, device)
+            expert_actions = expert_policy.act(env, obs, agents)
+            for agent in agents:
+                rows.append(np.asarray(obs[agent], dtype=np.float32))
+                labels.append(int(expert_actions[agent]))
+            executed = {
+                agent: (
+                    expert_actions[agent] if rng.random() < beta else learner[agent]
+                )
+                for agent in agents
+            }
+            result = env.step(executed)
+            obs = result.obs
+            steps += 1
+            if result.done or result.truncated:
+                break
+            if budget is not None and len(labels) >= budget:
+                break
+        touches += int(env.reward_events.get("touches", 0) or 0)
+        lengths.append(steps)
+        if progress is not None:
+            progress(episode + 1, int(episodes), touches)
+        if budget is not None and len(labels) >= budget:
+            break
+
+    if not rows:
+        raise RuntimeError("the learner produced no states")
+    return DemonstrationSet(
+        observations=np.stack(rows).astype(np.float32),
+        actions=np.asarray(labels, dtype=np.int64),
+        episodes=len(lengths),
+        touches=touches,
+        details={
+            "expert": str(expert),
+            "beta": beta,
+            "mean_episode_decisions": float(np.mean(lengths)) if lengths else 0.0,
+            "obs_version": int(config.obs_version),
+        },
+    )
+
+
 def run_pretraining(
     config: TrainingConfig,
     *,
@@ -220,9 +332,25 @@ def run_pretraining(
     device: str | None = None,
     models_dir: str | Path | None = None,
     max_decisions: int | None = None,
+    dagger_rounds: int = 0,
+    dagger_episodes: int | None = None,
+    dagger_beta: float = 0.5,
+    dagger_epochs: int = 1,
+    dagger_learning_rate: float | None = None,
     progress: Any = None,
 ) -> dict[str, Any]:
     """Collect, imitate and save one ``pretrain`` checkpoint.
+
+    With ``dagger_rounds > 0`` the recipe becomes DAgger: after the first
+    imitation pass the learner drives its own episodes, the expert labels
+    every visited state, and the enlarged dataset is trained again.  This
+    fixes the states the learner reaches but the expert never visited.
+
+    Measured caveat: with the built-in ``chase`` expert (79 % imitable)
+    DAgger was neutral-to-worse than plain behaviour cloning in our A/B runs,
+    and a large fine-tuning rate *degraded* the policy (0W 9L 11D vs 5W 7L 8D
+    against idle+chase).  It is off by default and fine-tunes with
+    ``learning_rate / 10``; use it with a stronger expert or more data.
 
     The checkpoint is written with ``step=0``: it is a warm start, not
     training progress, so a later resume that already has real checkpoints
@@ -247,6 +375,45 @@ def run_pretraining(
         device=resolved_device,
         seed=int(config.seed),
     )
+    rounds: list[dict[str, Any]] = []
+    for round_index in range(int(dagger_rounds or 0)):
+        model = config.policy_config().build().to(resolved_device)
+        model.load_state_dict(state)
+        model.eval()
+        added = collect_dagger_states(
+            config,
+            model,
+            episodes=dagger_episodes or max(1, int(episodes) // 4),
+            expert=expert,
+            beta=dagger_beta,
+            device=resolved_device,
+            max_decisions=max_decisions,
+        )
+        demonstrations = _concat(demonstrations, added)
+        state, metrics = train_imitation(
+            demonstrations,
+            config.policy_config(),
+            # fine-tune rather than restart: the aggregate mixes the easy
+            # expert states with the harder learner states
+            epochs=max(1, int(dagger_epochs)),
+            batch_size=batch_size,
+            learning_rate=float(
+                dagger_learning_rate if dagger_learning_rate is not None else learning_rate / 10.0
+            ),
+            device=resolved_device,
+            seed=int(config.seed) + round_index + 1,
+            init_state=state,
+        )
+        metrics["dagger_round"] = round_index + 1
+        rounds.append(
+            {
+                "round": round_index + 1,
+                "added_samples": added.samples,
+                "total_samples": demonstrations.samples,
+                "final_accuracy": metrics["final_accuracy"],
+                "final_loss": metrics["final_loss"],
+            }
+        )
     manifest = checkpoints.save_checkpoint(
         target,
         model_state=state,
@@ -262,6 +429,11 @@ def run_pretraining(
                 "episodes": demonstrations.episodes,
                 "samples": demonstrations.samples,
                 "touches_per_episode": round(demonstrations.touches_per_episode, 4),
+                "dagger_rounds": len(rounds),
+            },
+            "imitation": {
+                "final_accuracy": metrics["final_accuracy"],
+                "final_loss": metrics["final_loss"],
             },
         },
         label="pretrain",
@@ -282,6 +454,7 @@ def run_pretraining(
                 float(demonstrations.details.get("mean_episode_decisions") or 0.0), 2
             ),
         },
+        "dagger": rounds,
         "training": metrics,
         "next": (
             "continue with: python -m rlai.cli train --config-file <file> "

@@ -252,6 +252,47 @@ nicht besser werden als sein Lehrer. Es ist ein Startpunkt für PPO, kein
 Ersatz für Training; für längere Läufe gilt weiter, dass Spielstärke nicht
 gemessen ist (siehe `docs/STALL_ANALYSIS.md`).
 
+### DAgger (optional, empirisch nicht besser)
+
+`--dagger-rounds N` schaltet den DAgger-Schritt dazu: der Learner fährt seine
+eigenen Episoden, der Experte etikettiert die besuchten Zustände, das Dataset
+wächst, und das Modell wird mit kleiner Lernrate weiter trainiert
+(`--dagger-epochs`, Standard 1; `--dagger-learning-rate`, Standard
+`learning_rate / 10`; `--dagger-beta`, Standard 0.5).
+
+Gemessen mit dem Chaser als Experten (gleiche Config, Auswertung 10 Spiele je
+`idle` und `chase`): BC allein 5W 7L 8D, 6:9 Tore. Die DAgger-Varianten
+erreichten 0W 9L 11D (zu große Feinjustierungs-Lernrate, 3,3e-4) bzw.
+4W 7L 9D, 5:10 (3e-5). Ein Neu-Training auf dem aggregierten Dataset war
+ebenfalls schlechter (0W 7L 13D). Der Grund ist plausibel: der Chaser ist nur
+zu ~79 % imitierbar, und die Learner-Zustände bringen Rauschen statt
+Korrekturen. DAgger ist deshalb standardmäßig aus und als experimentell
+markiert – mit einem stärkeren Experten (z. B. einem trainierten Modell) ist
+der Ansatz weiter sinnvoll.
+
+## Skalierung: Selbstspiel (`configs/1v1-selfplay.json`)
+
+`configs/1v1-selfplay.json` ist die Vorlage für längere Läufe auf stärkerer
+Hardware: 10M Schritte, 4 Worker, Batch 8192, `self_play: true` mit
+Snapshot-Pool (12 Plätze, Snapshots alle 20 Iterationen),
+`reset_mode: mixed`, obs v4, Auswertung alle 25 Iterationen gegen `idle` und
+`chase`, Lernrate 2e-4.
+
+```bash
+python3 main.py train --config-file configs/1v1-selfplay.json --steps 1000000
+# später nahtlos weiter (Ziel = aktueller Schritt + N):
+python3 main.py train --config-file configs/1v1-selfplay.json --steps 1000000
+```
+
+Die Worker-Zahl wird beim Start an die Maschine angepasst (auf 2 vCPU bleibt
+1–2 übrig, der Batch schrumpft entsprechend). Realistische Erwartung: 10M
+Schritte sind bei ~1.100 Schritten/s auf 2 vCPU etwa 2,5 Stunden; für
+Spielstärke auf Nexto-Niveau fehlen weiterhin Größenordnungen (die
+Referenz-Bots wurden mit ~250.000 Stunden Gameplay trainiert,
+`docs/STALL_ANALYSIS.md`). Der Nutzen der Config ist ein reproduzierbarer,
+fortsetzbarer Langlauf mit dichtem Messsignal, nicht ein Versprechen einer
+bestimmten Rangstufe.
+
 ## Checkpoints und Resume
 
 * Checkpoints liegen unter `data/models/<model-id>/` und enthalten Modell,

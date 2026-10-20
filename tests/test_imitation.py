@@ -130,3 +130,41 @@ def test_cli_and_main_expose_pretrain():
     argv = module._prepare_argv(["pretrain", "--episodes", "5"])
     assert argv[0] == "pretrain"
     assert "--config-file" in argv
+
+
+def test_collect_dagger_states_labels_learner_rollouts():
+    from rlai.imitation import collect_dagger_states
+
+    config = _config()
+    model = config.policy_config().build()
+    data = collect_dagger_states(
+        config, model, episodes=1, expert="chase", beta=0.25, max_decisions=50
+    )
+    assert data.samples > 0
+    assert data.observations.shape[1] == config.observation_size
+    assert 0 <= int(data.actions.min()) and int(data.actions.max()) < 90
+    # the labels come from the expert, not from the learner
+    assert data.details["expert"] == "chase"
+    assert data.details["beta"] == 0.25
+
+
+def test_pretrain_with_dagger_rounds_grows_the_dataset(data_root):
+    config = _config()
+    summary = run_pretraining(
+        config,
+        episodes=1,
+        epochs=1,
+        expert="chase",
+        max_decisions=40,
+        dagger_rounds=1,
+        dagger_episodes=1,
+        models_dir=data_root / "models",
+    )
+    assert len(summary["dagger"]) == 1
+    round_info = summary["dagger"][0]
+    assert round_info["round"] == 1
+    assert round_info["added_samples"] > 0
+    # the final model was trained on the aggregated dataset
+    assert round_info["total_samples"] == summary["training"]["samples"]
+    assert round_info["added_samples"] < round_info["total_samples"]
+    assert (data_root / "models" / "latest.json").is_file()
