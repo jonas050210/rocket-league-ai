@@ -56,6 +56,87 @@ class PolicySettings(BaseModel):
         return value
 
 
+class EscalationPoint(BaseModel):
+    """One scheduled change of the training task.
+
+    The sample budget, not the wall clock, decides when a training task has
+    been learned: a policy that has touched the ball a million times in a
+    close-range drill does not need a million more.  A run can therefore
+    declare a ladder of tasks, each starting at a given step:
+
+    * a longer episode horizon and a longer no-touch timeout (the agent now
+      has to cross the field instead of finding the ball next to it),
+    * ``reach`` -> ``drill`` -> ``mixed`` starting states,
+    * a heavier goal weight relative to touch/approach shaping (so the same
+      behaviour is no longer rewarded once it is easy),
+    * a stronger scripted opponent for runs without a curriculum.
+
+    The learner keeps its weights, optimizer, step counter and RNG; only the
+    environment and the reward definition change, and the change is logged
+    and recorded as a metric (``escalation/level``).  A change mid-run is
+    visible in the report: the reward components before and after the switch
+    are different objectives, which is why every switch is announced.
+    """
+
+    at_step: int = Field(ge=0)
+    label: str = Field(default="", max_length=80)
+    #: new episode horizon (``None`` keeps the current value)
+    episode_seconds: float | None = Field(default=None, ge=5, le=600)
+    #: new no-touch timeout (``None`` keeps the current value, 0 disables it)
+    no_touch_timeout_seconds: float | None = Field(default=None, ge=0.0, le=600.0)
+    #: new starting-state distribution
+    reset_mode: str | None = None
+    #: reward weights to *change*; every unlisted component keeps its value
+    reward: dict[str, float] | None = None
+    #: scripted opponent for a run without a curriculum (ignored when a
+    #: curriculum owns the opponent, which is logged)
+    opponent: str | None = None
+    #: why the task changes here (report/log)
+    purpose: str = ""
+
+    @field_validator("reset_mode")
+    @classmethod
+    def _reset_mode_valid(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from .envs import RESET_MODES
+
+        if value not in RESET_MODES:
+            raise ValueError(f"reset_mode must be one of {list(RESET_MODES)}")
+        return value
+
+    @field_validator("opponent")
+    @classmethod
+    def _opponent_valid(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from .opponents import validate_opponent_name
+
+        return validate_opponent_name(value)
+
+    @field_validator("reward")
+    @classmethod
+    def _reward_valid(cls, value: dict[str, float] | None) -> dict[str, float] | None:
+        if value is None:
+            return None
+        from dataclasses import fields
+
+        allowed = {field.name for field in fields(RewardWeights)}
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ValueError(
+                f"unknown reward components {unknown}; valid: {sorted(allowed)}"
+            )
+        return {str(key): float(component) for key, component in value.items()}
+
+    def to_dict(self) -> dict:
+        return {
+            key: value
+            for key, value in self.model_dump().items()
+            if value not in (None, "", {})
+        }
+
+
 class TrainingConfig(BaseModel):
     run_name: str = Field(default="1v1 baseline", min_length=1, max_length=80)
     mode: str = "soccer-1v1"
@@ -191,6 +272,11 @@ class TrainingConfig(BaseModel):
     adaptive_min_seconds: float = Field(default=60.0, ge=0.0, le=86400.0)
     #: how much a single change moves the opponent (0..1)
     adaptive_step: float = Field(default=0.1, gt=0, le=1.0)
+    #: --- Scheduled task changes ----------------------------------------
+    #: Task ladder by sample budget (see :class:`EscalationPoint`).  Empty by
+    #: default: nothing about a run changes unless it says so.  Points apply
+    #: in ascending ``at_step`` order and each one is logged once.
+    escalation: list[EscalationPoint] = Field(default_factory=list, max_length=64)
     #: --- Player Memory -------------------------------------------------
     #: remember the players the agent met.  The memory is data, never
     #: part of the model weights.
@@ -293,6 +379,27 @@ class TrainingConfig(BaseModel):
                 f"({self.lr_anneal_start} >= {self.total_steps}); the anneal window "
                 "would be empty"
             )
+        if self.escalation:
+            steps = [int(point.at_step) for point in self.escalation]
+            if steps != sorted(steps):
+                raise ValueError("escalation points must be ordered by at_step")
+            if len(set(steps)) != len(steps):
+                raise ValueError("two escalation points share the same at_step")
+            if steps[-1] >= self.total_steps:
+                raise ValueError(
+                    f"the last escalation point is at step {steps[-1]}, but the run "
+                    f"ends at total_steps={self.total_steps}: it would never apply"
+                )
+            for point in self.escalation:
+                if (
+                    point.episode_seconds is not None
+                    and point.no_touch_timeout_seconds is not None
+                    and point.no_touch_timeout_seconds >= point.episode_seconds
+                ):
+                    raise ValueError(
+                        f"escalation point at step {point.at_step}: the no-touch "
+                        "timeout must be shorter than the episode horizon"
+                    )
         if self.curriculum:
             # The stages are validated here, so a broken threshold is
             # reported when the configuration is checked and not in the

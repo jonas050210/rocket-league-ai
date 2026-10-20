@@ -500,6 +500,19 @@ def build_run_report(
 
     resumed_step = int(run.get("resumed_step") or 0)
     end_step = int(run.get("step") or 0)
+    # A task ladder can change the reward definition mid-run (see
+    # config.EscalationPoint).  Reward components measured before the switch
+    # belong to a different objective, so the component table starts at the
+    # newest point that has already been reached.
+    escalation = list(run_config.get("escalation") or [])
+    escalation_since = resumed_step
+    for point in escalation:
+        try:
+            at_step = int(point.get("at_step"))
+        except (TypeError, ValueError):
+            continue
+        if at_step <= end_step:
+            escalation_since = max(escalation_since, at_step)
     completed = max(0, end_step - resumed_step)
     total_steps = run.get("total_steps") or run_config.get("total_steps")
 
@@ -569,7 +582,7 @@ def build_run_report(
     for name in store.metric_names(run_id):
         if not name.startswith("reward/"):
             continue
-        stats = store.metric_stats(run_id, name, since_step=resumed_step)
+        stats = store.metric_stats(run_id, name, since_step=escalation_since)
         if stats.get("available"):
             reward_components[name] = {
                 "mean": _round(stats.get("mean")),
@@ -814,6 +827,16 @@ def build_run_report(
             "Playing strength comes exclusively from the evaluation section, which is "
             "measured against fixed opponents under a recorded protocol.",
             "Values marked available=false were never measured; they are not zero.",
+        ]
+        + [
+            f"the task changed at step {int(point['at_step'])}"
+            + (f" ({point['label']})" if point.get("label") else "")
+            + ": reward components and episode statistics before that step belong "
+            "to a different objective; the component table starts after the switch"
+            for point in escalation
+            if isinstance(point, dict)
+            and point.get("at_step") is not None
+            and int(point.get("at_step", 0)) <= end_step
         ],
     }
     return report

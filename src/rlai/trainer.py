@@ -232,6 +232,10 @@ class Trainer:
         self.iteration = 0
         self.start_step = 0
         self.pool: WorkerPool | None = None
+        #: scheduled task changes (see config.EscalationPoint); applied in
+        #: order, once, when ``self.step`` reaches their ``at_step``
+        self.escalation = list(getattr(config, "escalation", []) or [])
+        self.escalation_applied = 0
         self.league = OpponentPool(
             capacity=int(config.pool_capacity),
             duplicate_step_tolerance=int(config.pool_duplicate_step_tolerance),
@@ -1019,6 +1023,73 @@ class Trainer:
         )
         return manifest
 
+    # -- scheduled task changes ---------------------------------------------
+    def _apply_escalation(self) -> None:
+        """Apply every escalation point whose step has been reached.
+
+        The task ladder is how a run stops paying for what it has already
+        learned: at a given sample budget the horizon grows, the starting
+        states move away from the ball, the goal weight rises relative to
+        touch shaping, or a stronger scripted opponent takes over.  Weights,
+        optimizer, step counter and RNG are untouched - only the environment
+        and the reward definition change, which is exactly why every point is
+        logged and recorded (one run can therefore contain several different
+        objectives, and the report says so).
+        """
+        if not self.escalation or self.escalation_applied >= len(self.escalation):
+            return
+        while self.escalation_applied < len(self.escalation):
+            point = self.escalation[self.escalation_applied]
+            if self.step < int(point.at_step):
+                break
+            updates: dict = {}
+            changes: list[str] = []
+            if point.episode_seconds is not None:
+                updates["episode_seconds"] = float(point.episode_seconds)
+                changes.append(f"episode {float(point.episode_seconds):.0f} s")
+            if point.no_touch_timeout_seconds is not None:
+                updates["no_touch_timeout_seconds"] = float(
+                    point.no_touch_timeout_seconds
+                )
+                changes.append(
+                    f"no-touch {float(point.no_touch_timeout_seconds):.0f} s"
+                )
+            if point.reset_mode is not None:
+                updates["reset_mode"] = str(point.reset_mode)
+                changes.append(f"resets {point.reset_mode}")
+            if point.reward:
+                merged = dict(self.config.reward.to_dict())
+                merged.update({key: float(value) for key, value in point.reward.items()})
+                updates["reward"] = type(self.config.reward).from_dict(merged)
+                changes.append(
+                    "reward "
+                    + ", ".join(
+                        f"{key}={float(value):g}" for key, value in point.reward.items()
+                    )
+                )
+            if point.opponent is not None:
+                if self.curriculum is not None:
+                    self._warn(
+                        f"escalation point at step {point.at_step} names opponent "
+                        f"{point.opponent!r}, but the curriculum owns the opponent; "
+                        "the point is applied without it"
+                    )
+                else:
+                    updates["opponent"] = str(point.opponent)
+                    changes.append(f"opponent {point.opponent}")
+            if updates:
+                self.config = self.config.model_copy(update=updates)
+            self.escalation_applied += 1
+            label = f" ({point.label})" if point.label else ""
+            purpose = f" - {point.purpose}" if point.purpose else ""
+            self._log(
+                "INFO",
+                f"escalation {self.escalation_applied}/{len(self.escalation)}"
+                f"{label} at step {self.step}: {'; '.join(changes) or 'no change'}"
+                f"{purpose}",
+            )
+            self._metric("escalation/level", float(self.escalation_applied))
+
     def _apply_retention(self) -> None:
         """Bound the size of the metric, log and episode tables.
 
@@ -1663,6 +1734,19 @@ class Trainer:
             )
             self._apply_resource_limits()
             self._start_session()
+            if self.escalation:
+                self._log(
+                    "INFO",
+                    "task ladder: "
+                    + ", ".join(
+                        f"step {point.at_step}"
+                        + (f" ({point.label})" if point.label else "")
+                        for point in self.escalation
+                    ),
+                )
+            # points that are already behind the restored step apply before
+            # the first rollout, so a long resume starts on the right task
+            self._apply_escalation()
             self.pool = WorkerPool(self.config)
             self.store.update_run(self.run_id, status="running")
             self.league.add(f"initial-{self.run_id[:6]}", self.step, self._snapshot_state())
@@ -1726,6 +1810,7 @@ class Trainer:
                     reset_mode=reset_mode,
                     episode_seconds=episode_seconds,
                     no_touch_timeout=no_touch_seconds,
+                    reward_weights=self.config.reward.to_dict(),
                 )
                 collect_seconds = time.perf_counter() - started
 
@@ -1751,6 +1836,8 @@ class Trainer:
                 update_seconds = time.perf_counter() - update_started
                 self.step += batch_size
                 self.iteration += 1
+                # the *next* rollout uses the task the new step budget asks for
+                self._apply_escalation()
 
                 episodes = [ep for rollout in rollouts for ep in rollout["episodes"]]
                 wins, losses, draws = _outcome_counts(episodes)

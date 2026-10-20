@@ -306,6 +306,80 @@ Referenz-Bots wurden mit ~250.000 Stunden Gameplay trainiert,
 fortsetzbarer Langlauf mit dichtem Messsignal, nicht ein Versprechen einer
 bestimmten Rangstufe.
 
+## Aufgaben-Leiter: `escalation` (`configs/1v1-task-ladder.json`)
+
+Ein Curriculum schaltet **Gegner und Startzustände** weiter, wenn eine
+Fertigkeit gemessen wurde. Es kann aber nicht den *Belohnungsbegriff* ändern –
+und genau das braucht ein langer Lauf: Was in Nahbereichs-Drills sinnvoll ist
+(Touch-Bonus, Annäherung), ist später ein Proxy, den die Policy farmt.
+
+`escalation` ist eine Leiter aus Punkten, die bei einem **Schrittbudget**
+greifen (nicht nach Wanduhr):
+
+```json
+"escalation": [
+  {"at_step": 2000000, "label": "wider world",
+   "episode_seconds": 30.0, "no_touch_timeout_seconds": 20.0,
+   "reset_mode": "drill", "reward": {"touch": 0.2, "goal": 15.0}},
+  {"at_step": 12000000, "label": "opponent with teeth",
+   "episode_seconds": 60.0, "opponent": "chase", "reward": {"goal": 30.0}}
+]
+```
+
+Regeln:
+
+* Jeder Punkt gilt **einmal**, in aufsteigender Reihenfolge; `at_step` muss
+  unter `total_steps` liegen (sonst Fehler beim Laden).
+* `reward` ist ein **Delta**: nur genannte Komponenten ändern sich, alle
+  anderen behalten ihren Wert. Unbekannte Namen und ungültige `reset_mode`
+  werden beim Laden abgelehnt.
+* Gewichte, Optimizer, Schrittzähler und RNG bleiben unangetastet – nur
+  Umgebung und Belohnungsfunktion wechseln. Der Worker baut die Arena dafür
+  neu (wie bei `episode_seconds`), weil die Reward-Gewichte in die
+  Belohnungsfunktion eingebacken sind.
+* Jeder Wechsel wird geloggt (`escalation 1/3 …`) und als Metrik
+  `escalation/level` gespeichert. Der Report schränkt `reward_components` auf
+  die **aktuelle Aufgabe** ein und notiert jeden Wechsel in `notes`, weil
+  Reward-Zahlen vor und nach dem Wechsel verschiedene Ziele beschreiben.
+* Läuft gleichzeitig ein Curriculum, gehören Gegner und Startzustände der
+  Stufe; ein `opponent` im Punkt wird dann ignoriert und das laut geloggt.
+* Beim Fortsetzen werden alle Punkte, die **hinter** dem wiederhergestellten
+  Schritt liegen, sofort angewandt – der Lauf startet auf der richtigen
+  Aufgabe.
+
+`configs/1v1-task-ladder.json` ist die Vorlage dazu (20M Schritte, Punkte bei
+2M / 6M / 12M, ohne Curriculum, damit die Leiter allein steuert).
+
+### Gemessener Grund für die Leiter: der Entropie-Bonus dreht die Policy auf
+
+Ein Fortsetzungslauf vom BC-Checkpoint zeigte über 118 Iterationen
+(`shooting`-Stufe, `entropy_coef = 0.01`): Entropie **1,73 → 2,39**,
+Kontakte/Episode 3,83 → 2,29, Episoden ohne Kontakt 16 % → 32 %. Die Policy
+wurde also *gleichmäßiger*, nicht sicherer. Drei Ablationen mit sonst
+identischer Config (je 60k Schritte, gleicher Checkpoint):
+
+| `entropy_coef` | Schritte | Entropie | Kontakte/Episode (1. → 2. Hälfte) | ohne Kontakt |
+| --- | --- | --- | --- | --- |
+| 0.01 (Standard) | 240k | 1,73 → 2,39 | 3,83 → 2,29 | 16 % → 32 % |
+| 0.001 | 60k | 1,88 → 0,88 | 4,19 → 4,51 | 9 % → 9 % |
+| 0.0001 | 60k | 1,66 → 1,11 | 4,13 → 3,46 | 13 % → 11 % |
+| 0.0 | 60k | 1,56 → 0,95 | 4,29 → 4,63 | 8 % → 9 % |
+
+(Die 0.01-Zeile ist der längere Lauf, aus dem die Frage kam; die drei
+Ablationen liefen je 60k Schritte ab demselben Checkpoint. Für einen
+belastbaren A/B derselben Länge fehlte auf 2 vCPU die Zeit – die Richtung ist
+über alle Läufe aber eindeutig.)
+
+Der Bonus ist bei einer warm gestarteten Policy also der dominante Gradient,
+wenn die Aufgabe dicht aber schwach belohnt ist. `entropy_coef` ist ein
+**geerbtes** Feld: beim Fortsetzen gewinnt der Checkpoint, nicht die Datei.
+Wer es ändern will, muss es nennen:
+
+```bash
+python3 main.py train --config-file configs/1v1-mastery-1v1.json \
+  --steps 500000 --override-config entropy_coef
+```
+
 ## Checkpoints und Resume
 
 * Checkpoints liegen unter `data/models/<model-id>/` und enthalten Modell,
@@ -636,7 +710,9 @@ Lauf wurde ohne explizite Freigabe nicht gestartet.
    mit festen Seeds; erst danach Selbstspiel.
 4. **1v1 Selbstspiel** – Gegnerpool aus eingefrorenen Snapshots
    (`1v1-selfplay`). Wer die Gegnerstufen automatisch weiterschalten will,
-   nimmt `1v1-curriculum` (auch als Preset im Dashboard).
+   nimmt `1v1-curriculum` (auch als Preset im Dashboard); wer stattdessen
+   **Belohnung und Horizont** nach Schrittbudget ändern will, nimmt die
+   Aufgaben-Leiter `1v1-task-ladder` (`escalation`, siehe oben).
 5. **2v2 / 3v3** – vom 1v1-Checkpoint starten, Teamgröße erhöhen
    (`2v2-teamplay`, `3v3-teamplay`).
 6. **Heatseeker 2v2** – separat trainieren (`heatseeker-2v2`).

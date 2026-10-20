@@ -319,7 +319,7 @@ change on the user's 50M-step budget.
 
 ```
 ruff check src tests rlbot        # All checks passed
-pytest -q                         # 592 passed, 1 skipped (jsdom) — 168 s
+pytest -q                         # 602 passed, 1 skipped (jsdom) — 253 s
 ```
 
 (The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by
@@ -380,6 +380,59 @@ Schritt 102 400: **+0,99 Reward, +3,5 Prozentpunkte Siegquote, +0,035 Tore pro
 Episode, +0,125 Kontakte pro Episode** gegenüber dem Stufenbeginn. Der
 Fortschritt war also da – der globale Vergleich hat ihn nur von einem
 Stufenwechsel überlagert.
+
+### Der `shooting`-Engpass: 55 % der Episoden ohne Ballkontakt
+
+Dieselben 294 Curriculum-Iterationen des Laufs `f6d11b8f8ae6`, gruppiert nach
+der zum Zeitpunkt der Episode aktiven Stufe:
+
+| Stufe | Episoden | Kontakte/Episode | ohne Kontakt | Truncations | Ø Länge | Ø Reward |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 `approach` (`reach`) | 112 | 3,37 | 8 % | 79 % | 173 | 4,34 |
+| 1 `control` (`reach`) | 298 | 4,86 | 4 % | 76 % | 172 | 4,95 |
+| 2 `shooting` (`mixed`) | 1 259 | 1,39 | **55 %** | 91 % | 183 | 0,85 |
+
+`mixed` ist zur Hälfte Kickoff: der Ball liegt dann 2 500+ uu entfernt, und der
+laufweite 10-s-No-Touch-Timeout beendete die Episode, bevor eine schwache
+Policy ankommen konnte. Mehr als die Hälfte der Stichproben trug damit gar
+kein Reward-Signal – der `progress`-Gate blieb bei 0,29 (gefordert 0,70), und
+der Lauf stand 224 Stufen-Iterationen still.
+
+Zwei Änderungen (Commit `ec305d0`): `shooting` startet aus `drill`-Zuständen
+(Attacke/Verteidigung/Race, 700–2 600 uu; Kickoffs kommen mit `defense`
+zurück), und `Stage.no_touch_timeout` erlaubt jeder Stufe einen eigenen
+Timeout – `shooting` … `integrated` nutzen 25 s, die Nahbereichsstufen
+behalten den Laufwert. Der Timeout reist mit dem Collect-Kommando und baut
+die Worker-Arena neu (wie `episode_seconds`).
+
+Wirkung im A/B (gleicher Checkpoint, je 80 000 Schritte, `/tmp/rlai-shootA`
+gegen `/tmp/rlai-shootB`): Episoden ohne Kontakt 30 % → 17 % in der ersten
+Hälfte, Kontakte/Episode 2,24 → 3,24.
+
+### Warum 80k-Schritte-A/Bs nichts beweisen (Rauschkalibrierung)
+
+Drei Läufe mit **identischer** effektiver Config und demselben Checkpoint
+(`rlai-shootB/C/D`, je 81 920 Schritte) ergaben: Kontakte/Episode in der
+zweiten Hälfte 2,31 / 1,91 / 3,84 und `progress`-Gate 0,25 / 0,71 / 0,13.
+Der Resume ist nicht bit-deterministisch (die Worker ziehen ihre Aktions-
+Stichproben aus eigenen Torch-RNGs), und 24 Gate-Trials haben ±18
+Prozentpunkte Konfidenzband. **Policy-Vergleiche brauchen die geseedete
+Match-Evaluation (`eval_interval`, feste Seeds), keine Trainings-Rollouts** –
+und selbst dort sind 10 Spiele nur eine grobe Auflösung.
+
+Nebenbefund: `learning_rate` und `entropy_coef` stehen in `INHERITED_FIELDS`.
+Ein `--config-file` mit anderen Werten wird beim Fortsetzen **nicht**
+angewandt (Log: `source=inherited`); dafür braucht es `--override-config`.
+Das ist Absicht (Reproduzierbarkeit), hat aber drei Testläufe gekostet.
+
+### 20-s-Evaluationen überschätzen eine passive Policy
+
+Der BC-Checkpoint galt als „5W/7L/8D gegen idle+chase" – gemessen über 20 s
+Episoden. Mit 60-s-Spielen und denselben Gegnern steht dieselbe Policy bei
+**0W 0L 10D gegen `idle` (0:0)** und **0W 10L 0D gegen `chase` (0:37)**:
+Bei 20 s reicht die Zeit meist nur zum 0:0, bei 60 s kassiert sie. Für
+Fortschrittsaussagen sind volle Spiele nötig; alle Zahlen in diesem Abschnitt
+nutzen `eval_match_seconds = 60`, 10 Spiele je Gegner, beide Seiten.
 
 ## Reproduction commands (isolated data)
 
