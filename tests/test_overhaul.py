@@ -525,11 +525,15 @@ def test_mixed_stage_draws_opponents_per_worker(data_root):
         if stage.opponent == "mixed"
     )
     stage = trainer.curriculum.stage
-    names, states, ids, stage_name, reset_mode, seconds = trainer._select_opponents()
+    names, states, ids, stage_name, reset_mode, seconds, no_touch = (
+        trainer._select_opponents()
+    )
     assert stage_name == stage.name
     assert len(names) == 8 and set(names) <= {"chase", "random"}
     assert states == [None] * 8 and ids == [None] * 8
     assert reset_mode == "mixed" and seconds == float(stage.episode_seconds or 45.0)
+    # the stage's own no-touch timeout wins over the run-wide 0.0 default
+    assert no_touch == float(stage.no_touch_timeout or config.no_touch_timeout_seconds)
 
 
 def test_detect_eval_stall():

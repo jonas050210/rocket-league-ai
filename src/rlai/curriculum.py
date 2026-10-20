@@ -175,6 +175,12 @@ class Stage:
     reset_mode: str = "kickoff"
     #: per-stage episode horizon; ``None`` uses the run configuration
     episode_seconds: float | None = None
+    #: per-stage no-touch timeout; ``None`` uses the run configuration.  A
+    #: stage whose starting states are far from the ball needs a longer
+    #: timeout, otherwise more than half of its episodes end before the
+    #: learner can touch the ball at all (measured: 55 % zero-touch episodes
+    #: in the ``shooting`` stage with the run-wide 10 s timeout).
+    no_touch_timeout: float | None = None
     #: mean learning-team ball touches per episode required to promote
     min_touches: float = 0.0
     #: mean goals scored per episode required to promote
@@ -250,6 +256,13 @@ class Stage:
             raise ValueError(
                 f"curriculum stage {self.name!r}: episode_seconds must be between 5 and 600"
             )
+        if self.no_touch_timeout is not None and not (
+            0.0 <= float(self.no_touch_timeout) <= 600.0
+        ):
+            raise ValueError(
+                f"curriculum stage {self.name!r}: no_touch_timeout must be between "
+                "0 and 600 seconds (0 disables it)"
+            )
         if float(self.min_touches) < 0 or float(self.min_goal_rate) < 0:
             raise ValueError(
                 f"curriculum stage {self.name!r}: touch/goal targets must not be negative"
@@ -313,6 +326,7 @@ class Stage:
             "window": self.window,
             "reset_mode": self.reset_mode,
             "episode_seconds": self.episode_seconds,
+            "no_touch_timeout": self.no_touch_timeout,
             "min_touches": self.min_touches,
             "min_goal_rate": self.min_goal_rate,
             "max_conceded_rate": self.max_conceded_rate,
@@ -343,26 +357,31 @@ MASTERY_STAGES: tuple[Stage, ...] = (
     ),
     Stage(
         "shooting", "idle", min_iterations=30, win_rate=0.0, min_episodes=40,
-        reset_mode="mixed", episode_seconds=30.0,
+        # ``drill`` keeps every start in an attacking/defending/race situation
+        # within 700-2600 uu of the ball.  ``mixed`` would add kickoffs, whose
+        # 2500+ uu approach is a *reach* problem that the two previous stages
+        # already solved - and it is where more than half of the episodes ran
+        # into the no-touch timeout without a single contact.
+        reset_mode="drill", episode_seconds=30.0, no_touch_timeout=25.0,
         gates=(GATE_PROGRESS, GATE_SHOOTING),
         purpose="turn attacking positions into shots and goals",
     ),
     Stage(
         "defense", "chase", min_iterations=40, win_rate=0.0, min_episodes=40,
-        reset_mode="mixed", episode_seconds=30.0,
+        reset_mode="mixed", episode_seconds=30.0, no_touch_timeout=25.0,
         gates=(GATE_DEFENSE, GATE_REENGAGE),
         purpose="stop shots on goal and get back to the ball after a missed contact",
     ),
     Stage(
         "pressure", "chase", min_iterations=40, win_rate=0.0, min_episodes=40,
-        reset_mode="mixed", episode_seconds=30.0,
+        reset_mode="mixed", episode_seconds=30.0, no_touch_timeout=25.0,
         gates=(GATE_SHOOTING, GATE_DEFENSE, GATE_MATCH_CHASE),
         demote_win_rate=0.02,
         purpose="score and defend in the same game against an active opponent",
     ),
     Stage(
         "integrated", "mixed", min_iterations=60, win_rate=0.0, min_episodes=40,
-        reset_mode="mixed", episode_seconds=45.0,
+        reset_mode="mixed", episode_seconds=45.0, no_touch_timeout=25.0,
         gates=(GATE_SHOOTING, GATE_DEFENSE, GATE_MATCH_MIXED),
         demote_win_rate=0.05,
         purpose="one policy that plays a full 1v1 against a mixed opponent pool",

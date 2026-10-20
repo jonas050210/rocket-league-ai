@@ -232,6 +232,10 @@ class Trainer:
         self.iteration = 0
         self.start_step = 0
         self.pool: WorkerPool | None = None
+        #: scheduled task changes (see config.EscalationPoint); applied in
+        #: order, once, when ``self.step`` reaches their ``at_step``
+        self.escalation = list(getattr(config, "escalation", []) or [])
+        self.escalation_applied = 0
         self.league = OpponentPool(
             capacity=int(config.pool_capacity),
             duplicate_step_tolerance=int(config.pool_duplicate_step_tolerance),
@@ -268,6 +272,8 @@ class Trainer:
         self.interrupt_checkpoint_error: str | None = None
         self._interrupt_guard = _InterruptGuard()
         self.evaluation_seconds = 0.0
+        #: monotonic timestamp of the last recovery checkpoint (crash net)
+        self._last_recovery_at = time.monotonic()
         self.gate_seconds = 0.0
         self.gate_probe_seconds = 0.0
         self.checkpoint_seconds = 0.0
@@ -433,6 +439,10 @@ class Trainer:
         self.resume_plan = plan
         for warning in plan.warnings:
             self._warn(warning)
+        # Informational plan notes (e.g. "--steps N" resolved to an absolute
+        # target) are not warnings: they describe what was asked for.
+        for note in getattr(plan, "notes", []) or []:
+            self._log("INFO", note)
         if not plan.will_resume:
             reasons = "; ".join(
                 reason
@@ -983,6 +993,103 @@ class Trainer:
         self.store.replace_player_memory(rows_from_memory(memory))
 
     # -- retention ----------------------------------------------------------
+    def _maybe_recovery_checkpoint(self) -> dict | None:
+        """Write a bounded ``recovery`` checkpoint every few minutes.
+
+        The documented checkpoint policy writes a checkpoint only at the end
+        of a run or on a graceful stop, so a hard crash (power loss, SIGKILL,
+        kernel panic) loses every step since the last run ended.  For a
+        multi-hour run that is unacceptable, so this adds a *bounded* net:
+        one checkpoint every ``recovery_checkpoint_minutes`` of wall time,
+        pruned by the normal ``keep_checkpoints`` retention.
+
+        It is deliberately not a "routine checkpoint every N iterations":
+        that design produced about 10,000 directories for a 50M-step run.
+        """
+        minutes = float(getattr(self.config, "recovery_checkpoint_minutes", 0.0) or 0.0)
+        if minutes <= 0:
+            return None
+        now = time.monotonic()
+        if now - self._last_recovery_at < minutes * 60.0:
+            return None
+        self._last_recovery_at = now
+        manifest = self._save(label="recovery")
+        if manifest is None:
+            return None
+        self._log(
+            "INFO",
+            f"recovery checkpoint {manifest['id']} at step {self.step} "
+            f"(every {minutes:g} min of wall time; a hard crash resumes from here)",
+        )
+        return manifest
+
+    # -- scheduled task changes ---------------------------------------------
+    def _apply_escalation(self) -> None:
+        """Apply every escalation point whose step has been reached.
+
+        The task ladder is how a run stops paying for what it has already
+        learned: at a given sample budget the horizon grows, the starting
+        states move away from the ball, the goal weight rises relative to
+        touch shaping, or a stronger scripted opponent takes over.  Weights,
+        optimizer, step counter and RNG are untouched - only the environment
+        and the reward definition change, which is exactly why every point is
+        logged and recorded (one run can therefore contain several different
+        objectives, and the report says so).
+        """
+        if not self.escalation or self.escalation_applied >= len(self.escalation):
+            return
+        while self.escalation_applied < len(self.escalation):
+            point = self.escalation[self.escalation_applied]
+            if self.step < int(point.at_step):
+                break
+            updates: dict = {}
+            changes: list[str] = []
+            if point.episode_seconds is not None:
+                updates["episode_seconds"] = float(point.episode_seconds)
+                changes.append(f"episode {float(point.episode_seconds):.0f} s")
+            if point.no_touch_timeout_seconds is not None:
+                updates["no_touch_timeout_seconds"] = float(
+                    point.no_touch_timeout_seconds
+                )
+                changes.append(
+                    f"no-touch {float(point.no_touch_timeout_seconds):.0f} s"
+                )
+            if point.reset_mode is not None:
+                updates["reset_mode"] = str(point.reset_mode)
+                changes.append(f"resets {point.reset_mode}")
+            if point.reward:
+                merged = dict(self.config.reward.to_dict())
+                merged.update({key: float(value) for key, value in point.reward.items()})
+                updates["reward"] = type(self.config.reward).from_dict(merged)
+                changes.append(
+                    "reward "
+                    + ", ".join(
+                        f"{key}={float(value):g}" for key, value in point.reward.items()
+                    )
+                )
+            if point.opponent is not None:
+                if self.curriculum is not None:
+                    self._warn(
+                        f"escalation point at step {point.at_step} names opponent "
+                        f"{point.opponent!r}, but the curriculum owns the opponent; "
+                        "the point is applied without it"
+                    )
+                else:
+                    updates["opponent"] = str(point.opponent)
+                    changes.append(f"opponent {point.opponent}")
+            if updates:
+                self.config = self.config.model_copy(update=updates)
+            self.escalation_applied += 1
+            label = f" ({point.label})" if point.label else ""
+            purpose = f" - {point.purpose}" if point.purpose else ""
+            self._log(
+                "INFO",
+                f"escalation {self.escalation_applied}/{len(self.escalation)}"
+                f"{label} at step {self.step}: {'; '.join(changes) or 'no change'}"
+                f"{purpose}",
+            )
+            self._metric("escalation/level", float(self.escalation_applied))
+
     def _apply_retention(self) -> None:
         """Bound the size of the metric, log and episode tables.
 
@@ -995,7 +1102,13 @@ class Trainer:
             if self.config.metric_retention:
                 removed += self.store.prune_metrics(self.run_id, self.config.metric_retention)
             if self.config.episode_retention:
-                removed += self.store.prune_episodes(self.run_id, self.config.episode_retention)
+                removed += self.store.prune_episodes(
+                    self.run_id,
+                    self.config.episode_retention,
+                    # keep the beginning of the run: the report compares the
+                    # first and last episode window to judge learning
+                    protect_first=report_module.LEARNING_EVIDENCE_WINDOW,
+                )
             if self.config.log_retention:
                 removed += self.store.prune_logs(self.run_id, self.config.log_retention)
             if removed:
@@ -1103,8 +1216,8 @@ class Trainer:
     # -- opponent selection --------------------------------------------------
     def _select_opponents(
         self,
-    ) -> tuple[list[str | None], list, list[str | None], str, str, float]:
-        """Per-worker (names, weights, pool ids, stage, reset mode, seconds).
+    ) -> tuple[list[str | None], list, list[str | None], str, str, float, float]:
+        """Per-worker (names, weights, pool ids, stage, reset mode, seconds, no-touch).
 
         Every worker draws its own opponent: in `mixed` stages each worker
         independently faces chase or random, in self-play each worker gets
@@ -1116,30 +1229,42 @@ class Trainer:
         """
         count = max(1, int(self.config.n_workers))
         seconds = float(self.config.episode_seconds)
+        no_touch = float(self.config.no_touch_timeout_seconds)
         if self.curriculum is not None:
             stage = self.curriculum.stage
             reset_mode = stage.reset_mode
             if stage.episode_seconds is not None:
                 seconds = float(stage.episode_seconds)
+            if stage.no_touch_timeout is not None:
+                no_touch = float(stage.no_touch_timeout)
             if stage.opponent == "self" and self.league.usable:
                 picks = [self.league.sample(self.rng) for _ in range(count)]
                 return (
                     [None] * count,
                     [entry.state for entry in picks],
                     [entry.id for entry in picks],
-                    stage.name, reset_mode, seconds,
+                    stage.name, reset_mode, seconds, no_touch,
                 )
             if stage.opponent == "mixed":
                 names = [str(self.rng.choice(["chase", "random"])) for _ in range(count)]
-                return names, [None] * count, [None] * count, stage.name, reset_mode, seconds
+                return (
+                    names, [None] * count, [None] * count, stage.name, reset_mode,
+                    seconds, no_touch,
+                )
             if stage.opponent == "self":
                 # The pool has no playable snapshot yet (first iteration, or a
                 # checkpoint written without league states).  "self" is not a
                 # buildable opponent, so fall back to a scripted one instead
                 # of handing the worker a name it cannot resolve.
                 fallback = self._self_play_fallback()
-                return [fallback] * count, [None] * count, [None] * count, stage.name, reset_mode, seconds
-            return [stage.opponent] * count, [None] * count, [None] * count, stage.name, reset_mode, seconds
+                return (
+                    [fallback] * count, [None] * count, [None] * count, stage.name,
+                    reset_mode, seconds, no_touch,
+                )
+            return (
+                [stage.opponent] * count, [None] * count, [None] * count, stage.name,
+                reset_mode, seconds, no_touch,
+            )
         reset_mode = str(self.config.reset_mode)
         if self.config.self_play and self.league.usable:
             picks = [self.league.sample(self.rng) for _ in range(count)]
@@ -1147,12 +1272,18 @@ class Trainer:
                 [None] * count,
                 [entry.state for entry in picks],
                 [entry.id for entry in picks],
-                "self-play", reset_mode, seconds,
+                "self-play", reset_mode, seconds, no_touch,
             )
         if self.config.opponent == "self":
             fallback = self._self_play_fallback()
-            return [fallback] * count, [None] * count, [None] * count, "fixed", reset_mode, seconds
-        return [self.config.opponent] * count, [None] * count, [None] * count, "fixed", reset_mode, seconds
+            return (
+                [fallback] * count, [None] * count, [None] * count, "fixed", reset_mode,
+                seconds, no_touch,
+            )
+        return (
+            [self.config.opponent] * count, [None] * count, [None] * count, "fixed",
+            reset_mode, seconds, no_touch,
+        )
 
     def _self_play_fallback(self) -> str:
         """Scripted opponent to use while no self-play snapshot exists yet."""
@@ -1603,6 +1734,19 @@ class Trainer:
             )
             self._apply_resource_limits()
             self._start_session()
+            if self.escalation:
+                self._log(
+                    "INFO",
+                    "task ladder: "
+                    + ", ".join(
+                        f"step {point.at_step}"
+                        + (f" ({point.label})" if point.label else "")
+                        for point in self.escalation
+                    ),
+                )
+            # points that are already behind the restored step apply before
+            # the first rollout, so a long resume starts on the right task
+            self._apply_escalation()
             self.pool = WorkerPool(self.config)
             self.store.update_run(self.run_id, status="running")
             self.league.add(f"initial-{self.run_id[:6]}", self.step, self._snapshot_state())
@@ -1652,6 +1796,7 @@ class Trainer:
                     stage_name,
                     reset_mode,
                     episode_seconds,
+                    no_touch_seconds,
                 ) = self._select_opponents()
                 started = time.perf_counter()
                 rollouts = self.pool.collect(
@@ -1664,6 +1809,8 @@ class Trainer:
                     opponent_execution=self._opponent_execution(),
                     reset_mode=reset_mode,
                     episode_seconds=episode_seconds,
+                    no_touch_timeout=no_touch_seconds,
+                    reward_weights=self.config.reward.to_dict(),
                 )
                 collect_seconds = time.perf_counter() - started
 
@@ -1689,6 +1836,8 @@ class Trainer:
                 update_seconds = time.perf_counter() - update_started
                 self.step += batch_size
                 self.iteration += 1
+                # the *next* rollout uses the task the new step budget asks for
+                self._apply_escalation()
 
                 episodes = [ep for rollout in rollouts for ep in rollout["episodes"]]
                 wins, losses, draws = _outcome_counts(episodes)
@@ -1773,6 +1922,8 @@ class Trainer:
                     ),
                 )
                 self._metric("time/iteration_seconds", time.perf_counter() - iteration_started)
+                # Crash net: bounded, time based, pruned by keep_checkpoints.
+                self._maybe_recovery_checkpoint()
                 # the queued metrics are written in one transaction, at
                 # most every ``metric_flush_interval`` iterations
                 self._iterations_since_flush += 1

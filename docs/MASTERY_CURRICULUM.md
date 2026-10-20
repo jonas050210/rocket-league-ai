@@ -131,15 +131,22 @@ and none is unreachable by construction.  Two probes were *rejected* during
 calibration because they could not discriminate - see
 [Rejected probes](#rejected-probes).
 
-| # | stage | opponent | resets | gates (point estimate + 95 % CI lower bound) |
-| --- | --- | --- | --- | --- |
-| 0 | `approach` | idle | `reach`, 20 s | `approach` ≥ 0.80, CI-low ≥ 0.60 |
-| 1 | `control` | idle | `reach`, 20 s | `approach` ≥ 0.80, `progress` ≥ 0.70 (CI-low ≥ 0.50) |
-| 2 | `shooting` | idle | `mixed`, 30 s | `progress` ≥ 0.70, `shooting` ≥ 0.30 (CI-low ≥ 0.15) |
-| 3 | `defense` | chase | `mixed`, 30 s | `defense` ≥ 0.60 (CI-low ≥ 0.40), `reengage` ≥ 0.70 (CI-low ≥ 0.50) |
-| 4 | `pressure` | chase | `mixed`, 30 s | `shooting` ≥ 0.30, `defense` ≥ 0.60, **match vs chase** win rate ≥ 0.50 (CI-low ≥ 0.30) |
-| 5 | `integrated` | mixed | `mixed`, 45 s | `shooting` ≥ 0.30, `defense` ≥ 0.60, **match vs mixed** ≥ 0.40 (CI-low ≥ 0.20) |
-| 6 | `self-play` | self | kickoff, 45 s | terminal (no gate) |
+| # | stage | opponent | resets | no-touch timeout | gates (point estimate + 95 % CI lower bound) |
+| --- | --- | --- | --- | --- | --- |
+| 0 | `approach` | idle | `reach`, 20 s | run config | `approach` ≥ 0.80, CI-low ≥ 0.60 |
+| 1 | `control` | idle | `reach`, 20 s | run config | `approach` ≥ 0.80, `progress` ≥ 0.70 (CI-low ≥ 0.50) |
+| 2 | `shooting` | idle | `drill`, 30 s | 25 s | `progress` ≥ 0.70, `shooting` ≥ 0.30 (CI-low ≥ 0.15) |
+| 3 | `defense` | chase | `mixed`, 30 s | 25 s | `defense` ≥ 0.60 (CI-low ≥ 0.40), `reengage` ≥ 0.70 (CI-low ≥ 0.50) |
+| 4 | `pressure` | chase | `mixed`, 30 s | 25 s | `shooting` ≥ 0.30, `defense` ≥ 0.60, **match vs chase** win rate ≥ 0.50 (CI-low ≥ 0.30) |
+| 5 | `integrated` | mixed | `mixed`, 45 s | 25 s | `shooting` ≥ 0.30, `defense` ≥ 0.60, **match vs mixed** ≥ 0.40 (CI-low ≥ 0.20) |
+| 6 | `self-play` | self | kickoff, 45 s | run config | terminal (no gate) |
+
+Resets and timeout of a stage are part of what the gates measure.  `shooting`
+uses `drill` rather than `mixed` because `mixed` is half kickoff, and the
+2500+ uu approach from a kickoff is what `approach`/`control` already teach;
+with `mixed` and the run-wide 10 s no-touch timeout, 55 % of the episodes in a
+measured run ended before the first contact and the stage could not leave
+(`progress/rate` 0.29).  Kickoffs return with `defense`, where they belong.
 
 What each probe measures:
 
@@ -175,9 +182,12 @@ A stage promotes only when **all** of these hold:
    `RETENTION_TOLERANCE = 0.15`.
 
 Gate evaluations run every `curriculum_gate_interval` iterations (default 25)
-with `curriculum_gate_trials` trials per probe (default 24, i.e. 12 per
-side).  At 24 trials the 95 % interval is roughly ±0.2 around a 50 % rate,
-which is why the CI bounds sit 0.15–0.20 below the point estimates.
+with `curriculum_gate_trials` trials per probe (default 48, i.e. 24 per
+side).  The CI bounds sit 0.15–0.20 below the point estimates, so the bound
+has to survive the sampling noise: at 24 trials the 95 % interval is roughly
+±0.2 around a 50 % rate, and two identical runs of one configuration measured
+`approach` rates of 0.00 and 1.00 at the same step budget.  48 trials halve
+that interval and cost a few seconds per probe.
 
 ### When a stage does not promote
 

@@ -36,6 +36,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[dev]"
       - name: Lint
-        run: python -m ruff check src tests rlbot
+        run: python -m ruff check src tests rlbot main.py
       - name: Test
         run: python -m pytest -q

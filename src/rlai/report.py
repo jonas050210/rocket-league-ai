@@ -78,6 +78,9 @@ TIMING_METRICS = (
 )
 
 MAX_CURVE_POINTS = 400
+#: first/last episode window of the learning-evidence block.  The trainer
+#: protects these rows from retention pruning (see Trainer._apply_retention).
+LEARNING_EVIDENCE_WINDOW = 200
 
 #: Protocol keys that define *what was measured*.  The seed is deliberately not
 #: part of the identity: the trainer derives a new kickoff seed per evaluation
@@ -248,6 +251,23 @@ def evaluation_section(store: Store, run_id: str, models_dir: Path | None) -> di
     """
     from .evaluation import classify_opponent
 
+    run_config = (store.get_run(run_id) or {}).get("config") or {}
+    # A run that never evaluated on purpose (eval_interval=0) must not be
+    # described as if the final measurement had failed: "run ended before the
+    # final evaluation completed" is a defect message, not a configuration.
+    if not int(run_config.get("eval_interval") or 0):
+        before_reason = after_reason = (
+            "evaluation is disabled for this run (eval_interval=0); "
+            "no before/after measurement exists"
+        )
+    else:
+        before_reason = (
+            "no baseline evaluation was run"
+            if bool(run_config.get("eval_before", True))
+            else "the baseline evaluation is disabled (eval_before=false)"
+        )
+        after_reason = "run ended before the final evaluation completed"
+
     rows = store.list_evaluations(limit=500, run_id=run_id)
     # list_evaluations returns newest first
     ordered = list(reversed(rows))
@@ -377,8 +397,8 @@ def evaluation_section(store: Store, run_id: str, models_dir: Path | None) -> di
 
     best = checkpoints.best_record(models_dir) if models_dir else {}
     return {
-        "before": before_slim or unavailable("no baseline evaluation was run"),
-        "after": after_slim or unavailable("run ended before the final evaluation completed"),
+        "before": before_slim or unavailable(before_reason),
+        "after": after_slim or unavailable(after_reason),
         "delta": delta,
         "pairs": pairs,
         "pair_count": len(pairs),
@@ -480,6 +500,19 @@ def build_run_report(
 
     resumed_step = int(run.get("resumed_step") or 0)
     end_step = int(run.get("step") or 0)
+    # A task ladder can change the reward definition mid-run (see
+    # config.EscalationPoint).  Reward components measured before the switch
+    # belong to a different objective, so the component table starts at the
+    # newest point that has already been reached.
+    escalation = list(run_config.get("escalation") or [])
+    escalation_since = resumed_step
+    for point in escalation:
+        try:
+            at_step = int(point.get("at_step"))
+        except (TypeError, ValueError):
+            continue
+        if at_step <= end_step:
+            escalation_since = max(escalation_since, at_step)
     completed = max(0, end_step - resumed_step)
     total_steps = run.get("total_steps") or run_config.get("total_steps")
 
@@ -549,7 +582,7 @@ def build_run_report(
     for name in store.metric_names(run_id):
         if not name.startswith("reward/"):
             continue
-        stats = store.metric_stats(run_id, name, since_step=resumed_step)
+        stats = store.metric_stats(run_id, name, since_step=escalation_since)
         if stats.get("available"):
             reward_components[name] = {
                 "mean": _round(stats.get("mean")),
@@ -572,15 +605,49 @@ def build_run_report(
     # episodes of this run look like vs the last ones, in outcomes and ball
     # interaction?  A rising reward with flat touches/goals is proxy farming,
     # and this block makes that visible at a glance.
+    # A curriculum promotes when its gates pass, and the next stage changes the
+    # opponents, the reset distribution and the horizon.  Comparing "the first
+    # 200 episodes of the run" with "the last 200" then compares different
+    # tasks - in a measured 300k continuation the reward looked 30 % *worse*
+    # for exactly that reason.  Restrict both windows to the current stage and
+    # say that the scope changed.
+    stage_points = store.metric_series(run_id, ["curriculum/stage"]).get("curriculum/stage") or []
+    stage_start_step = resumed_step
+    stage_changed = False
+    if stage_points:
+        changed_at = None
+        previous = stage_points[0]["value"]
+        for point in stage_points[1:]:
+            if point["value"] != previous:
+                # the first point of the *new* stage starts the window
+                changed_at = int(point["step"])
+                previous = point["value"]
+        if changed_at is not None:
+            stage_changed = True
+            stage_start_step = max(int(changed_at), resumed_step)
+    evidence_since = max(resumed_step, stage_start_step)
+
     first_window = store.episode_window_stats(
-        run_id, which="first", window=200, since_step=resumed_step
+        run_id, which="first", window=LEARNING_EVIDENCE_WINDOW, since_step=evidence_since
     )
     last_window = store.episode_window_stats(
-        run_id, which="last", window=200, since_step=resumed_step
+        run_id, which="last", window=LEARNING_EVIDENCE_WINDOW, since_step=evidence_since
     )
     learning_evidence: dict[str, Any] = {
         "first_200_episodes": first_window,
         "last_200_episodes": last_window,
+        "scope": {
+            "since_step": int(evidence_since),
+            "stage_changed": stage_changed,
+            "stage_start_step": int(stage_start_step) if stage_changed else None,
+            "note": (
+                "the run advanced through curriculum stages; both windows use only "
+                f"episodes from step {int(evidence_since)} (current stage), because "
+                "opponents, resets and the horizon changed before that"
+            )
+            if stage_changed
+            else None,
+        },
         "basis": (
             "training-episode outcomes of this run (not an independent "
             "evaluation); compare with the evaluation section for strength"
@@ -651,7 +718,11 @@ def build_run_report(
             warnings.append(
                 f"evaluation {item.get('id')} did not finish any game and is incomplete"
             )
-    if isinstance(evaluation.get("after"), dict) and not evaluation["after"].get("available", True):
+    if (
+        int(run_config.get("eval_interval") or 0)
+        and isinstance(evaluation.get("after"), dict)
+        and not evaluation["after"].get("available", True)
+    ):
         warnings.append(str(evaluation["after"].get("reason")))
     delta = evaluation.get("delta")
     if (
@@ -666,7 +737,12 @@ def build_run_report(
         warnings.append(f"before/after evaluation not comparable: {delta.get('reason')}")
     elif isinstance(delta, dict) and delta.get("available") and delta.get("warning"):
         warnings.append(str(delta["warning"]))
-    if isinstance(evaluation.get("before"), dict) and not evaluation["before"].get("available", True):
+    if (
+        int(run_config.get("eval_interval") or 0)
+        and bool(run_config.get("eval_before", True))
+        and isinstance(evaluation.get("before"), dict)
+        and not evaluation["before"].get("available", True)
+    ):
         warnings.append(str(evaluation["before"].get("reason")))
 
     resume_section = dict(resume or {})
@@ -714,6 +790,10 @@ def build_run_report(
             "progress": (
                 round(end_step / float(total_steps), 4) if total_steps else None
             ),
+            # where the learning rate anneal window began: after ``--steps N``
+            # the added chunk anneals on its own instead of resuming at the
+            # 10 % floor of a long history
+            "lr_anneal_start": int(run_config.get("lr_anneal_start") or 0),
         },
         "steps_per_second": steps_per_second,
         "steps_per_second_basis": (
@@ -747,6 +827,16 @@ def build_run_report(
             "Playing strength comes exclusively from the evaluation section, which is "
             "measured against fixed opponents under a recorded protocol.",
             "Values marked available=false were never measured; they are not zero.",
+        ]
+        + [
+            f"the task changed at step {int(point['at_step'])}"
+            + (f" ({point['label']})" if point.get("label") else "")
+            + ": reward components and episode statistics before that step belong "
+            "to a different objective; the component table starts after the switch"
+            for point in escalation
+            if isinstance(point, dict)
+            and point.get("at_step") is not None
+            and int(point.get("at_step", 0)) <= end_step
         ],
     }
     return report

@@ -1,0 +1,98 @@
+{
+  "run_name": "1v1 task ladder (no curriculum)",
+  "mode": "soccer-1v1",
+  "seed": 42,
+  "total_steps": 20000000,
+  "rollout_steps": 1024,
+  "n_workers": 6,
+  "tick_skip": 8,
+  "episode_seconds": 20.0,
+  "no_touch_timeout_seconds": 10.0,
+  "reset_mode": "reach",
+  "learning_rate": 0.0003,
+  "gamma": 0.995,
+  "gae_lambda": 0.95,
+  "clip_coef": 0.2,
+  "value_coef": 0.5,
+  "entropy_coef": 0.001,
+  "epochs": 4,
+  "minibatch_size": 1024,
+  "max_grad_norm": 0.5,
+  "lr_anneal": true,
+  "device": "auto",
+  "opponent": "idle",
+  "self_play": false,
+  "snapshot_interval": 10,
+  "keep_checkpoints": 8,
+  "reward": {
+    "goal": 10.0,
+    "concede": 10.0,
+    "touch": 0.4,
+    "ball_progress": 1.0,
+    "progress": 0.35,
+    "shot": 1.0,
+    "defense": 0.5
+  },
+  "policy": {
+    "hidden": [
+      256,
+      256
+    ],
+    "activation": "tanh"
+  },
+  "obs_version": 4,
+  "curriculum": false,
+  "side_randomization": true,
+  "eval_opponent": "chase",
+  "eval_opponents": [
+    "idle",
+    "chase"
+  ],
+  "eval_interval": 25,
+  "eval_games": 10,
+  "eval_match_seconds": 60,
+  "eval_sides": [
+    "blue",
+    "orange"
+  ],
+  "recovery_checkpoint_minutes": 20.0,
+  "escalation": [
+    {
+      "at_step": 2000000,
+      "label": "wider world",
+      "purpose": "the close-range drill is learned; the agent now has to cross more of the field",
+      "episode_seconds": 30.0,
+      "no_touch_timeout_seconds": 20.0,
+      "reset_mode": "drill",
+      "reward": {
+        "touch": 0.2,
+        "goal": 15.0
+      }
+    },
+    {
+      "at_step": 6000000,
+      "label": "full field",
+      "purpose": "matches start from kickoffs and the goal now dominates the shaped signal",
+      "episode_seconds": 45.0,
+      "no_touch_timeout_seconds": 25.0,
+      "reset_mode": "mixed",
+      "reward": {
+        "touch": 0.1,
+        "goal": 25.0,
+        "ball_progress": 1.5
+      }
+    },
+    {
+      "at_step": 12000000,
+      "label": "opponent with teeth",
+      "purpose": "a passive opponent no longer teaches defence; the reward is almost pure match reward",
+      "episode_seconds": 60.0,
+      "no_touch_timeout_seconds": 30.0,
+      "opponent": "chase",
+      "reward": {
+        "touch": 0.05,
+        "goal": 30.0
+      }
+    }
+  ]
+}

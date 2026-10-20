@@ -49,14 +49,65 @@ noch nach einem Absturz, noch wenn ein Checkpoint auftaucht. Jeder Lauf muss im
 Tab *Training* explizit gestartet und bestätigt werden.
 
 Erster sinnvoller Lauf: im Web-Dashboard unter *Training* die Ziel-Schritte
-wählen und starten (1v1 ist der einzige Modus des Workflows; alle übrigen
-Parameter kommen aus den Standardwerten), oder per CLI:
+wählen – optional mit **Add these steps to the restored checkpoint**, damit
+die Zahl wie `--steps` auf den Checkpoint aufaddiert wird statt ein absolutes
+Ziel zu sein – und starten (1v1 ist der einzige Modus des Workflows; alle
+übrigen Parameter kommen aus den Standardwerten), oder per CLI:
 
 ```bash
+python3 main.py --steps 500000      # 500.000 Schritte, Fortsetzung inklusive
+python3 main.py --plan-only         # was würde passieren? (trainiert nicht)
+# Warmstart: der Actor imitiert zuerst den gescripteten Chaser
+python -m rlai.cli pretrain --config-file configs/1v1-mastery-1v1.json --episodes 100
 python -m rlai.cli train --config-file configs/smoke-1v1.json
 python -m rlai.cli evaluate --model data/models/<id>/model.pt --games 2 --match-seconds 20
 python -m rlai.cli benchmark --mode heatseeker-2v2 --workers 2 --seconds 2
 ```
+
+`main.py` ist nur eine Abkürzung: es ergänzt `train` und
+`configs/1v1-mastery-1v1.json`, wenn beides fehlt, und funktioniert auch ohne
+`pip install -e .` (Torch/RocketSim müssen trotzdem installiert sein). Die
+vollständige CLI bleibt `python -m rlai.cli`.
+
+### Warmstart: `pretrain` (Behaviour Cloning)
+
+Eine frisch initialisierte Policy ist nahezu gleichverteilt über 90 Aktionen;
+in kurzen Läufen berührt sie den Ball fast nie, und PPO hat dann kaum ein
+Signal, aus dem „fahr zum Ball“ entstehen könnte. `pretrain` nimmt dem
+gescripteten Chaser (dem stärksten eingebauten Gegner, ~8 Ballkontakte pro
+Episode) `(Beobachtung, Aktion)`-Paare ab und trainiert den Actor per
+Kreuzentropie darauf:
+
+```bash
+python -m rlai.cli pretrain --config-file configs/1v1-mastery-1v1.json \
+    --episodes 100 --epochs 3          # schreibt einen Checkpoint mit Label "pretrain"
+```
+
+Im Dashboard liegt derselbe Schritt unter **Models → Warm start** (Experte,
+Episoden, Epochen, Lernrate), und `POST /api/pretrain` macht ihn
+skriptbar. Der Checkpoint hat `step = 0` und ist ein ganz normaler Checkpoint: `train`
+bzw. `python3 main.py --steps N` setzt ihn fort, echte Trainings-Checkpoints
+haben wegen ihres höheren Schritts weiter Vorrang. Für längere Läufe gibt es
+`configs/1v1-selfplay.json` (10M Schritte, Selbstspiel-Pool, Batch 8192,
+fortsetzbar mit `--steps`). Gemessen (gleiche Config,
+gleicher Seed, 30.000 PPO-Schritte): **3,4 statt 0,8 Ballkontakte pro Episode
+und 45 statt 7 Tore**, mittlerer Return +4,9 statt 0,0; die reine
+BC-Policy gewinnt gegen `idle` 3 von 10 Spielen (4:0 Tore) und spielt gegen
+`chase` 2:7 bei 6:9 Toren. Details und Einschränkungen: `docs/TRAINING.md`.
+
+### Schrittbudget: `--steps` oder `--max-steps`
+
+* `--steps N` (Aliase `--maxsteps`, `--Maxsteps`) heißt **N Schritte
+  zusätzlich** zu dem Schritt, den der fortgesetzte Checkpoint hat: ein
+  Checkpoint bei 2.000.000 läuft mit `--steps 500000` bis 2.500.000 (das Ziel
+  wird auf volle Rollout-Batches aufgerundet, weil der Lauf nur dort enden
+  kann – hier 2.500.096). Der
+  Lernraten-Anneal beginnt dabei neu beim wiederhergestellten Schritt
+  (`lr_anneal_start`), damit die zusätzlichen Schritte nicht auf dem
+  10-%-Boden einer langen Historie starten. Ohne Checkpoint ist `N` die
+  Gesamtzahl.
+* `--max-steps N` bleibt das historische **absolute** Ziel. Beides zusammen ist
+  ein Fehler; pro Lauf gilt genau eine Angabe.
 
 Fortsetzung, Report und seitengeglichene Evaluation:
 
@@ -65,7 +116,7 @@ Fortsetzung, Report und seitengeglichene Evaluation:
 python -m rlai.cli resume-plan --config-file configs/smoke-1v1.json --run-id <run-id>
 
 # Standard: neuester gültiger, kompatibler Checkpoint wird automatisch fortgesetzt
-python -m rlai.cli train --config-file configs/smoke-1v1.json --max-steps 40000
+python -m rlai.cli train --config-file configs/smoke-1v1.json --steps 40000
 # Explizit von einem Checkpoint / nur Gewichte übernehmen / bewusst neu anfangen
 python -m rlai.cli train --config-file configs/smoke-1v1.json --resume-from <model-id> --resume-mode transfer
 python -m rlai.cli train --config-file configs/smoke-1v1.json --resume-mode fresh
@@ -234,10 +285,11 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q                    # 466 passed, ca. 2 min (2 vCPU, keine GPU)
+python -m pytest -q                    # 606 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **466 passed** in ca. 2 min. Abgedeckt: Modi,
+Ergebnis in dieser Umgebung: **606 passed, 1 skipped** in ca. 3 min (skip:
+jsdom fehlt). Abgedeckt: Modi,
 Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
 PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,
 Validierung und best-Zeiger, Gegnerpool (inkl. **Unveränderlichkeit** und

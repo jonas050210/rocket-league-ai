@@ -629,9 +629,12 @@ function clearTrainingState() {
   }
 }
 
-async function fetchStartPlan(totalSteps, runName) {
+async function fetchStartPlan(totalSteps, runName, additional = false) {
   const body = { total_steps: Number(totalSteps) };
   if (runName) body.run_name = runName;
+  // "N more steps" is resolved server-side against the checkpoint it would
+  // restore; the CLI flag is called --steps, the API field additional_steps.
+  if (additional) body.additional_steps = Number(totalSteps);
   return api("/api/runs/start-plan", { method: "POST", body: JSON.stringify(body) });
 }
 
@@ -740,6 +743,11 @@ views.training = async () => {
           <div class="step-suggestions" aria-label="Suggested budgets">
             ${stepSuggestions.map((s) => `<button type="button" class="button ghost step-suggestion" data-steps="${s}">${fmtNumber(s)}</button>`).join("")}
           </div>
+          <label class="field full" style="display:flex;gap:8px;align-items:center">
+            <input name="additional_steps" id="additional-steps" type="checkbox" style="width:auto;margin:0" />
+            <span style="margin:0"><strong>Add</strong> these steps to the restored checkpoint</span>
+            <small>Off: the number is the absolute total. On: a checkpoint at 2,000,000 plus 500,000 trains to 2,500,000 instead of reporting “completed” immediately.</small>
+          </label>
           <label class="field full">
             <span>Run name <em>(optional)</em></span>
             <input name="run_name" id="run-name" type="text" maxlength="80" placeholder="e.g. 1v1 baseline" value="" />
@@ -797,7 +805,7 @@ views.training = async () => {
     clearTrainingState();
     if (immediate) {
       applyPlan(null);
-      fetchStartPlan(stepsInput.value, nameInput.value)
+      fetchStartPlan(stepsInput.value, nameInput.value, additionalInput.checked)
         .then(applyPlan)
         .catch((error) => {
           applyPlan(null);
@@ -807,7 +815,7 @@ views.training = async () => {
     }
     // debounce: typing a new budget should not hammer the planning endpoint
     trainingState.planTimer = setTimeout(() => {
-      fetchStartPlan(stepsInput.value, nameInput.value)
+      fetchStartPlan(stepsInput.value, nameInput.value, additionalInput.checked)
         .then(applyPlan)
         .catch(() => { /* keep the last plan; the start is validated anyway */ });
     }, 350);
@@ -819,8 +827,10 @@ views.training = async () => {
       refreshPlan();
     });
   });
+  const additionalInput = $("#additional-steps");
   stepsInput.addEventListener("input", () => refreshPlan());
   nameInput.addEventListener("input", () => refreshPlan());
+  additionalInput.addEventListener("change", () => refreshPlan());
   refreshPlan(true);
 
   $("#training-form").addEventListener("submit", async (event) => {
@@ -836,8 +846,11 @@ views.training = async () => {
     const plan = trainingState.plan;
     const resuming = Boolean(plan && plan.will_resume);
     const blocked = Boolean(plan && plan.resume && Number(plan.resume.candidates_found || 0) > 0);
+    const additional = Boolean(additionalInput && additionalInput.checked);
     const summary = [
-      `1v1 · ${fmtNumber(totalSteps)} environment steps.`,
+      additional
+        ? `1v1 · ${fmtNumber(totalSteps)} environment steps on top of the restored checkpoint.`
+        : `1v1 · ${fmtNumber(totalSteps)} environment steps in total.`,
       resuming
         ? `Will continue from ${plan.resume.model_id} at step ${fmtNumber(plan.resume.restored_step)} (weights, optimiser and step counter are restored).`
         : blocked
@@ -856,6 +869,9 @@ views.training = async () => {
           mode: "soccer-1v1",
           allow_concurrent: false,
         };
+        // the server turns this into restored_step + N (and restarts the
+        // learning-rate anneal there), like `--steps` on the CLI
+        if (additional) payload.additional_steps = totalSteps;
         // the server refuses a start that was not confirmed; this flag is only
         // set after the user accepted the dialog above
         payload.confirm = true;
@@ -1544,6 +1560,7 @@ views.models = async () => {
       <div class="panel-body" id="model-validation"></div>
     </section>
 
+    ${pretrainFormHtml()}
     ${evaluationFormHtml(models, "eval", "Evaluate a checkpoint", "One opponent runs a single series; two or more run a suite that separates strength opponents from diagnostic baselines.")}`;
 
   $$("[data-evaluate]").forEach((button) => button.addEventListener("click", () => {
@@ -1603,7 +1620,53 @@ views.models = async () => {
     }
   )));
   wireEvaluationForm("eval");
+  wirePretrainForm();
 };
+
+/**
+ * Warm start: imitate a scripted expert into a checkpoint before PPO runs.
+ * Measured on this project, a warm start reached ~3.4 ball touches/episode in
+ * 30k PPO steps where training from scratch managed ~0.8.
+ */
+function pretrainFormHtml() {
+  return `
+    <section class="panel" style="margin-top:18px">
+      <div class="panel-header"><div><h2>Warm start (behaviour cloning)</h2><p>Collect episodes from a scripted expert and fit the actor to it. The result is a normal checkpoint (label <code>pretrain</code>, step 0) that training continues from.</p></div></div>
+      <div class="form-grid">
+        <label class="field"><span>Expert</span><select id="pretrain-expert"><option>chase</option><option>idle</option><option>random</option></select><small>chase is the strongest built-in; it is imitable to about 79 %.</small></label>
+        <label class="field"><span>Episodes</span><input id="pretrain-episodes" type="number" min="1" max="2000" value="100" /><small>Each episode is a full match; 100 episodes take about 15 s on 2 vCPU.</small></label>
+        <label class="field"><span>Epochs</span><input id="pretrain-epochs" type="number" min="1" max="50" value="3" /></label>
+        <label class="field"><span>Learning rate</span><input id="pretrain-lr" type="number" step="0.0001" min="0.00001" value="0.001" /></label>
+      </div>
+      <div class="config-actions">
+        <button class="button primary" id="pretrain-start">${icon("play")} Create warm-start checkpoint</button>
+        <span class="subtle" id="pretrain-hint">Runs as a background job; the checkpoint appears in the list above when it finishes.</span>
+      </div>
+    </section>`;
+}
+
+function wirePretrainForm() {
+  const button = $("#pretrain-start");
+  if (!button) return;
+  button.addEventListener("click", () => {
+    const payload = {
+      expert: $("#pretrain-expert").value,
+      episodes: Number($("#pretrain-episodes").value),
+      epochs: Number($("#pretrain-epochs").value),
+      learning_rate: Number($("#pretrain-lr").value),
+    };
+    confirmAction(
+      "Start warm start",
+      `Collect ${payload.episodes} episodes from the ${payload.expert} expert and imitate it for ${payload.epochs} epoch(s)? ` +
+        "This occupies the CPU until the job finishes and writes one new checkpoint; nothing else is started.",
+      async () => {
+        const result = await api("/api/pretrain", { method: "POST", body: JSON.stringify(payload) });
+        toast(`Warm start started · job ${result.job_id} (about ${result.expected_minutes} min)`);
+        setTimeout(() => location.hash.startsWith("#/models") && render(), 4000);
+      }
+    );
+  });
+}
 
 /**
  * The evaluation form is shared by the Models and Bot Lab views so both

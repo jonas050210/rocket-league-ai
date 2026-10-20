@@ -56,6 +56,87 @@ class PolicySettings(BaseModel):
         return value
 
 
+class EscalationPoint(BaseModel):
+    """One scheduled change of the training task.
+
+    The sample budget, not the wall clock, decides when a training task has
+    been learned: a policy that has touched the ball a million times in a
+    close-range drill does not need a million more.  A run can therefore
+    declare a ladder of tasks, each starting at a given step:
+
+    * a longer episode horizon and a longer no-touch timeout (the agent now
+      has to cross the field instead of finding the ball next to it),
+    * ``reach`` -> ``drill`` -> ``mixed`` starting states,
+    * a heavier goal weight relative to touch/approach shaping (so the same
+      behaviour is no longer rewarded once it is easy),
+    * a stronger scripted opponent for runs without a curriculum.
+
+    The learner keeps its weights, optimizer, step counter and RNG; only the
+    environment and the reward definition change, and the change is logged
+    and recorded as a metric (``escalation/level``).  A change mid-run is
+    visible in the report: the reward components before and after the switch
+    are different objectives, which is why every switch is announced.
+    """
+
+    at_step: int = Field(ge=0)
+    label: str = Field(default="", max_length=80)
+    #: new episode horizon (``None`` keeps the current value)
+    episode_seconds: float | None = Field(default=None, ge=5, le=600)
+    #: new no-touch timeout (``None`` keeps the current value, 0 disables it)
+    no_touch_timeout_seconds: float | None = Field(default=None, ge=0.0, le=600.0)
+    #: new starting-state distribution
+    reset_mode: str | None = None
+    #: reward weights to *change*; every unlisted component keeps its value
+    reward: dict[str, float] | None = None
+    #: scripted opponent for a run without a curriculum (ignored when a
+    #: curriculum owns the opponent, which is logged)
+    opponent: str | None = None
+    #: why the task changes here (report/log)
+    purpose: str = ""
+
+    @field_validator("reset_mode")
+    @classmethod
+    def _reset_mode_valid(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from .envs import RESET_MODES
+
+        if value not in RESET_MODES:
+            raise ValueError(f"reset_mode must be one of {list(RESET_MODES)}")
+        return value
+
+    @field_validator("opponent")
+    @classmethod
+    def _opponent_valid(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from .opponents import validate_opponent_name
+
+        return validate_opponent_name(value)
+
+    @field_validator("reward")
+    @classmethod
+    def _reward_valid(cls, value: dict[str, float] | None) -> dict[str, float] | None:
+        if value is None:
+            return None
+        from dataclasses import fields
+
+        allowed = {field.name for field in fields(RewardWeights)}
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ValueError(
+                f"unknown reward components {unknown}; valid: {sorted(allowed)}"
+            )
+        return {str(key): float(component) for key, component in value.items()}
+
+    def to_dict(self) -> dict:
+        return {
+            key: value
+            for key, value in self.model_dump().items()
+            if value not in (None, "", {})
+        }
+
+
 class TrainingConfig(BaseModel):
     run_name: str = Field(default="1v1 baseline", min_length=1, max_length=80)
     mode: str = "soccer-1v1"
@@ -70,13 +151,33 @@ class TrainingConfig(BaseModel):
     gae_lambda: float = Field(default=0.95, gt=0, lt=1)
     clip_coef: float = Field(default=0.2, gt=0, le=1)
     value_coef: float = Field(default=0.5, ge=0, le=10)
-    entropy_coef: float = Field(default=0.01, ge=0, le=1)
+    #: entropy bonus.  0.01 (the RLGym-PPO default) kept a fresh policy at
+    #: ln(90)=4.50 nats and drove a *warm-started* policy towards uniform in a
+    #: measured run (entropy 1.73 -> 2.39 while touches fell 3.83 -> 2.29);
+    #: 0.001 let the same policy sharpen and improved ball contact in both a
+    #: fresh and a continuation run (docs/TRAINING.md).
+    entropy_coef: float = Field(default=0.001, ge=0, le=1)
     epochs: int = Field(default=4, ge=1, le=30)
     minibatch_size: int = Field(default=1024, ge=64, le=65536)
     max_grad_norm: float = Field(default=0.5, gt=0, le=10)
     clip_value: float = Field(default=0.2, ge=0, le=10)
     target_kl: float = Field(default=0.05, ge=0, le=10)
     lr_anneal: bool = True
+    #: first step of the current learning-rate anneal window.  ``0`` anneals
+    #: over the whole run (the historical behaviour).  ``--steps N`` sets it to
+    #: the restored checkpoint step, so "500k more steps" anneals over those
+    #: 500k instead of resuming at the 10 % floor of a very long history.
+    lr_anneal_start: int = Field(default=0, ge=0)
+    #: end an episode after this many seconds without a ball touch (0 = off).
+    #: A fresh policy spends most of its horizon driving to a ball it never
+    #: reaches; those episodes contribute almost no useful gradient.  The
+    #: timeout turns them into short, repeated attempts, which is what the
+    #: RLGym/RLGym-PPO reference setups do (``NoTouchTimeoutCondition``).
+    no_touch_timeout_seconds: float = Field(default=0.0, ge=0.0, le=600.0)
+    #: write a bounded ``recovery`` checkpoint every N minutes of wall time so
+    #: a hard crash (power loss, SIGKILL) does not lose hours of training.
+    #: ``0`` disables it.  Only the newest few are kept (see trainer).
+    recovery_checkpoint_minutes: float = Field(default=30.0, ge=0.0, le=1440.0)
     device: str = "auto"
     opponent: str = "chase"
     self_play: bool = False
@@ -136,9 +237,12 @@ class TrainingConfig(BaseModel):
     #: stages do not have - it would block forever and say so)
     curriculum_gate_interval: int = Field(default=25, ge=0, le=10_000)
     #: trials per skill probe in a gate evaluation (both sides together).
-    #: 24 trials give a 95 % interval of roughly +/-0.2 at a 50 % rate; the
-    #: gate confidence bounds were chosen for this sample size.
-    curriculum_gate_trials: int = Field(default=24, ge=4, le=400)
+    #: 48 trials give a 95 % interval of roughly +/-0.14 at a 50 % rate.
+    #: 24 was too few: two identical runs of the same configuration measured
+    #: approach rates of 0.00 and 1.00 at the same step budget, so the stage
+    #: decision was a coin flip near the threshold.  A probe costs 1-6 s, so
+    #: the extra trials are cheap next to a 25-iteration gate interval.
+    curriculum_gate_trials: int = Field(default=48, ge=4, le=400)
     #: starting-state distribution when no curriculum stage overrides it:
     #: ``kickoff`` (standard), ``drill`` (randomized attacking setups that
     #: teach ball contact far faster), ``reach`` (close-range starts for the
@@ -176,6 +280,11 @@ class TrainingConfig(BaseModel):
     adaptive_min_seconds: float = Field(default=60.0, ge=0.0, le=86400.0)
     #: how much a single change moves the opponent (0..1)
     adaptive_step: float = Field(default=0.1, gt=0, le=1.0)
+    #: --- Scheduled task changes ----------------------------------------
+    #: Task ladder by sample budget (see :class:`EscalationPoint`).  Empty by
+    #: default: nothing about a run changes unless it says so.  Points apply
+    #: in ascending ``at_step`` order and each one is logged once.
+    escalation: list[EscalationPoint] = Field(default_factory=list, max_length=64)
     #: --- Player Memory -------------------------------------------------
     #: remember the players the agent met.  The memory is data, never
     #: part of the model weights.
@@ -272,6 +381,33 @@ class TrainingConfig(BaseModel):
             )
         if self.minibatch_size > self.rollout_steps * self.n_workers:
             raise ValueError("minibatch_size cannot exceed one rollout batch")
+        if self.lr_anneal and self.lr_anneal_start >= self.total_steps:
+            raise ValueError(
+                "lr_anneal_start must be below total_steps "
+                f"({self.lr_anneal_start} >= {self.total_steps}); the anneal window "
+                "would be empty"
+            )
+        if self.escalation:
+            steps = [int(point.at_step) for point in self.escalation]
+            if steps != sorted(steps):
+                raise ValueError("escalation points must be ordered by at_step")
+            if len(set(steps)) != len(steps):
+                raise ValueError("two escalation points share the same at_step")
+            if steps[-1] >= self.total_steps:
+                raise ValueError(
+                    f"the last escalation point is at step {steps[-1]}, but the run "
+                    f"ends at total_steps={self.total_steps}: it would never apply"
+                )
+            for point in self.escalation:
+                if (
+                    point.episode_seconds is not None
+                    and point.no_touch_timeout_seconds is not None
+                    and point.no_touch_timeout_seconds >= point.episode_seconds
+                ):
+                    raise ValueError(
+                        f"escalation point at step {point.at_step}: the no-touch "
+                        "timeout must be shorter than the episode horizon"
+                    )
         if self.curriculum:
             # The stages are validated here, so a broken threshold is
             # reported when the configuration is checked and not in the

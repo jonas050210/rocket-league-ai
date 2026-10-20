@@ -122,6 +122,9 @@ def test_report_labels_everything_it_could_not_measure(data_root):
         "completed": 0,
         "target": config.total_steps,
         "progress": 0.0,
+        # start of the current learning-rate anneal window (0 = whole run;
+        # a "--steps N" continuation restarts it at the restored step)
+        "lr_anneal_start": 0,
     }
     # nothing was measured: every section says so instead of reporting zeros
     assert report["duration_s"] is None
@@ -316,9 +319,54 @@ def test_incomplete_evaluations_are_listed(data_root):
 # ---------------------------------------------------------------- checkpoint
 
 
-def test_final_checkpoint_is_revalidated(data_root, tmp_path):
+def test_learning_evidence_is_scoped_to_the_current_curriculum_stage(data_root):
+    """A stage change alters opponents, resets and horizon: compare within it."""
     store = _store(data_root)
     config = _config()
+    run_id = store.create_run("stages", config.mode, config.to_dict(), config.total_steps)
+    store.update_run(run_id, status="completed", step=2000)
+    for index in range(10):
+        step = 100 + index * 10
+        store.log_episode(
+            run_id, episode=index, step=step, reward=0.0, length=50,
+            goals_for=0, goals_against=0, result="draw",
+        )
+        store.log_metric(run_id, step, "curriculum/stage", 0.0)
+    for index in range(10):
+        step = 1000 + index * 10
+        store.log_episode(
+            run_id, episode=10 + index, step=step, reward=2.0, length=50,
+            goals_for=1, goals_against=0, result="win",
+        )
+        store.log_metric(run_id, step, "curriculum/stage", 1.0)
+
+    report = build_run_report(store, run_id)
+    evidence = report["learning_evidence"]
+    assert evidence["scope"]["stage_changed"] is True
+    assert evidence["scope"]["since_step"] == 1000
+    # both windows describe the current stage only, not the easier stage 0
+    assert evidence["first_200_episodes"]["count"] == 10
+    assert evidence["first_200_episodes"]["mean_reward"] == 2.0
+    assert evidence["delta"]["mean_reward"] == 0.0
+
+
+def test_disabled_evaluation_is_not_reported_as_a_failure(data_root):
+    store = _store(data_root)
+    config = _config()  # eval_interval=0: no measurement was ever requested
+    run_id = store.create_run("no eval", config.mode, config.to_dict(), config.total_steps)
+    store.update_run(run_id, status="completed", step=config.total_steps)
+
+    report = build_run_report(store, run_id, models_dir=data_root / "models")
+    assert "disabled" in report["evaluation"]["after"]["reason"]
+    assert "disabled" in report["evaluation"]["before"]["reason"]
+    assert not any("final evaluation" in warning for warning in report["warnings"])
+
+
+def test_final_checkpoint_is_revalidated(data_root, tmp_path):
+    store = _store(data_root)
+    # evaluation was requested, so this completed run *should* have a final
+    # measurement; its absence is a warning
+    config = _config(eval_interval=25, eval_before=True)
     run_id = store.create_run("ckpt", config.mode, config.to_dict(), config.total_steps)
     store.update_run(
         run_id,

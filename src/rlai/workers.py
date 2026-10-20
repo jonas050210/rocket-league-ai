@@ -185,7 +185,6 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
 
         config = TrainingConfig.model_validate(config_dict)
         spec = get_mode(config.mode)
-        weights = RewardWeights.from_dict(config.reward.to_dict())
         opponent_name = "chase" if config.self_play else config.opponent
         if opponent_name == "self":
             # "self" needs a pool snapshot, which the worker does not have.
@@ -196,6 +195,8 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
         active_opponent = opponent_name
         active_reset_mode = str(config.reset_mode)
         active_episode_seconds = float(config.episode_seconds)
+        active_no_touch = float(config.no_touch_timeout_seconds)
+        active_reward = dict(config.reward.to_dict())
 
         def build_env() -> MatchEnv:
             return MatchEnv(
@@ -203,11 +204,12 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
                 build_opponent(active_opponent, seed=seed, device="cpu"),
                 seed=seed,
                 tick_skip=config.tick_skip,
-                reward_weights=weights,
+                reward_weights=RewardWeights.from_dict(active_reward),
                 potential_gamma=float(config.gamma) if config.discount_shaping else 1.0,
                 episode_seconds=active_episode_seconds,
                 obs_version=config.obs_version,
                 reset_mode=active_reset_mode,
+                no_touch_timeout_seconds=active_no_touch,
             )
 
         env = build_env()
@@ -225,20 +227,39 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
                 continue
             policy.model.load_state_dict(message["state_dict"])
             policy.model.eval()
-            # A curriculum stage may change the reset distribution or the
-            # episode horizon.  The horizon is baked into the truncation
-            # condition, so the env is rebuilt (rare: once per transition);
-            # the reset mode alone could switch live, but rebuilding for
-            # both keeps one code path and the cost is one arena setup.
+            # A curriculum stage may change the reset distribution, the
+            # episode horizon or the no-touch timeout.  Horizon and timeout
+            # are baked into the truncation condition, so the env is rebuilt
+            # (rare: once per transition); the reset mode alone could switch
+            # live, but rebuilding for all of them keeps one code path and
+            # the cost is one arena setup.
             wanted_reset = message.get("reset_mode") or active_reset_mode
             wanted_seconds = message.get("episode_seconds")
             wanted_seconds = (
                 active_episode_seconds if wanted_seconds is None else float(wanted_seconds)
             )
-            if wanted_reset != active_reset_mode or wanted_seconds != active_episode_seconds:
+            wanted_no_touch = message.get("no_touch_timeout")
+            wanted_no_touch = (
+                active_no_touch if wanted_no_touch is None else float(wanted_no_touch)
+            )
+            # A scheduled task change can rewrite the reward weights; they are
+            # baked into the arena's reward function, so that rebuilds it too.
+            wanted_reward = message.get("reward")
+            if wanted_reward is not None:
+                wanted_reward = {str(k): float(v) for k, v in dict(wanted_reward).items()}
+            else:
+                wanted_reward = active_reward
+            if (
+                wanted_reset != active_reset_mode
+                or wanted_seconds != active_episode_seconds
+                or wanted_no_touch != active_no_touch
+                or wanted_reward != active_reward
+            ):
                 old_opponent, old_team = env.opponent, env.policy_team
                 env.close()
                 active_reset_mode, active_episode_seconds = wanted_reset, wanted_seconds
+                active_no_touch = wanted_no_touch
+                active_reward = wanted_reward
                 env = build_env()
                 env.opponent, env.policy_team = old_opponent, old_team
                 fresh = True
@@ -351,6 +372,8 @@ class WorkerPool:
         opponent_execution: dict | None = None,
         reset_mode: str | None = None,
         episode_seconds: float | None = None,
+        no_touch_timeout: float | None = None,
+        reward_weights: dict | None = None,
         opponent_names: list[str | None] | None = None,
         opponent_states: list | None = None,
     ) -> list[dict]:
@@ -381,6 +404,8 @@ class WorkerPool:
                     "opponent_execution": opponent_execution,
                     "reset_mode": reset_mode,
                     "episode_seconds": episode_seconds,
+                    "no_touch_timeout": no_touch_timeout,
+                    "reward": reward_weights,
                 }
             )
         results = []

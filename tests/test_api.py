@@ -331,6 +331,61 @@ def test_start_plan_endpoint_is_read_only(client, models_dir):
     assert any("optimiser state" in item for item in payload["resume"]["restores"])
 
 
+def test_start_plan_resolves_additional_steps_against_the_checkpoint(client, models_dir):
+    """`additional_steps` is the API's `--steps`: N more, not an absolute target."""
+    config = TrainingConfig.model_validate(_config_from(client))
+    manifest = _compatible_checkpoint(models_dir, config)
+
+    payload = client.post(
+        "/api/runs/start-plan", json={"total_steps": 4096, "additional_steps": 4096}
+    ).json()
+    resume = payload["resume"]
+    assert payload["will_resume"] is True
+    assert resume["model_id"] == manifest["id"]
+    assert resume["restored_step"] == 2048
+    assert resume["additional_steps"] == 4096
+    # 2048 + 4096 = 6144, already a multiple of the 1024-step batch
+    assert resume["target_total_steps"] == 6144
+    assert payload["config"]["total_steps"] == 6144
+    assert payload["config"]["lr_anneal_start"] == 2048
+
+
+def test_start_run_with_additional_steps_stores_the_resolved_target(
+    client, models_dir, monkeypatch
+):
+    started = {}
+
+    def fake_start(config, run_id, resume_from=None, **kwargs):
+        started["config"] = config
+        started["resume_from"] = resume_from
+        started.update(kwargs)
+
+    monkeypatch.setattr(client.app.state.jobs, "start_training", fake_start)
+    config = TrainingConfig.model_validate(_config_from(client))
+    manifest = _compatible_checkpoint(models_dir, config)
+
+    response = client.post(
+        "/api/runs",
+        json={"total_steps": 4096, "additional_steps": 4096, "confirm": True},
+    )
+    assert response.status_code == 200, response.text
+    assert started["resume_from"].endswith(manifest["path"])
+    assert started["config"].total_steps == 6144
+    assert started["config"].lr_anneal_start == 2048
+    run = client.get("/api/runs").json()[0]
+    assert run["total_steps"] == 6144
+
+    # an unusable request is refused before a run row is created
+    models_dir.joinpath(manifest["id"]).joinpath(checkpoints.MODEL_FILE).write_bytes(b"broken")
+    before = len(client.get("/api/runs").json())
+    response = client.post(
+        "/api/runs",
+        json={"total_steps": 4096, "additional_steps": 4096, "confirm": True},
+    )
+    assert response.status_code == 400
+    assert len(client.get("/api/runs").json()) == before
+
+
 def test_simplified_start_run_payload(client, models_dir, monkeypatch):
     """The redesigned form posts only the user-controlled values.
 
@@ -729,3 +784,54 @@ def test_omitted_resume_mode_starts_fresh_only_without_any_checkpoint(
     assert response.status_code == 200, response.text
     assert started["resume_mode"] == "fresh"
     assert started["resume_from"] is None
+
+
+def test_pretrain_starts_a_background_job(monkeypatch, client, data_root):
+    """Behaviour cloning must be a job, not a blocking request."""
+    from rlai.jobs import JobManager
+
+    captured = {}
+
+    def fake_start(self, **kwargs):
+        captured.update(kwargs)
+        return "pt-test-1"
+
+    monkeypatch.setattr(JobManager, "start_pretraining", fake_start)
+    response = client.post(
+        "/api/pretrain",
+        json={"episodes": 40, "epochs": 2, "expert": "chase", "learning_rate": 0.002},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["job_id"] == "pt-test-1"
+    assert payload["status"] == "started"
+    assert payload["expert"] == "chase" and payload["episodes"] == 40
+    assert captured["episodes"] == 40 and captured["epochs"] == 2
+    assert captured["learning_rate"] == 0.002
+    # the job gets a real config file, so the checkpoint records what it was
+    # collected and trained under
+    config_path = captured["config_path"]
+    assert config_path.is_file()
+    restored = TrainingConfig.load(config_path)
+    assert restored.mode == "soccer-1v1"
+    assert restored.policy.hidden  # a complete config, not a fragment
+
+
+def test_pretrain_rejects_a_checkpoint_as_expert(client):
+    response = client.post("/api/pretrain", json={"expert": "model:m-123"})
+    assert response.status_code == 400
+    assert "scripted opponent" in response.json()["detail"]
+
+
+def test_pretrain_rejects_an_invalid_config(client):
+    response = client.post("/api/pretrain", json={"config": {"mode": "hoops"}})
+    assert response.status_code == 400
+    response = client.post("/api/pretrain", json={"episodes": 0})
+    assert response.status_code == 422
+
+
+def test_pretrain_requires_the_token(monkeypatch, data_root, models_dir):
+    monkeypatch.setenv("RLAI_AUTH_TOKEN", "secret")
+    app = create_app()
+    with TestClient(app) as client:
+        assert client.post("/api/pretrain", json={}).status_code == 401

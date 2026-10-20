@@ -205,7 +205,17 @@ def ppo_update(
 
 
 def learning_rate_at(config: TrainingConfig, step: int) -> float:
+    """Linear anneal from ``learning_rate`` down to 10 % of it.
+
+    The window starts at ``lr_anneal_start`` (default 0, i.e. the whole run)
+    and ends at ``total_steps``.  A continuation that *adds* steps - CLI
+    ``--steps N`` - starts a new window at the restored step, so the added
+    steps get a usable learning rate instead of inheriting the 10 % floor of
+    a very long history.
+    """
     if not config.lr_anneal:
         return config.learning_rate
-    fraction = min(max(step / max(config.total_steps, 1), 0.0), 1.0)
+    start = max(0, int(config.lr_anneal_start))
+    span = max(int(config.total_steps) - start, 1)
+    fraction = min(max((int(step) - start) / span, 0.0), 1.0)
     return config.learning_rate * (1.0 - 0.9 * fraction)

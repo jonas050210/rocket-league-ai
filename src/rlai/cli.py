@@ -98,7 +98,7 @@ def _override_fields(args: argparse.Namespace) -> tuple[str, ...]:
 
 
 def cmd_train(args: argparse.Namespace) -> int:
-    from .resume import plan_resume
+    from .resume import plan_resume, with_additional_steps
     from .trainer import run_training
 
     config = TrainingConfig.load(args.config_file)
@@ -111,6 +111,7 @@ def cmd_train(args: argparse.Namespace) -> int:
     run_id = args.run_id
     plan = None
     override_fields = _override_fields(args)
+    additional_steps = getattr(args, "steps", None)
     if resume_mode != "fresh":
         try:
             plan = plan_resume(
@@ -120,6 +121,7 @@ def cmd_train(args: argparse.Namespace) -> int:
                 run_id=run_id,
                 checkpoint=reference,
                 explicit_overrides=override_fields,
+                additional_steps=additional_steps,
             )
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
@@ -158,6 +160,8 @@ def cmd_train(args: argparse.Namespace) -> int:
             return 3
         for warning in plan.warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
+        for note in plan.notes:
+            print(f"NOTE: {note}", file=sys.stderr)
         if not plan.will_resume:
             print(
                 "NOTE: no checkpoint found; automatic resume will start a new "
@@ -166,8 +170,54 @@ def cmd_train(args: argparse.Namespace) -> int:
             )
     else:
         if args.plan_only:
-            _print({"resume_plan": {"mode": "fresh", "will_resume": False}})
+            # A fresh start has no checkpoint to describe, but the preview
+            # still says what the run would train towards - including the
+            # "--steps N" target, which is the whole point of the preview.
+            # A fresh start restores step 0, so "--steps N" is simply N.
+            try:
+                preview_config = (
+                    with_additional_steps(config, 0, int(additional_steps))
+                    if additional_steps
+                    else config
+                )
+            except ValueError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+            preview: dict = {
+                "mode": "fresh",
+                "will_resume": False,
+                "restored_step": 0,
+                "additional_steps": additional_steps,
+                "target_total_steps": int(preview_config.total_steps),
+                "effective_config": {
+                    "total_steps": int(preview_config.total_steps),
+                    "lr_anneal_start": int(preview_config.lr_anneal_start),
+                },
+            }
+            _print({"resume_plan": preview})
             return 0
+
+    if additional_steps:
+        # "N more steps" becomes an absolute target once the restored step is
+        # known; the trainer, the run row and the GUI progress bar all use
+        # total_steps as the target (see rlai.resume.with_additional_steps).
+        restored_step = plan.restored_step if plan else 0
+        try:
+            config = with_additional_steps(config, restored_step, int(additional_steps))
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print(
+            f"NOTE: {int(additional_steps)} additional steps on top of step "
+            f"{restored_step} -> target {config.total_steps}"
+            + (
+                f"; learning rate anneals over steps "
+                f"{config.lr_anneal_start}..{config.total_steps}"
+                if config.lr_anneal
+                else ""
+            ),
+            file=sys.stderr,
+        )
 
     if not run_id:
         run_id = store.create_run(
@@ -259,6 +309,7 @@ def cmd_resume_plan(args: argparse.Namespace) -> int:
             run_id=args.run_id,
             checkpoint=args.checkpoint,
             explicit_overrides=_override_fields(args),
+            additional_steps=getattr(args, "steps", None),
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -325,6 +376,34 @@ def cmd_report(args: argparse.Namespace) -> int:
         )
     else:
         _print(report)
+    return 0
+
+
+def cmd_pretrain(args: argparse.Namespace) -> int:
+    """Warm-start the actor by imitating a scripted expert (behaviour cloning)."""
+    from .imitation import run_pretraining
+
+    config = TrainingConfig.load(args.config_file)
+    try:
+        summary = run_pretraining(
+            config,
+            episodes=args.episodes,
+            epochs=args.epochs,
+            expert=args.expert,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            device=args.device,
+            max_decisions=args.max_decisions,
+            dagger_rounds=args.dagger_rounds,
+            dagger_episodes=args.dagger_episodes,
+            dagger_beta=args.dagger_beta,
+            dagger_epochs=args.dagger_epochs,
+            dagger_learning_rate=args.dagger_learning_rate,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    _print(summary)
     return 0
 
 
@@ -444,6 +523,37 @@ def cmd_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_step_arguments(parser: argparse.ArgumentParser) -> None:
+    """Step target options.
+
+    ``--max-steps`` is the historical *absolute* target.  ``--steps`` (also
+    accepted as ``--maxsteps`` and ``--Maxsteps``) means "this many steps in
+    addition to the checkpoint that is restored", which is what you want when
+    continuing a run: a checkpoint at 2,000,000 steps plus ``--steps 500000``
+    trains to 2,500,000 instead of stopping immediately because 500,000 is
+    below the restored step.
+    """
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="absolute step target for this run (historical behaviour)",
+    )
+    group.add_argument(
+        "--steps",
+        "--maxsteps",
+        "--Maxsteps",
+        dest="steps",
+        type=int,
+        default=None,
+        help=(
+            "train this many steps on top of the restored checkpoint step "
+            "(target = restored step + N); on a fresh start it is the total"
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rlai", description="Rocket League AI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -490,7 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the resume plan and exit without training anything",
     )
-    train.add_argument("--max-steps", type=int, default=None)
+    _add_step_arguments(train)
     train.add_argument(
         "--override-config",
         default=None,
@@ -534,16 +644,72 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     headless.add_argument("--plan-only", action="store_true")
-    headless.add_argument("--max-steps", type=int, default=None)
+    _add_step_arguments(headless)
     headless.add_argument("--override-config", default=None, help="see train --override-config")
     headless.set_defaults(func=cmd_train, headless=True)
     plan.add_argument("--config-file", required=True)
     plan.add_argument("--mode", default="continue", choices=["fresh", "continue", "transfer"])
     plan.add_argument("--run-id", default=None)
     plan.add_argument("--checkpoint", default=None, help="explicit checkpoint id or path")
-    plan.add_argument("--max-steps", type=int, default=None)
+    _add_step_arguments(plan)
     plan.add_argument("--override-config", default=None, help="see train --override-config")
     plan.set_defaults(func=cmd_resume_plan)
+
+    pretrain = sub.add_parser(
+        "pretrain",
+        help="warm-start the actor by imitating a scripted expert (behaviour cloning)",
+    )
+    pretrain.add_argument("--config-file", required=True)
+    pretrain.add_argument("--episodes", type=int, default=200, help="demonstration episodes")
+    pretrain.add_argument("--epochs", type=int, default=3, help="cross-entropy epochs")
+    pretrain.add_argument(
+        "--expert",
+        default="chase",
+        help="scripted expert to imitate (default: chase, the strongest built-in)",
+    )
+    pretrain.add_argument("--batch-size", type=int, default=256)
+    pretrain.add_argument("--learning-rate", type=float, default=1e-3)
+    pretrain.add_argument(
+        "--max-decisions",
+        type=int,
+        default=None,
+        help="stop collecting after this many samples (quick experiments)",
+    )
+    pretrain.add_argument("--device", default=None, help="default: the config's device")
+    pretrain.add_argument(
+        "--dagger-rounds",
+        type=int,
+        default=0,
+        help=(
+            "DAgger rounds after the first imitation pass: the learner drives, "
+            "the expert labels the visited states, the dataset grows (0 = off)"
+        ),
+    )
+    pretrain.add_argument(
+        "--dagger-episodes",
+        type=int,
+        default=None,
+        help="episodes per DAgger round (default: a quarter of --episodes)",
+    )
+    pretrain.add_argument(
+        "--dagger-beta",
+        type=float,
+        default=0.5,
+        help="fraction of DAgger actions still taken by the expert (0..1)",
+    )
+    pretrain.add_argument(
+        "--dagger-epochs",
+        type=int,
+        default=1,
+        help="fine-tuning epochs per DAgger round (keep small)",
+    )
+    pretrain.add_argument(
+        "--dagger-learning-rate",
+        type=float,
+        default=None,
+        help="fine-tuning rate per DAgger round (default: --learning-rate / 10)",
+    )
+    pretrain.set_defaults(func=cmd_pretrain)
 
     report = sub.add_parser("report", help="print the persisted training statistics report")
     report.add_argument("--run-id", default=None, help="defaults to the newest run")

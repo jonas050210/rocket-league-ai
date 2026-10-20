@@ -21,7 +21,12 @@ import RocketSim as rsim
 from rlgym.api import RLGym
 from rlgym.rocket_league.action_parsers import LookupTableAction, RepeatAction
 from rlgym.rocket_league.common_values import BLUE_TEAM, ORANGE_TEAM
-from rlgym.rocket_league.done_conditions import GoalCondition, TimeoutCondition
+from rlgym.rocket_league.done_conditions import (
+    AnyCondition,
+    GoalCondition,
+    NoTouchTimeoutCondition,
+    TimeoutCondition,
+)
 from rlgym.rocket_league.api import GameState
 from rlgym.rocket_league.sim.rocketsim_engine import RocketSimEngine
 from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMutator, MutatorSequence
@@ -222,9 +227,22 @@ def build_rlgym_env(
     tick_skip: int = 8,
     rlbot_delay: bool = True,
     obs_version: int = OBS_VERSION,
+    no_touch_timeout_seconds: float = 0.0,
 ) -> RLGym:
     kickoff = ModeKickoffMutator() if spec.heatseeker else ResetMutator()
     seconds = episode_seconds if episode_seconds is not None else spec.default_episode_seconds
+    # A fresh policy spends most of its horizon driving at a ball it never
+    # reaches; those episodes are almost pure variance.  Ending them after
+    # ``no_touch_timeout_seconds`` without a contact turns one long wasted
+    # episode into several short attempts (the RLGym reference setups use the
+    # same condition).  Truncation is bootstrapped, so the value target stays
+    # correct (see rlai.ppo.compute_gae).
+    timeout = TimeoutCondition(seconds)
+    truncation = (
+        AnyCondition(NoTouchTimeoutCondition(float(no_touch_timeout_seconds)), timeout)
+        if float(no_touch_timeout_seconds) > 0
+        else timeout
+    )
     return RLGym(
         state_mutator=MutatorSequence(
             FixedTeamSizeMutator(spec.team_size, spec.team_size), kickoff
@@ -234,9 +252,7 @@ def build_rlgym_env(
         reward_fn=SoccerReward(spec, reward_weights, potential_gamma=potential_gamma),
         transition_engine=ModeRocketSimEngine(spec, rlbot_delay=rlbot_delay),
         termination_cond=GoalCondition(),
-        truncation_cond=TimeoutCondition(
-            episode_seconds if episode_seconds is not None else spec.default_episode_seconds
-        ),
+        truncation_cond=truncation,
     )
 
 
@@ -298,6 +314,7 @@ class MatchEnv:
         reset_mode: str = "kickoff",
         potential_gamma: float = 1.0,
         scenario: dict | None = None,
+        no_touch_timeout_seconds: float = 0.0,
     ):
         if reset_mode not in RESET_MODES:
             raise ValueError(f"reset_mode must be one of {RESET_MODES}, got {reset_mode!r}")
@@ -316,6 +333,8 @@ class MatchEnv:
         self.episode_seconds = (
             episode_seconds if episode_seconds is not None else spec.default_episode_seconds
         )
+        #: truncate an episode after this long without a ball touch (0 = off)
+        self.no_touch_timeout_seconds = float(no_touch_timeout_seconds or 0.0)
         self.env = build_rlgym_env(
             spec,
             reward_weights=reward_weights,
@@ -324,6 +343,7 @@ class MatchEnv:
             tick_skip=tick_skip,
             rlbot_delay=rlbot_delay,
             obs_version=self.obs_version,
+            no_touch_timeout_seconds=self.no_touch_timeout_seconds,
         )
         self.episode_index = 0
         self.start_tick = 0

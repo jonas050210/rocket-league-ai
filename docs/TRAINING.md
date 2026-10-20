@@ -40,6 +40,21 @@ Gewichte, sammelt die Rollouts ein und trainiert zentral.
   keine Versionen (die Validierung lehnt das mit Begründung ab).
 * `n_workers` sollte die Anzahl physischer Kerne nicht überschreiten.
   Auf einer 2-vCPU-Maschine sind 2–3 Worker sinnvoll, nicht 8.
+* **Episodenende (Truncation).** Neben dem Zeitlimit `episode_seconds` gibt es
+  `no_touch_timeout_seconds` (Standard 0 = aus; empfohlene 1v1-Configs: 10 s):
+  Berührt die Policy den Ball so lange nicht, endet die Episode vorzeitig.
+  Eine frische Policy fährt sonst die volle Horizontzeit auf einen Ball zu,
+  den sie nie erreicht – ein langer, fast gradientenfreier Versuch statt
+  mehrerer kurzer. Truncations sind **keine** Terminals: `rlai.ppo.compute_gae`
+  bootstrappt mit `V(s_end)` (siehe `tests/test_gae_truncation.py`), der
+  Wertschätzer lernt also kein „Zeitlimit = verlorenes Spiel“.
+  **Pro Stufe überschreibbar:** eine Stufe mit weiten Startzuständen setzt
+  `no_touch_timeout` selbst (die Mastery-Stufen `shooting` … `integrated`:
+  25 s). Gemessen war der Fehler sonst teuer: im `shooting`-Lauf
+  `f6d11b8f8ae6` endeten 55 % der Episoden ohne einen einzigen Kontakt,
+  weil der laufweite 10-s-Timeout vor dem Erreichen des Balls zuschlug.
+  Der Timeout steckt in der Truncation-Bedingung, also baut der Worker die
+  Arena bei einem Stufenwechsel neu (wie bei `episode_seconds`).
 
 ## Beobachtungsversionen
 
@@ -114,6 +129,12 @@ durchgeführt.
 | 2v2, 3v3 | Erster Kontakt → `chase` → gemischt → Selbstspiel |
 | Heatseeker 2v2 | Erster Kontakt → `chase` → Selbstspiel |
 
+`shooting` startet bewusst aus `drill`-Zuständen (Attacke/Verteidigung/Race,
+Ball 700–2600 uu entfernt) und nicht aus `mixed`: `mixed` enthält zur Hälfte
+Kickoffs, deren 2500+ uu-Anfahrt ein *Reach*-Problem der ersten beiden Stufen
+ist und die gemessene Abstiegsstelle war. Kickoffs kommen mit `defense`
+zurück.
+
 Aufstieg entscheidet **nie** der Trainings-Reward, sondern eine unabhängige
 Messung: `rlai.skills` spielt geskriptete, geseedete Startsituationen auf
 **beiden Feldseiten** und liest den Simulatorzustand (Ballposition,
@@ -131,8 +152,9 @@ Eine Stufe steigt erst auf, wenn
    (Retention – ein Gate misst deshalb immer auch die früheren Stufen mit).
 
 Gate-Messungen laufen alle `curriculum_gate_interval` Iterationen
-(Standard 25) mit `curriculum_gate_trials` Trials pro Probe (Standard 24,
-also 12 pro Seite). `curriculum_gate_interval = 0` wird zusammen mit einem
+(Standard 25) mit `curriculum_gate_trials` Trials pro Probe (Standard 48,
+also 24 pro Seite; 24 Trials waren zu wenig – zwei identische Läufe derselben
+Config maßen bei gleichem Schrittstand `approach` 0,00 bzw. 1,00). `curriculum_gate_interval = 0` wird zusammen mit einem
 gated Preset schon bei der Konfigurationsprüfung abgelehnt, weil sonst keine
 Stufe je verlassen werden könnte. Blockierte Aufstiege nennen den exakten
 Grund inklusive Messwert, Sollwert und Konfidenzintervall
@@ -202,6 +224,210 @@ python -m rlai.cli evaluate --model <pfad> --opponent idle --games 4 --match-sec
 `--stochastic` sampelt Aktionen gemäß der Policy. Beide Werte gehören getrennt
 berichtet; der deterministische Wert ist die Deployment-Metrik.
 
+## Behaviour Cloning (Warmstart)
+
+`rlai pretrain` (auch über `main.py pretrain`) trainiert den Actor per
+Kreuzentropie auf den Aktionen des gescripteten Chasers und schreibt einen
+normalen Checkpoint mit `label="pretrain"` und `step=0`:
+
+```bash
+python -m rlai.cli pretrain --config-file configs/1v1-mastery-1v1.json \
+    --episodes 100 --epochs 3 --expert chase
+python3 main.py train --config-file configs/1v1-mastery-1v1.json \
+    --resume-from <pretrain-checkpoint> --resume-mode continue --steps 500000
+```
+
+Dasselbe gibt es ohne Terminal:
+
+* **Dashboard** – Models → „Warm start (behaviour cloning)“: Experte,
+  Episoden, Epochen, Lernrate; der Button startet den Job und der
+  Checkpoint erscheint danach in der Liste.
+* **API** – `POST /api/pretrain` (Auth wie bei den anderen Mutationen):
+
+  ```json
+  {"episodes": 100, "epochs": 3, "expert": "chase", "learning_rate": 0.001}
+  ```
+
+  Antwort: `{"job_id": "pt-…", "status": "started", "expected_minutes": …}`.
+  `config` kann eine vollständige Trainingskonfiguration mitgeben; ohne sie
+  gilt der Backend-Standard für 1v1. Erlaubte Experten sind die gescripteten
+  Gegner (`chase`, `idle`, `random`); ein Checkpoint als Experte wird mit 400
+  abgelehnt, `episodes` ist auf 2000 begrenzt. Der Job läuft als eigener
+  Prozess (wie Training und Evaluation), damit die API bedienbar bleibt.
+
+
+Warum: eine frische Policy ist fast gleichverteilt (Entropie 4,21 von
+ln 90 = 4,50 nach 150k Schritten) und berührt den Ball in kurzen Läufen
+selten – der gemessene Chaser kommt auf ~7,9 Kontakte pro Episode. Der
+Warmstart liefert diese Fähigkeit ohne Explorationsbudget.
+
+Gemessen mit `configs/learning-smoke-1v1.json`-Ableitung (obs v4, drill
+resets, 2 Worker, `no_touch_timeout_seconds=10`, `idle`-Gegner, gleicher
+Seed), je 30 720 PPO-Schritte:
+
+| Metrik | von Null | nach `pretrain` |
+| --- | --- | --- |
+| Episoden | 193 | 183 |
+| Ballkontakte pro Episode (letzte 200) | 0,84 | **3,38** |
+| Tore im Training | 7 | **45** |
+| Mittlerer Return | 0,00 | **4,94** |
+| Siegquote (Tore mehr als Gegner) | 3,6 % | 24,6 % |
+| approx KL | 0,0006 | 0,001–0,002 |
+
+Das BC-Training selbst: 22 967 Paare aus 100 Episoden, drei Epochen,
+79 % Trefferquote (Zufall: 1/90), 12 s auf 2 vCPU. Die reine BC-Policy
+gewinnt gegen `idle` 3 von 10 Spielen bei 4:0 Toren und spielt gegen
+`chase` 2:7 Siege bei 6:9 Toren.
+
+Einschränkungen, damit die Zahlen nicht überlesen werden: eine Saat, kurze
+Läufe, nur ein Modus, und der Experte ist ein einfacher Chaser – BC kann
+nicht besser werden als sein Lehrer. Es ist ein Startpunkt für PPO, kein
+Ersatz für Training; für längere Läufe gilt weiter, dass Spielstärke nicht
+gemessen ist (siehe `docs/STALL_ANALYSIS.md`).
+
+### DAgger (optional, empirisch nicht besser)
+
+`--dagger-rounds N` schaltet den DAgger-Schritt dazu: der Learner fährt seine
+eigenen Episoden, der Experte etikettiert die besuchten Zustände, das Dataset
+wächst, und das Modell wird mit kleiner Lernrate weiter trainiert
+(`--dagger-epochs`, Standard 1; `--dagger-learning-rate`, Standard
+`learning_rate / 10`; `--dagger-beta`, Standard 0.5).
+
+Gemessen mit dem Chaser als Experten (gleiche Config, Auswertung 10 Spiele je
+`idle` und `chase`): BC allein 5W 7L 8D, 6:9 Tore. Die DAgger-Varianten
+erreichten 0W 9L 11D (zu große Feinjustierungs-Lernrate, 3,3e-4) bzw.
+4W 7L 9D, 5:10 (3e-5). Ein Neu-Training auf dem aggregierten Dataset war
+ebenfalls schlechter (0W 7L 13D). Der Grund ist plausibel: der Chaser ist nur
+zu ~79 % imitierbar, und die Learner-Zustände bringen Rauschen statt
+Korrekturen. DAgger ist deshalb standardmäßig aus und als experimentell
+markiert – mit einem stärkeren Experten (z. B. einem trainierten Modell) ist
+der Ansatz weiter sinnvoll.
+
+## Skalierung: Selbstspiel (`configs/1v1-selfplay.json`)
+
+`configs/1v1-selfplay.json` ist die Vorlage für längere Läufe auf stärkerer
+Hardware: 10M Schritte, 4 Worker, Batch 8192, `self_play: true` mit
+Snapshot-Pool (12 Plätze, Snapshots alle 20 Iterationen),
+`reset_mode: mixed`, obs v4, Auswertung alle 25 Iterationen gegen `idle` und
+`chase`, Lernrate 2e-4.
+
+```bash
+python3 main.py train --config-file configs/1v1-selfplay.json --steps 1000000
+# später nahtlos weiter (Ziel = aktueller Schritt + N):
+python3 main.py train --config-file configs/1v1-selfplay.json --steps 1000000
+```
+
+Die Worker-Zahl wird beim Start an die Maschine angepasst (auf 2 vCPU bleibt
+1–2 übrig, der Batch schrumpft entsprechend). Realistische Erwartung: 10M
+Schritte sind bei ~1.100 Schritten/s auf 2 vCPU etwa 2,5 Stunden; für
+Spielstärke auf Nexto-Niveau fehlen weiterhin Größenordnungen (die
+Referenz-Bots wurden mit ~250.000 Stunden Gameplay trainiert,
+`docs/STALL_ANALYSIS.md`). Der Nutzen der Config ist ein reproduzierbarer,
+fortsetzbarer Langlauf mit dichtem Messsignal, nicht ein Versprechen einer
+bestimmten Rangstufe.
+
+## Aufgaben-Leiter: `escalation` (`configs/1v1-task-ladder.json`)
+
+Ein Curriculum schaltet **Gegner und Startzustände** weiter, wenn eine
+Fertigkeit gemessen wurde. Es kann aber nicht den *Belohnungsbegriff* ändern –
+und genau das braucht ein langer Lauf: Was in Nahbereichs-Drills sinnvoll ist
+(Touch-Bonus, Annäherung), ist später ein Proxy, den die Policy farmt.
+
+`escalation` ist eine Leiter aus Punkten, die bei einem **Schrittbudget**
+greifen (nicht nach Wanduhr):
+
+```json
+"escalation": [
+  {"at_step": 2000000, "label": "wider world",
+   "episode_seconds": 30.0, "no_touch_timeout_seconds": 20.0,
+   "reset_mode": "drill", "reward": {"touch": 0.2, "goal": 15.0}},
+  {"at_step": 12000000, "label": "opponent with teeth",
+   "episode_seconds": 60.0, "opponent": "chase", "reward": {"goal": 30.0}}
+]
+```
+
+Regeln:
+
+* Jeder Punkt gilt **einmal**, in aufsteigender Reihenfolge; `at_step` muss
+  unter `total_steps` liegen (sonst Fehler beim Laden).
+* `reward` ist ein **Delta**: nur genannte Komponenten ändern sich, alle
+  anderen behalten ihren Wert. Unbekannte Namen und ungültige `reset_mode`
+  werden beim Laden abgelehnt.
+* Gewichte, Optimizer, Schrittzähler und RNG bleiben unangetastet – nur
+  Umgebung und Belohnungsfunktion wechseln. Der Worker baut die Arena dafür
+  neu (wie bei `episode_seconds`), weil die Reward-Gewichte in die
+  Belohnungsfunktion eingebacken sind.
+* Jeder Wechsel wird geloggt (`escalation 1/3 …`) und als Metrik
+  `escalation/level` gespeichert. Der Report schränkt `reward_components` auf
+  die **aktuelle Aufgabe** ein und notiert jeden Wechsel in `notes`, weil
+  Reward-Zahlen vor und nach dem Wechsel verschiedene Ziele beschreiben.
+* Läuft gleichzeitig ein Curriculum, gehören Gegner und Startzustände der
+  Stufe; ein `opponent` im Punkt wird dann ignoriert und das laut geloggt.
+* Beim Fortsetzen werden alle Punkte, die **hinter** dem wiederhergestellten
+  Schritt liegen, sofort angewandt – der Lauf startet auf der richtigen
+  Aufgabe.
+
+`configs/1v1-task-ladder.json` ist die Vorlage dazu (20M Schritte, Punkte bei
+2M / 6M / 12M, ohne Curriculum, damit die Leiter allein steuert).
+
+### Gemessener Grund für die Leiter: der Entropie-Bonus dreht die Policy auf
+
+Ein Fortsetzungslauf vom BC-Checkpoint zeigte über 118 Iterationen
+(`shooting`-Stufe, `entropy_coef = 0.01`): Entropie **1,73 → 2,39**,
+Kontakte/Episode 3,83 → 2,29, Episoden ohne Kontakt 16 % → 32 %. Die Policy
+wurde also *gleichmäßiger*, nicht sicherer. Drei Ablationen mit sonst
+identischer Config (je 60k Schritte, gleicher Checkpoint):
+
+| `entropy_coef` | Schritte | Entropie | Kontakte/Episode (1. → 2. Hälfte) | ohne Kontakt |
+| --- | --- | --- | --- | --- |
+| 0.01 (Standard) | 240k | 1,73 → 2,39 | 3,83 → 2,29 | 16 % → 32 % |
+| 0.001 | 60k | 1,88 → 0,88 | 4,19 → 4,51 | 9 % → 9 % |
+| 0.0001 | 60k | 1,66 → 1,11 | 4,13 → 3,46 | 13 % → 11 % |
+| 0.0 | 60k | 1,56 → 0,95 | 4,29 → 4,63 | 8 % → 9 % |
+
+(Die 0.01-Zeile ist der längere Lauf, aus dem die Frage kam; die drei
+Ablationen liefen je 60k Schritte ab demselben Checkpoint. Für einen
+belastbaren A/B derselben Länge fehlte auf 2 vCPU die Zeit – die Richtung ist
+über alle Läufe aber eindeutig.)
+
+Der Bonus ist bei einer warm gestarteten Policy also der dominante Gradient,
+wenn die Aufgabe dicht aber schwach belohnt ist. Dasselbe Bild von Null
+(je 150k Schritte, identische Config): mit `0.01` blieb die Entropie bei
+4,50 → 4,44 (Maximum ln 90 = 4,50), Kontakte/Episode 0,92 → 0,82, Stufe 0;
+mit `0.001` fiel sie auf 3,26, Kontakte stiegen 1,03 → 1,17, die Policy
+bestand die `approach`-Gate und erreichte Stufe 1.
+
+Deshalb ist der **Standard seit diesem Commit 0.001**, und die 1v1-Configs,
+die lernen sollen, setzen ihn explizit. (`1v1-selfplay`, 2v2/3v3 und
+Heatseeker bleiben bei 0.01 – für die Modi wurde nichts gemessen.)
+`entropy_coef` ist ein **geerbtes** Feld: beim Fortsetzen gewinnt der
+Checkpoint, nicht die Datei. Wer es ändern will, muss es nennen:
+
+```bash
+python3 main.py train --config-file configs/1v1-mastery-1v1.json \
+  --steps 500000 --override-config entropy_coef
+```
+
+### Validierungslauf mit den neuen Standardwerten (405 504 Schritte, frisch)
+
+Gemessen auf 2 vCPU (`1v1-mastery-1v1`, `--steps 400000`, 680 s, 1 825
+Episoden, 148:60 Tore im Training):
+
+* Zwei Promotionen: `approach` → `control` → **`shooting`**; die Gates
+  `approach` (0,80) und `progress` (0,70) wurden also auf beiden Feldseiten
+  bestanden. Im `shooting`-Lauf steht `progress` bei 0,58 und `shooting` bei
+  0,00 – dort ist die Stufe zu Recht blockiert.
+* Verbesserung innerhalb der laufenden Stufe (Report-Fenster ab Schritt
+  204 800): **+0,29 Reward, +2,5 Prozentpunkte Siegquote, +0,025 Tore pro
+  Episode**.
+* Match-Evaluation (10 Spiele × 60 s, beide Seiten, feste Seeds) vor dem
+  ersten Update: 0W 8L 2D, **2:24 Tore**. Am Ende: 0W 0L 10D, **0:0** – die
+  Policy kassiert nicht mehr, trifft aber auch nicht. Das ist ehrlich
+  „Defensive gelernt, Offensive nicht", und es ist nach 0,4M Schritten genau
+  das, was ein PPO-Lauf in dieser Größenordnung liefern kann.
+* `curriculum_gate_trials` ist von 24 auf 48 erhöht (siehe
+  `docs/STALL_ANALYSIS.md`, Abschnitt „24 Gate-Trials sind ein Münzwurf").
+
 ## Checkpoints und Resume
 
 * Checkpoints liegen unter `data/models/<model-id>/` und enthalten Modell,
@@ -232,7 +458,15 @@ berichtet; der deterministische Wert ist die Deployment-Metrik.
   Evaluation (Siegquote, Wilson-Intervall in der Evaluationstabelle). Er wird
   nie schlechter und ersetzt **nicht** die stabile Promotion. Ein Checkpoint
   ohne Sieg wird nicht als „best“ markiert.
-* **Während des Trainings wird kein Routine-Checkpoint mehr geschrieben.*** **`total_steps` gegen den wiederhergestellten Schritt.** `total_steps` ist
+* **Während des Trainings wird kein Routine-Checkpoint mehr geschrieben.**
+  Ausnahmen sind nur der reguläre Abschluss und ein Abbruch (siehe unten)
+  sowie der **Recovery-Checkpoint**: `recovery_checkpoint_minutes` (Standard
+  30, `0` = aus) schreibt höchstens einen zusätzlichen `recovery`-Checkpoint
+  pro Zeitfenster, begrenzt durch dieselbe `keep_checkpoints`-Retention. Das
+  ist die Versicherung gegen harte Abstürze (Stromausfall, SIGKILL) und
+  ausdrücklich kein „Checkpoint pro Intervall“ (das erzeugte in einem
+  50M-Lauf ~10.000 Verzeichnisse).
+* **`total_steps` gegen den wiederhergestellten Schritt.** `total_steps` ist
   ein *Wunsch*-Feld: beim Resume gewinnt der konfigurierte Wert über den im
   Checkpoint gespeicherten. Liegt das Ziel also auf oder unter dem
   wiederhergestellten Schritt, wird **kein** einziger Schritt trainiert. Das
@@ -240,8 +474,9 @@ berichtet; der deterministische Wert ist die Deployment-Metrik.
   Trainer meldet denselben Grund als Lauf-WARNING, `steps_completed` ist 0 im
   Ergebnis, und es wird kein Checkpoint geschrieben
   (`tests/test_trainer_gates.py::test_restored_step_beyond_total_steps_is_reported_not_silent`).
-  Wer einen abgebrochenen Lauf fortsetzt, muss `total_steps` über den
-  erreichten Schritt anheben.
+  Wer einen abgebrochenen Lauf fortsetzt, nimmt `--steps N` (Ziel = aktueller
+  Schritt + N, siehe „Wie viel weiter?“) oder hebt `total_steps` über den
+  erreichten Schritt an.
 
   Es gibt genau zwei Auslöser:
   * Erreicht der Lauf regulär `total_steps`, wird **ein** `final`-Checkpoint
@@ -298,7 +533,7 @@ python -m rlai.cli resume-plan --config-file configs/1v1-vs-chaser.json --run-id
 python -m rlai.cli train --config-file ... --plan-only
 
 # Standard: neuester gültiger, kompatibler Checkpoint wird automatisch fortgesetzt
-python -m rlai.cli train --config-file ... --run-id <kind> --max-steps 40000
+python -m rlai.cli train --config-file ... --run-id <kind> --steps 40000
 
 # explizit, oder bewusst nur Gewichte
 python -m rlai.cli train --config-file ... --resume-from <model-id> --resume-mode continue
@@ -310,6 +545,41 @@ python -m rlai.cli train --config-file ... --resume-mode fresh
 # neue Phase auf denselben Gewichten: geerbte Felder bewusst ändern
 python -m rlai.cli train --config-file ... --override-config reward
 ```
+
+### Wie viel weiter? `--steps` statt `--max-steps`
+
+`total_steps` in der Konfiguration ist ein **absolutes** Ziel: die Schleife
+läuft, solange `step < total_steps`. Ein Checkpoint bei 2.000.000 Schritten
+meldete deshalb mit `--max-steps 500000` sofort „completed“ und trainierte null
+Schritte. Dafür gibt es `--steps` (Aliase `--maxsteps`, `--Maxsteps`):
+
+```bash
+python3 main.py --steps 500000                       # 2.000.000 -> 2.500.000
+python -m rlai.cli train --config-file ... --steps 500000 --plan-only
+python -m rlai.cli resume-plan --config-file ... --steps 500000
+```
+
+* Ziel = `restored_step + N`; ohne Checkpoint ist N die Gesamtzahl. Der Lauf
+  endet nur an Iterationsgrenzen, deshalb wird das Ziel auf volle
+  Rollout-Batches (`rollout_steps × n_workers`) **aufgerundet** – höchstens um
+  einen Batch; die Note im Plan nennt den exakten Ausgangswert. Der Plan zeigt
+  `additional_steps`, `target_total_steps`, `notes` und in `effective_config`
+  das tatsächlich benutzte `total_steps`.
+* `lr_anneal_start` wird auf den wiederhergestellten Schritt gesetzt: die
+  Lernrate fällt über die **neuen** N Schritte von 100 % auf 10 %, statt beim
+  Fortsetzen sofort auf dem Boden der alten Rampe zu stehen. Der Report
+  protokolliert das Feld unter `steps.lr_anneal_start`.
+* `--max-steps N` bleibt das absolute Ziel (mutually exclusive zu `--steps`).
+  Wer `--max-steps` unter dem Checkpoint-Schritt angibt, bekommt eine Warnung
+  im Plan – genau der Fall, der früher stillschweigend nichts tat.
+* Weniger als eine Rollout-Batch (`rollout_steps × n_workers`) wird als Fehler
+  abgelehnt; so ein Lauf hätte keine einzige Aktualisierung.
+* Dashboard und API können dasselbe: im Formular die Option **Add these steps
+  to the restored checkpoint**, im Request das Feld `additional_steps`
+  (`POST /api/runs` und `POST /api/runs/start-plan`). Der Server löst den Wert
+  gegen den Checkpoint auf, den der Start wirklich wiederherstellt, und
+  speichert das aufgelöste `total_steps` in der Run-Zeile – die Fortschritts-
+  anzeige stimmt dadurch auch im Web.
 
 Die API verhält sich genauso: Fehlt `resume_mode` in `POST /api/runs`, wird
 automatisch fortgesetzt, wenn ein nutzbarer Checkpoint existiert; gibt es
@@ -488,7 +758,9 @@ Lauf wurde ohne explizite Freigabe nicht gestartet.
    mit festen Seeds; erst danach Selbstspiel.
 4. **1v1 Selbstspiel** – Gegnerpool aus eingefrorenen Snapshots
    (`1v1-selfplay`). Wer die Gegnerstufen automatisch weiterschalten will,
-   nimmt `1v1-curriculum` (auch als Preset im Dashboard).
+   nimmt `1v1-curriculum` (auch als Preset im Dashboard); wer stattdessen
+   **Belohnung und Horizont** nach Schrittbudget ändern will, nimmt die
+   Aufgaben-Leiter `1v1-task-ladder` (`escalation`, siehe oben).
 5. **2v2 / 3v3** – vom 1v1-Checkpoint starten, Teamgröße erhöhen
    (`2v2-teamplay`, `3v3-teamplay`).
 6. **Heatseeker 2v2** – separat trainieren (`heatseeker-2v2`).

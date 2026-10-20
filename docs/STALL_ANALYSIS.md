@@ -319,11 +319,137 @@ change on the user's 50M-step budget.
 
 ```
 ruff check src tests rlbot        # All checks passed
-pytest -q                         # 527 passed, 1 skipped (jsdom) — 104 s
+pytest -q                         # 606 passed, 1 skipped (jsdom) — 171 s
 ```
 
 (The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by
 design when node/jsdom are unavailable.)
+
+## Nachtrag: größere Batches und No-Touch-Timeout (150k Schritte)
+
+Dieselbe Smoke-Konfiguration, aber mit `rollout_steps = 1024` (Batch 2048
+statt 1024), `no_touch_timeout_seconds = 10` und `minibatch_size = 512`,
+sonst unverändert (obs v4, 2 Worker, 20 s Horizont, drill resets, Gegner
+`idle`, keine Zwischen-Evaluationen, run `91fc2eff1fbb`, 135 s,
+`/tmp/rlai-learn`):
+
+| Metrik | vorher (`ls1`, 150 528 Schritte) | nachher (151 552 Schritte) |
+| --- | --- | --- |
+| Episoden | 540 | 942 |
+| Entscheidungen pro Episode | 278 (18,5 s) | 161 (10,7 s) |
+| Touches pro Episode | 0,548 | **1,355** |
+| Touches pro 1 000 Schritte | 1,97 | **8,4** |
+| Tore pro 1 000 Schritte | 0,086 | **0,475** |
+| Tore (Training) | 13:51 | **72:1** |
+| Truncations | – | 869 von 942 (92 %) |
+| Entropie | 4,34 → 4,15 | 4,21 (bei ln 90 = 4,50) |
+| Explained variance | 0,54–0,91 | 0,66 (letzte Iteration 0,64) |
+| approx KL / Clipfrac | – | 0,0005 / 0,001 |
+| Schritte/s | ~1 900 | ~1 116 |
+
+Der Vergleich ist **nicht** sauber kausal: beides sind kurze, einfach
+gesäte Läufe, und der No-Touch-Timeout verändert die Episodenlänge, also
+auch Touches-pro-Episode. Deshalb die zeitraumbezogenen Zeilen: pro 1 000
+Umgebungsschritte interagiert die Policy etwa viermal häufiger mit dem Ball
+und erzielt etwa fünfmal so viele Tore. Der Preis ist Durchsatz
+(größere Batches und der zusätzliche Done-Check kosten ~40 % Schritte/s),
+und die Entropie bleibt nahe am Maximum – nach 150k Schritten ist die
+Policy noch weit von „entschieden“ entfernt. Der Run belegt, dass die
+Pipeline mit den neuen Einstellungen ein dichteres Lernsignal liefert als
+der alte Smoke-Lauf; er belegt **keine** Spielstärke.
+
+Auffällig: 72:1 Tore statt 13:51. Der alte Lauf kassierte gegen einen
+`idle`-Gegner 51 Tore – fast ausschließlich Eigentore aus den
+`defense`-Drills, in denen der Ball auf das eigene Tor rollt und eine
+zufällige Policy ihn hineinschiebt. Der 10-s-Timeout beendet diese
+Situationen früher, bevor die Policy sich selbst besiegt.
+
+### Curriculum-Stufen verzerren den First/Last-Vergleich
+
+Ein 300k-Fortsetzungslauf vom BC-Checkpoint (`f6d11b8f8ae6`: 1 669 Episoden,
+154:56 Tore, 1,59 Kontakte/Episode, 1 026 Schritte/s) zeigte im Report
+zunächst einen Rückgang von 4,54 auf 1,64 mittlerem Reward (−2,9) – der Lauf war
+im Curriculum aber von `approach` über `control` nach `shooting` gewandert.
+Jede Stufe ändert Gegner, Startzustände (reset_mode) und Horizont; die Zahlen
+beschreiben also verschiedene Aufgaben.
+
+Der Report schränkt beide Fenster jetzt auf die **aktuelle Stufe** ein
+(`learning_evidence.scope` mit `since_step`, `stage_changed`, `stage_start_step`
+und einer Notiz). Derselbe Lauf ergibt innerhalb der `shooting`-Stufe ab
+Schritt 102 400: **+0,99 Reward, +3,5 Prozentpunkte Siegquote, +0,035 Tore pro
+Episode, +0,125 Kontakte pro Episode** gegenüber dem Stufenbeginn. Der
+Fortschritt war also da – der globale Vergleich hat ihn nur von einem
+Stufenwechsel überlagert.
+
+### Der `shooting`-Engpass: 55 % der Episoden ohne Ballkontakt
+
+Dieselben 294 Curriculum-Iterationen des Laufs `f6d11b8f8ae6`, gruppiert nach
+der zum Zeitpunkt der Episode aktiven Stufe:
+
+| Stufe | Episoden | Kontakte/Episode | ohne Kontakt | Truncations | Ø Länge | Ø Reward |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 `approach` (`reach`) | 112 | 3,37 | 8 % | 79 % | 173 | 4,34 |
+| 1 `control` (`reach`) | 298 | 4,86 | 4 % | 76 % | 172 | 4,95 |
+| 2 `shooting` (`mixed`) | 1 259 | 1,39 | **55 %** | 91 % | 183 | 0,85 |
+
+`mixed` ist zur Hälfte Kickoff: der Ball liegt dann 2 500+ uu entfernt, und der
+laufweite 10-s-No-Touch-Timeout beendete die Episode, bevor eine schwache
+Policy ankommen konnte. Mehr als die Hälfte der Stichproben trug damit gar
+kein Reward-Signal – der `progress`-Gate blieb bei 0,29 (gefordert 0,70), und
+der Lauf stand 224 Stufen-Iterationen still.
+
+Zwei Änderungen (Commit `ec305d0`): `shooting` startet aus `drill`-Zuständen
+(Attacke/Verteidigung/Race, 700–2 600 uu; Kickoffs kommen mit `defense`
+zurück), und `Stage.no_touch_timeout` erlaubt jeder Stufe einen eigenen
+Timeout – `shooting` … `integrated` nutzen 25 s, die Nahbereichsstufen
+behalten den Laufwert. Der Timeout reist mit dem Collect-Kommando und baut
+die Worker-Arena neu (wie `episode_seconds`).
+
+Wirkung im A/B (gleicher Checkpoint, je 80 000 Schritte, `/tmp/rlai-shootA`
+gegen `/tmp/rlai-shootB`): Episoden ohne Kontakt 30 % → 17 % in der ersten
+Hälfte, Kontakte/Episode 2,24 → 3,24.
+
+### Warum 80k-Schritte-A/Bs nichts beweisen (Rauschkalibrierung)
+
+Drei Läufe mit **identischer** effektiver Config und demselben Checkpoint
+(`rlai-shootB/C/D`, je 81 920 Schritte) ergaben: Kontakte/Episode in der
+zweiten Hälfte 2,31 / 1,91 / 3,84 und `progress`-Gate 0,25 / 0,71 / 0,13.
+Der Resume ist nicht bit-deterministisch (die Worker ziehen ihre Aktions-
+Stichproben aus eigenen Torch-RNGs), und 24 Gate-Trials haben ±18
+Prozentpunkte Konfidenzband. **Policy-Vergleiche brauchen die geseedete
+Match-Evaluation (`eval_interval`, feste Seeds), keine Trainings-Rollouts** –
+und selbst dort sind 10 Spiele nur eine grobe Auflösung.
+
+Nebenbefund: `learning_rate` und `entropy_coef` stehen in `INHERITED_FIELDS`.
+Ein `--config-file` mit anderen Werten wird beim Fortsetzen **nicht**
+angewandt (Log: `source=inherited`); dafür braucht es `--override-config`.
+Das ist Absicht (Reproduzierbarkeit), hat aber drei Testläufe gekostet.
+
+### 24 Gate-Trials sind ein Münzwurf
+
+Zwei Beobachtungen aus identischen Konfigurationen:
+
+* Frischer Lauf, 150k Schritte: `approach` 0,125 (25k) → **1,00** (150k),
+  Stufe 1 erreicht.
+* Frischer Lauf derselben Config, 400k Schritte: `approach` 0,00 (25k und
+  120k) → **1,00** (145k), dann wieder 0,00 in der Folgeauswertung.
+
+Ein Probe-Trial ist 1–1,5 s, 24 Trials ergeben bei einer Rate von 0,5 ein
+95-%-Band von ±0,2. Nahe der Schwelle (0,80 mit CI-Untergrenze 0,60)
+entscheidet damit der Zufall, ob eine Stufe weitergeht. Deshalb ist
+`curriculum_gate_trials` jetzt **48** (Standard und Mastery-Config): das Band
+halbiert sich auf ±0,14, die Probe kostet weiter nur Sekunden. Die Schwellen
+selbst bleiben unverändert – mehr Trials machen die Entscheidung präziser,
+nicht leichter.
+
+### 20-s-Evaluationen überschätzen eine passive Policy
+
+Der BC-Checkpoint galt als „5W/7L/8D gegen idle+chase" – gemessen über 20 s
+Episoden. Mit 60-s-Spielen und denselben Gegnern steht dieselbe Policy bei
+**0W 0L 10D gegen `idle` (0:0)** und **0W 10L 0D gegen `chase` (0:37)**:
+Bei 20 s reicht die Zeit meist nur zum 0:0, bei 60 s kassiert sie. Für
+Fortschrittsaussagen sind volle Spiele nötig; alle Zahlen in diesem Abschnitt
+nutzen `eval_match_seconds = 60`, 10 Spiele je Gegner, beide Seiten.
 
 ## Reproduction commands (isolated data)
 
