@@ -67,6 +67,7 @@ INHERITED_FIELDS = (
 REQUEST_FIELDS = (
     "run_name",
     "total_steps",
+    "lr_anneal_start",
     "rollout_steps",
     "episode_seconds",
     "reset_mode",
@@ -131,6 +132,12 @@ class ResumePlan:
     has_rng: bool = False
     has_curriculum: bool = False
     has_league: bool = False
+    #: steps requested *on top of* the restored step (CLI ``--steps``)
+    additional_steps: int | None = None
+    #: absolute step target the run would stop at (restored + additional)
+    target_total_steps: int | None = None
+    #: informational messages (printed as NOTE, logged at INFO - not warnings)
+    notes: list[str] = field(default_factory=list)
 
     @property
     def will_resume(self) -> bool:
@@ -206,20 +213,34 @@ class ResumePlan:
             "has_rng": self.has_rng,
             "has_curriculum": self.has_curriculum,
             "has_league": self.has_league,
+            "additional_steps": self.additional_steps,
+            "target_total_steps": self.target_total_steps,
+            "notes": self.notes,
             "restores": self.restores,
             "missing": self.missing,
         }
 
     def summary(self) -> str:
         if not self.will_resume:
-            return f"{self.mode} training from scratch" + (
+            text = f"{self.mode} training from scratch" + (
                 f" ({len(self.rejected)} candidate(s) rejected)" if self.rejected else ""
             )
-        kind = "continuing" if self.mode == "continue" else "transfer from"
-        return (
-            f"{kind} {self.model_id} at step {self.parent_step}"
-            + (f" (fallback after {len(self.rejected)} rejection(s))" if self.fallback_used else "")
-        )
+        else:
+            kind = "continuing" if self.mode == "continue" else "transfer from"
+            text = (
+                f"{kind} {self.model_id} at step {self.parent_step}"
+                + (
+                    f" (fallback after {len(self.rejected)} rejection(s))"
+                    if self.fallback_used
+                    else ""
+                )
+            )
+        if self.additional_steps:
+            text += (
+                f"; adding {self.additional_steps} steps -> target "
+                f"{self.target_total_steps}"
+            )
+        return text
 
 
 def lineage_runs(models_dir: str | Path, run_id: str | None, limit: int = 32) -> list[str]:
@@ -346,6 +367,81 @@ def merge_config(
     return merged, overrides, inherited
 
 
+def _resolve_additional_steps(
+    plan: ResumePlan, config: TrainingConfig, restored_step: int
+) -> TrainingConfig:
+    """Resolve ``--steps`` for a run that starts at ``restored_step``.
+
+    Fills the plan's target/notes and returns the configuration the run would
+    use (unchanged when no additional steps were requested).
+    """
+    if not plan.additional_steps:
+        return config
+    resolved = with_additional_steps(config, restored_step, plan.additional_steps)
+    plan.target_total_steps = resolved.total_steps
+    exact = max(0, int(restored_step)) + int(plan.additional_steps)
+    rounding = (
+        f" (rounded up from {exact} to complete rollout batches)"
+        if resolved.total_steps != exact
+        else ""
+    )
+    plan.notes.append(
+        f"adding {plan.additional_steps} steps to step {restored_step} -> target "
+        f"{resolved.total_steps}{rounding}"
+        + (
+            f"; the learning rate anneals over steps "
+            f"{resolved.lr_anneal_start}..{resolved.total_steps}"
+            if resolved.lr_anneal
+            else ""
+        )
+    )
+    return resolved
+
+
+def with_additional_steps(
+    config: TrainingConfig, restored_step: int, additional_steps: int
+) -> TrainingConfig:
+    """Turn "N more steps" into the absolute target the trainer expects.
+
+    ``TrainingConfig.total_steps`` is an *absolute* target: the training loop
+    runs while ``step < total_steps``, and the GUI progress bar, the run row
+    and the report all read it that way.  Asking a checkpoint at 2,000,000
+    steps to train "500,000 more" with an absolute target of 500,000 therefore
+    trained **zero** steps and marked the run completed.
+
+    ``--steps N`` means ``total_steps = restored_step + N`` instead: the run
+    continues from the checkpoint and adds N steps (rounded up to a whole
+    number of rollout batches, because that is the only place the loop can
+    stop).  The learning-rate anneal is restarted at the restored step
+    (``lr_anneal_start``) so the added steps do not inherit the 10 % floor of
+    a long history.
+    """
+    try:
+        steps = int(additional_steps)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"additional steps must be an integer, got {additional_steps!r}"
+        ) from None
+    if steps <= 0:
+        raise ValueError(f"additional steps must be positive, got {steps}")
+    start = max(0, int(restored_step))
+    batch = int(config.rollout_steps) * int(config.n_workers)
+    # A run stops only at iteration boundaries, so an unrounded target of
+    # 2,000,000 + 500,000 would end at 2,501,376 and report 100.3 % progress.
+    # Round *up*: training fewer steps than requested would silently undercut
+    # the request, overshooting by at most one rollout batch does not.
+    total = start + steps
+    if total < batch:
+        raise ValueError(
+            f"adding {steps} steps to step {start} gives {total}, below one rollout "
+            f"batch of {batch} steps; increase --steps"
+        )
+    remainder = total % batch
+    if remainder:
+        total += batch - remainder
+    return config.model_copy(update={"total_steps": total, "lr_anneal_start": start})
+
+
 def plan_resume(
     models_dir: str | Path,
     config: TrainingConfig,
@@ -355,18 +451,36 @@ def plan_resume(
     checkpoint: str | None = None,
     max_candidates: int = 25,
     explicit_overrides: Any = (),
+    additional_steps: int | None = None,
 ) -> ResumePlan:
     """Find the newest valid, compatible checkpoint for ``mode``.
 
     Never raises for a broken or incompatible checkpoint: it reports the
     rejection and keeps looking at older candidates.  Only a ``fresh`` request
     or an empty models directory produces a plan without a checkpoint.
+
+    ``additional_steps`` expresses "train N more steps" (CLI ``--steps``): the
+    plan reports the restored step and the absolute target it adds up to, and
+    its effective configuration carries that target.
     """
     models_dir = Path(models_dir)
     if mode not in RESUME_MODES:
         raise ValueError(f"resume mode must be one of {RESUME_MODES}, got {mode!r}")
 
     plan = ResumePlan(mode=mode, requested=checkpoint)
+    if additional_steps is not None:
+        try:
+            requested_steps = int(additional_steps)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"additional steps must be an integer, got {additional_steps!r}"
+            ) from None
+        if requested_steps <= 0:
+            raise ValueError(f"additional steps must be positive, got {requested_steps}")
+        plan.additional_steps = requested_steps
+        # until a checkpoint is selected the run starts at step 0, so "N more"
+        # is simply "N in total"; the accepted-candidate branch refines this
+        plan.target_total_steps = requested_steps
     plan.explicit_overrides = [
         str(name).strip() for name in (explicit_overrides or ()) if str(name).strip()
     ]
@@ -389,10 +503,12 @@ def plan_resume(
                 f"fresh training requested: {len(compatible)} compatible checkpoint(s) "
                 f"ignored, newest is {compatible[0].get('id')} at step {compatible[0].get('step')}"
             )
+        _resolve_additional_steps(plan, config, 0)
         return plan
 
     if not candidates:
         plan.warnings.append(f"no checkpoints in {models_dir}; nothing to resume from")
+        _resolve_additional_steps(plan, config, 0)
         return plan
 
     ordered = _order_candidates(
@@ -460,6 +576,9 @@ def plan_resume(
         plan.validation = validation.to_dict()
         plan.fallback_used = bool(plan.rejected)
         plan.config = validation.training_config
+        # "N more steps" is resolved against the step this plan restores, so
+        # the preview shows the target the training run would actually use.
+        request_config = _resolve_additional_steps(plan, config, plan.restored_step)
         # Show, before anything starts, which configuration the resumed run
         # would actually use and which requested values would *not* be used.
         # (plan.overrides used to stay empty forever, so the preview could
@@ -467,7 +586,7 @@ def plan_resume(
         if mode == "continue" and validation.training_config:
             effective, plan.overrides, plan.inherited = merge_config(
                 validation.training_config,
-                config,
+                request_config,
                 mode=mode,
                 explicit_overrides=plan.explicit_overrides,
             )
@@ -496,11 +615,20 @@ def plan_resume(
                     "some iterations to re-adapt"
                 )
             stored_total = (validation.training_config or {}).get("total_steps")
-            if stored_total and int(stored_total) != int(config.total_steps) and config.lr_anneal:
+            if (
+                stored_total
+                and int(stored_total) != int(request_config.total_steps)
+                and request_config.lr_anneal
+                and not plan.additional_steps
+            ):
+                # An intentional "--steps N" continuation always changes the
+                # total; that is the request, not a surprise, so it is a NOTE
+                # (see above) instead of this warning.
                 plan.warnings.append(
-                    f"total_steps changes from {stored_total} to {config.total_steps}: "
-                    "the learning-rate schedule is recomputed against the new total, "
-                    "so the learning rate will differ from an uninterrupted run"
+                    f"total_steps changes from {stored_total} to "
+                    f"{request_config.total_steps}: the learning-rate schedule is "
+                    "recomputed against the new total, so the learning rate will "
+                    "differ from an uninterrupted run"
                 )
         plan.has_model = validation.has_model
         plan.has_optimizer = validation.has_optimizer
@@ -528,10 +656,11 @@ def plan_resume(
                 plan.warnings.append(
                     "checkpoint has no opponent-pool ratings; the pool starts empty"
                 )
-            if plan.restored_step >= config.total_steps:
+            if plan.restored_step >= request_config.total_steps:
                 plan.warnings.append(
                     f"checkpoint step {plan.restored_step} already reached total_steps "
-                    f"{config.total_steps}; raise total_steps to keep training"
+                    f"{request_config.total_steps}; use --steps N to add N more steps, "
+                    "or raise total_steps"
                 )
         if plan.fallback_used:
             rejected_ids = ", ".join(

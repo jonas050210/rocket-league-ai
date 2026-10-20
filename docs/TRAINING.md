@@ -40,6 +40,14 @@ Gewichte, sammelt die Rollouts ein und trainiert zentral.
   keine Versionen (die Validierung lehnt das mit Begründung ab).
 * `n_workers` sollte die Anzahl physischer Kerne nicht überschreiten.
   Auf einer 2-vCPU-Maschine sind 2–3 Worker sinnvoll, nicht 8.
+* **Episodenende (Truncation).** Neben dem Zeitlimit `episode_seconds` gibt es
+  `no_touch_timeout_seconds` (Standard 0 = aus; empfohlene 1v1-Configs: 10 s):
+  Berührt die Policy den Ball so lange nicht, endet die Episode vorzeitig.
+  Eine frische Policy fährt sonst die volle Horizontzeit auf einen Ball zu,
+  den sie nie erreicht – ein langer, fast gradientenfreier Versuch statt
+  mehrerer kurzer. Truncations sind **keine** Terminals: `rlai.ppo.compute_gae`
+  bootstrappt mit `V(s_end)` (siehe `tests/test_gae_truncation.py`), der
+  Wertschätzer lernt also kein „Zeitlimit = verlorenes Spiel“.
 
 ## Beobachtungsversionen
 
@@ -232,7 +240,15 @@ berichtet; der deterministische Wert ist die Deployment-Metrik.
   Evaluation (Siegquote, Wilson-Intervall in der Evaluationstabelle). Er wird
   nie schlechter und ersetzt **nicht** die stabile Promotion. Ein Checkpoint
   ohne Sieg wird nicht als „best“ markiert.
-* **Während des Trainings wird kein Routine-Checkpoint mehr geschrieben.*** **`total_steps` gegen den wiederhergestellten Schritt.** `total_steps` ist
+* **Während des Trainings wird kein Routine-Checkpoint mehr geschrieben.**
+  Ausnahmen sind nur der reguläre Abschluss und ein Abbruch (siehe unten)
+  sowie der **Recovery-Checkpoint**: `recovery_checkpoint_minutes` (Standard
+  30, `0` = aus) schreibt höchstens einen zusätzlichen `recovery`-Checkpoint
+  pro Zeitfenster, begrenzt durch dieselbe `keep_checkpoints`-Retention. Das
+  ist die Versicherung gegen harte Abstürze (Stromausfall, SIGKILL) und
+  ausdrücklich kein „Checkpoint pro Intervall“ (das erzeugte in einem
+  50M-Lauf ~10.000 Verzeichnisse).
+* **`total_steps` gegen den wiederhergestellten Schritt.** `total_steps` ist
   ein *Wunsch*-Feld: beim Resume gewinnt der konfigurierte Wert über den im
   Checkpoint gespeicherten. Liegt das Ziel also auf oder unter dem
   wiederhergestellten Schritt, wird **kein** einziger Schritt trainiert. Das
@@ -240,8 +256,9 @@ berichtet; der deterministische Wert ist die Deployment-Metrik.
   Trainer meldet denselben Grund als Lauf-WARNING, `steps_completed` ist 0 im
   Ergebnis, und es wird kein Checkpoint geschrieben
   (`tests/test_trainer_gates.py::test_restored_step_beyond_total_steps_is_reported_not_silent`).
-  Wer einen abgebrochenen Lauf fortsetzt, muss `total_steps` über den
-  erreichten Schritt anheben.
+  Wer einen abgebrochenen Lauf fortsetzt, nimmt `--steps N` (Ziel = aktueller
+  Schritt + N, siehe „Wie viel weiter?“) oder hebt `total_steps` über den
+  erreichten Schritt an.
 
   Es gibt genau zwei Auslöser:
   * Erreicht der Lauf regulär `total_steps`, wird **ein** `final`-Checkpoint
@@ -298,7 +315,7 @@ python -m rlai.cli resume-plan --config-file configs/1v1-vs-chaser.json --run-id
 python -m rlai.cli train --config-file ... --plan-only
 
 # Standard: neuester gültiger, kompatibler Checkpoint wird automatisch fortgesetzt
-python -m rlai.cli train --config-file ... --run-id <kind> --max-steps 40000
+python -m rlai.cli train --config-file ... --run-id <kind> --steps 40000
 
 # explizit, oder bewusst nur Gewichte
 python -m rlai.cli train --config-file ... --resume-from <model-id> --resume-mode continue
@@ -310,6 +327,35 @@ python -m rlai.cli train --config-file ... --resume-mode fresh
 # neue Phase auf denselben Gewichten: geerbte Felder bewusst ändern
 python -m rlai.cli train --config-file ... --override-config reward
 ```
+
+### Wie viel weiter? `--steps` statt `--max-steps`
+
+`total_steps` in der Konfiguration ist ein **absolutes** Ziel: die Schleife
+läuft, solange `step < total_steps`. Ein Checkpoint bei 2.000.000 Schritten
+meldete deshalb mit `--max-steps 500000` sofort „completed“ und trainierte null
+Schritte. Dafür gibt es `--steps` (Aliase `--maxsteps`, `--Maxsteps`):
+
+```bash
+python3 main.py --steps 500000                       # 2.000.000 -> 2.500.000
+python -m rlai.cli train --config-file ... --steps 500000 --plan-only
+python -m rlai.cli resume-plan --config-file ... --steps 500000
+```
+
+* Ziel = `restored_step + N`; ohne Checkpoint ist N die Gesamtzahl. Der Lauf
+  endet nur an Iterationsgrenzen, deshalb wird das Ziel auf volle
+  Rollout-Batches (`rollout_steps × n_workers`) **aufgerundet** – höchstens um
+  einen Batch; die Note im Plan nennt den exakten Ausgangswert. Der Plan zeigt
+  `additional_steps`, `target_total_steps`, `notes` und in `effective_config`
+  das tatsächlich benutzte `total_steps`.
+* `lr_anneal_start` wird auf den wiederhergestellten Schritt gesetzt: die
+  Lernrate fällt über die **neuen** N Schritte von 100 % auf 10 %, statt beim
+  Fortsetzen sofort auf dem Boden der alten Rampe zu stehen. Der Report
+  protokolliert das Feld unter `steps.lr_anneal_start`.
+* `--max-steps N` bleibt das absolute Ziel (mutually exclusive zu `--steps`).
+  Wer `--max-steps` unter dem Checkpoint-Schritt angibt, bekommt eine Warnung
+  im Plan – genau der Fall, der früher stillschweigend nichts tat.
+* Weniger als eine Rollout-Batch (`rollout_steps × n_workers`) wird als Fehler
+  abgelehnt; so ein Lauf hätte keine einzige Aktualisierung.
 
 Die API verhält sich genauso: Fehlt `resume_mode` in `POST /api/runs`, wird
 automatisch fortgesetzt, wenn ein nutzbarer Checkpoint existiert; gibt es

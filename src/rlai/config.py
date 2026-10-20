@@ -77,6 +77,21 @@ class TrainingConfig(BaseModel):
     clip_value: float = Field(default=0.2, ge=0, le=10)
     target_kl: float = Field(default=0.05, ge=0, le=10)
     lr_anneal: bool = True
+    #: first step of the current learning-rate anneal window.  ``0`` anneals
+    #: over the whole run (the historical behaviour).  ``--steps N`` sets it to
+    #: the restored checkpoint step, so "500k more steps" anneals over those
+    #: 500k instead of resuming at the 10 % floor of a very long history.
+    lr_anneal_start: int = Field(default=0, ge=0)
+    #: end an episode after this many seconds without a ball touch (0 = off).
+    #: A fresh policy spends most of its horizon driving to a ball it never
+    #: reaches; those episodes contribute almost no useful gradient.  The
+    #: timeout turns them into short, repeated attempts, which is what the
+    #: RLGym/RLGym-PPO reference setups do (``NoTouchTimeoutCondition``).
+    no_touch_timeout_seconds: float = Field(default=0.0, ge=0.0, le=600.0)
+    #: write a bounded ``recovery`` checkpoint every N minutes of wall time so
+    #: a hard crash (power loss, SIGKILL) does not lose hours of training.
+    #: ``0`` disables it.  Only the newest few are kept (see trainer).
+    recovery_checkpoint_minutes: float = Field(default=30.0, ge=0.0, le=1440.0)
     device: str = "auto"
     opponent: str = "chase"
     self_play: bool = False
@@ -272,6 +287,12 @@ class TrainingConfig(BaseModel):
             )
         if self.minibatch_size > self.rollout_steps * self.n_workers:
             raise ValueError("minibatch_size cannot exceed one rollout batch")
+        if self.lr_anneal and self.lr_anneal_start >= self.total_steps:
+            raise ValueError(
+                "lr_anneal_start must be below total_steps "
+                f"({self.lr_anneal_start} >= {self.total_steps}); the anneal window "
+                "would be empty"
+            )
         if self.curriculum:
             # The stages are validated here, so a broken threshold is
             # reported when the configuration is checked and not in the

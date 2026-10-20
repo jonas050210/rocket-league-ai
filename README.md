@@ -53,10 +53,31 @@ wählen und starten (1v1 ist der einzige Modus des Workflows; alle übrigen
 Parameter kommen aus den Standardwerten), oder per CLI:
 
 ```bash
+python3 main.py --steps 500000      # 500.000 Schritte, Fortsetzung inklusive
+python3 main.py --plan-only         # was würde passieren? (trainiert nicht)
 python -m rlai.cli train --config-file configs/smoke-1v1.json
 python -m rlai.cli evaluate --model data/models/<id>/model.pt --games 2 --match-seconds 20
 python -m rlai.cli benchmark --mode heatseeker-2v2 --workers 2 --seconds 2
 ```
+
+`main.py` ist nur eine Abkürzung: es ergänzt `train` und
+`configs/1v1-mastery-1v1.json`, wenn beides fehlt, und funktioniert auch ohne
+`pip install -e .` (Torch/RocketSim müssen trotzdem installiert sein). Die
+vollständige CLI bleibt `python -m rlai.cli`.
+
+### Schrittbudget: `--steps` oder `--max-steps`
+
+* `--steps N` (Aliase `--maxsteps`, `--Maxsteps`) heißt **N Schritte
+  zusätzlich** zu dem Schritt, den der fortgesetzte Checkpoint hat: ein
+  Checkpoint bei 2.000.000 läuft mit `--steps 500000` bis 2.500.000 (das Ziel
+  wird auf volle Rollout-Batches aufgerundet, weil der Lauf nur dort enden
+  kann – hier 2.500.096). Der
+  Lernraten-Anneal beginnt dabei neu beim wiederhergestellten Schritt
+  (`lr_anneal_start`), damit die zusätzlichen Schritte nicht auf dem
+  10-%-Boden einer langen Historie starten. Ohne Checkpoint ist `N` die
+  Gesamtzahl.
+* `--max-steps N` bleibt das historische **absolute** Ziel. Beides zusammen ist
+  ein Fehler; pro Lauf gilt genau eine Angabe.
 
 Fortsetzung, Report und seitengeglichene Evaluation:
 
@@ -65,7 +86,7 @@ Fortsetzung, Report und seitengeglichene Evaluation:
 python -m rlai.cli resume-plan --config-file configs/smoke-1v1.json --run-id <run-id>
 
 # Standard: neuester gültiger, kompatibler Checkpoint wird automatisch fortgesetzt
-python -m rlai.cli train --config-file configs/smoke-1v1.json --max-steps 40000
+python -m rlai.cli train --config-file configs/smoke-1v1.json --steps 40000
 # Explizit von einem Checkpoint / nur Gewichte übernehmen / bewusst neu anfangen
 python -m rlai.cli train --config-file configs/smoke-1v1.json --resume-from <model-id> --resume-mode transfer
 python -m rlai.cli train --config-file configs/smoke-1v1.json --resume-mode fresh
@@ -234,10 +255,11 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q                    # 466 passed, ca. 2 min (2 vCPU, keine GPU)
+python -m pytest -q                    # 581 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **466 passed** in ca. 2 min. Abgedeckt: Modi,
+Ergebnis in dieser Umgebung: **581 passed, 1 skipped** in ca. 3 min (skip:
+jsdom fehlt). Abgedeckt: Modi,
 Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
 PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,
 Validierung und best-Zeiger, Gegnerpool (inkl. **Unveränderlichkeit** und

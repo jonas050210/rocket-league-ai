@@ -268,6 +268,8 @@ class Trainer:
         self.interrupt_checkpoint_error: str | None = None
         self._interrupt_guard = _InterruptGuard()
         self.evaluation_seconds = 0.0
+        #: monotonic timestamp of the last recovery checkpoint (crash net)
+        self._last_recovery_at = time.monotonic()
         self.gate_seconds = 0.0
         self.gate_probe_seconds = 0.0
         self.checkpoint_seconds = 0.0
@@ -433,6 +435,10 @@ class Trainer:
         self.resume_plan = plan
         for warning in plan.warnings:
             self._warn(warning)
+        # Informational plan notes (e.g. "--steps N" resolved to an absolute
+        # target) are not warnings: they describe what was asked for.
+        for note in getattr(plan, "notes", []) or []:
+            self._log("INFO", note)
         if not plan.will_resume:
             reasons = "; ".join(
                 reason
@@ -983,6 +989,36 @@ class Trainer:
         self.store.replace_player_memory(rows_from_memory(memory))
 
     # -- retention ----------------------------------------------------------
+    def _maybe_recovery_checkpoint(self) -> dict | None:
+        """Write a bounded ``recovery`` checkpoint every few minutes.
+
+        The documented checkpoint policy writes a checkpoint only at the end
+        of a run or on a graceful stop, so a hard crash (power loss, SIGKILL,
+        kernel panic) loses every step since the last run ended.  For a
+        multi-hour run that is unacceptable, so this adds a *bounded* net:
+        one checkpoint every ``recovery_checkpoint_minutes`` of wall time,
+        pruned by the normal ``keep_checkpoints`` retention.
+
+        It is deliberately not a "routine checkpoint every N iterations":
+        that design produced about 10,000 directories for a 50M-step run.
+        """
+        minutes = float(getattr(self.config, "recovery_checkpoint_minutes", 0.0) or 0.0)
+        if minutes <= 0:
+            return None
+        now = time.monotonic()
+        if now - self._last_recovery_at < minutes * 60.0:
+            return None
+        self._last_recovery_at = now
+        manifest = self._save(label="recovery")
+        if manifest is None:
+            return None
+        self._log(
+            "INFO",
+            f"recovery checkpoint {manifest['id']} at step {self.step} "
+            f"(every {minutes:g} min of wall time; a hard crash resumes from here)",
+        )
+        return manifest
+
     def _apply_retention(self) -> None:
         """Bound the size of the metric, log and episode tables.
 
@@ -995,7 +1031,13 @@ class Trainer:
             if self.config.metric_retention:
                 removed += self.store.prune_metrics(self.run_id, self.config.metric_retention)
             if self.config.episode_retention:
-                removed += self.store.prune_episodes(self.run_id, self.config.episode_retention)
+                removed += self.store.prune_episodes(
+                    self.run_id,
+                    self.config.episode_retention,
+                    # keep the beginning of the run: the report compares the
+                    # first and last episode window to judge learning
+                    protect_first=report_module.LEARNING_EVIDENCE_WINDOW,
+                )
             if self.config.log_retention:
                 removed += self.store.prune_logs(self.run_id, self.config.log_retention)
             if removed:
@@ -1773,6 +1815,8 @@ class Trainer:
                     ),
                 )
                 self._metric("time/iteration_seconds", time.perf_counter() - iteration_started)
+                # Crash net: bounded, time based, pruned by keep_checkpoints.
+                self._maybe_recovery_checkpoint()
                 # the queued metrics are written in one transaction, at
                 # most every ``metric_flush_interval`` iterations
                 self._iterations_since_flush += 1

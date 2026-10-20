@@ -122,6 +122,9 @@ def test_report_labels_everything_it_could_not_measure(data_root):
         "completed": 0,
         "target": config.total_steps,
         "progress": 0.0,
+        # start of the current learning-rate anneal window (0 = whole run;
+        # a "--steps N" continuation restarts it at the restored step)
+        "lr_anneal_start": 0,
     }
     # nothing was measured: every section says so instead of reporting zeros
     assert report["duration_s"] is None

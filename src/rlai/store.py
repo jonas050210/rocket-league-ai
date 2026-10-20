@@ -1024,15 +1024,32 @@ class Store:
                 )
             return cursor.rowcount or 0
 
-    def prune_episodes(self, run_id: str, keep: int = 20_000) -> int:
-        """Keep only the newest ``keep`` episode rows of a run."""
+    def prune_episodes(self, run_id: str, keep: int = 20_000, protect_first: int = 0) -> int:
+        """Keep only the newest ``keep`` episode rows of a run.
+
+        ``protect_first`` additionally keeps the *oldest* N rows.  The run
+        report compares the first 200 episodes with the last 200 to answer
+        "did anything improve?" without trusting the shaped reward; deleting
+        the start of a long run would silently turn that comparison into
+        "episode 20,001 vs. episode 40,000".
+        """
         keep = max(1, int(keep))
+        protect = max(0, int(protect_first or 0))
         with self._lock, self._connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM episodes WHERE run_id=? AND id NOT IN ("
-                "SELECT id FROM episodes WHERE run_id=? ORDER BY id DESC LIMIT ?)",
-                (run_id, run_id, keep),
-            )
+            if protect:
+                cursor = conn.execute(
+                    "DELETE FROM episodes WHERE run_id=? AND id NOT IN ("
+                    "SELECT id FROM episodes WHERE run_id=? ORDER BY id DESC LIMIT ?) "
+                    "AND id NOT IN ("
+                    "SELECT id FROM episodes WHERE run_id=? ORDER BY id ASC LIMIT ?)",
+                    (run_id, run_id, keep, run_id, protect),
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM episodes WHERE run_id=? AND id NOT IN ("
+                    "SELECT id FROM episodes WHERE run_id=? ORDER BY id DESC LIMIT ?)",
+                    (run_id, run_id, keep),
+                )
             return cursor.rowcount or 0
 
     def metric_retention_plan(self, run_id: str) -> dict:

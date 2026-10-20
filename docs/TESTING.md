@@ -56,10 +56,11 @@ python -m pytest -q
 | Launcher `--dry-run` mit RLBot-Parser, Rückgabecodes | `test_live.py`, `test_cli.py` | bestanden |
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
 | Exposure-Settings: Loopback-Standard, Host-/Port-/CORS-Validierung, Token-Warnung, `serve` | `test_app_settings.py` | bestanden |
+| `--steps N` (zusätzliche Schritte ab Checkpoint, Aufrunden auf Rollout-Batches), Lernraten-Fenster, Plan-Felder, CLI-Aliase, `main.py`-Wrapper, Episode-Retention mit geschütztem Anfang, Recovery-Checkpoint, No-Touch-Truncation | `test_additional_steps.py` | bestanden |
 
-**Gesamt: 528 passed, 0 failed, 0 skipped** (ca. 2 min, 2 vCPU, mit
+**Gesamt: 581 passed, 0 failed, 0 skipped** (ca. 3 min, 2 vCPU, mit
 installiertem jsdom für den GUI-Smoke-Test), `ruff check src tests rlbot`
-sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (527 passed,
+sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (581 passed,
 1 skipped). Die einzige Warnung stammt aus `starlette`/`anyio`
 (Drittanbieter), nicht aus diesem Projekt.
 

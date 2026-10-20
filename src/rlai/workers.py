@@ -208,6 +208,7 @@ def worker_main(remote, config_dict: dict, worker_index: int, seed: int) -> None
                 episode_seconds=active_episode_seconds,
                 obs_version=config.obs_version,
                 reset_mode=active_reset_mode,
+                no_touch_timeout_seconds=config.no_touch_timeout_seconds,
             )
 
         env = build_env()

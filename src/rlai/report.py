@@ -78,6 +78,9 @@ TIMING_METRICS = (
 )
 
 MAX_CURVE_POINTS = 400
+#: first/last episode window of the learning-evidence block.  The trainer
+#: protects these rows from retention pruning (see Trainer._apply_retention).
+LEARNING_EVIDENCE_WINDOW = 200
 
 #: Protocol keys that define *what was measured*.  The seed is deliberately not
 #: part of the identity: the trainer derives a new kickoff seed per evaluation
@@ -573,10 +576,10 @@ def build_run_report(
     # interaction?  A rising reward with flat touches/goals is proxy farming,
     # and this block makes that visible at a glance.
     first_window = store.episode_window_stats(
-        run_id, which="first", window=200, since_step=resumed_step
+        run_id, which="first", window=LEARNING_EVIDENCE_WINDOW, since_step=resumed_step
     )
     last_window = store.episode_window_stats(
-        run_id, which="last", window=200, since_step=resumed_step
+        run_id, which="last", window=LEARNING_EVIDENCE_WINDOW, since_step=resumed_step
     )
     learning_evidence: dict[str, Any] = {
         "first_200_episodes": first_window,
@@ -714,6 +717,10 @@ def build_run_report(
             "progress": (
                 round(end_step / float(total_steps), 4) if total_steps else None
             ),
+            # where the learning rate anneal window began: after ``--steps N``
+            # the added chunk anneals on its own instead of resuming at the
+            # 10 % floor of a long history
+            "lr_anneal_start": int(run_config.get("lr_anneal_start") or 0),
         },
         "steps_per_second": steps_per_second,
         "steps_per_second_basis": (
