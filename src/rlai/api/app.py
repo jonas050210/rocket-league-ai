@@ -52,6 +52,9 @@ class StartRunRequest(TrainingConfig):
     #: (a recorded phase change; see rlai.resume.merge_config)
     config_overrides: list[str] = []
     allow_concurrent: bool = False
+    #: "train N more steps" instead of an absolute ``total_steps``: the target
+    #: becomes restored_step + N (the CLI's ``--steps``)
+    additional_steps: int | None = Field(default=None, ge=1, le=5_000_000_000)
     #: the user confirmed the start (the GUI asks before it posts)
     confirm: bool = False
 
@@ -76,6 +79,8 @@ class StartPlanRequest(BaseModel):
     """
 
     total_steps: int = Field(default=200_000, ge=2_000, le=5_000_000_000)
+    #: interpret ``total_steps`` as "N more steps" (restored step + N)
+    additional_steps: int | None = Field(default=None, ge=1, le=5_000_000_000)
     run_name: str | None = Field(default=None, min_length=1, max_length=80)
 
 
@@ -502,7 +507,18 @@ def create_app(store_path: Path | None = None) -> FastAPI:
             # the simplified workflow trains 1v1 only; the server decides
             # this, not the client
             config = config.model_copy(update={"mode": "soccer-1v1"})
-        resume = plan_resume(paths["models"], config, mode="continue")
+        resume = plan_resume(
+            paths["models"], config, mode="continue", additional_steps=request.additional_steps
+        )
+        if request.additional_steps:
+            from ..resume import with_additional_steps
+
+            try:
+                config = with_additional_steps(
+                    config, resume.restored_step, int(request.additional_steps)
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         resources = plan_resources(config.n_workers)
         return {
             "config": config.to_dict(),
@@ -529,7 +545,14 @@ def create_app(store_path: Path | None = None) -> FastAPI:
                 ),
             )
         stored = request.model_dump(
-            exclude={"resume_from", "resume_mode", "allow_concurrent", "confirm", "config_overrides"}
+            exclude={
+                "resume_from",
+                "resume_mode",
+                "allow_concurrent",
+                "confirm",
+                "config_overrides",
+                "additional_steps",
+            }
         )
         config = TrainingConfig.model_validate(stored)
         resume_from = request.resume_from
@@ -626,6 +649,29 @@ def create_app(store_path: Path | None = None) -> FastAPI:
                         f"cannot {resume_mode} from {resume_from}: " + "; ".join(reasons)
                     ),
                 )
+        if request.additional_steps:
+            # ``total_steps`` is absolute everywhere else (run row, progress
+            # bar, report).  Resolve "N more" against the checkpoint this start
+            # will actually restore, exactly like the CLI's ``--steps``.
+            from ..resume import plan_resume, with_additional_steps
+
+            plan = plan_resume(
+                paths["models"],
+                config,
+                mode=resume_mode,
+                checkpoint=resume_from or None,
+                explicit_overrides=request.config_overrides,
+                additional_steps=request.additional_steps,
+            )
+            try:
+                config = with_additional_steps(
+                    config, plan.restored_step, int(request.additional_steps)
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            stored["total_steps"] = int(config.total_steps)
+            stored["lr_anneal_start"] = int(config.lr_anneal_start)
+
         stored["resume_mode"] = resume_mode
         run_id = store.create_run(config.run_name, config.mode, stored, config.total_steps)
         try:

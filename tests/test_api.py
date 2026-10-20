@@ -331,6 +331,61 @@ def test_start_plan_endpoint_is_read_only(client, models_dir):
     assert any("optimiser state" in item for item in payload["resume"]["restores"])
 
 
+def test_start_plan_resolves_additional_steps_against_the_checkpoint(client, models_dir):
+    """`additional_steps` is the API's `--steps`: N more, not an absolute target."""
+    config = TrainingConfig.model_validate(_config_from(client))
+    manifest = _compatible_checkpoint(models_dir, config)
+
+    payload = client.post(
+        "/api/runs/start-plan", json={"total_steps": 4096, "additional_steps": 4096}
+    ).json()
+    resume = payload["resume"]
+    assert payload["will_resume"] is True
+    assert resume["model_id"] == manifest["id"]
+    assert resume["restored_step"] == 2048
+    assert resume["additional_steps"] == 4096
+    # 2048 + 4096 = 6144, already a multiple of the 1024-step batch
+    assert resume["target_total_steps"] == 6144
+    assert payload["config"]["total_steps"] == 6144
+    assert payload["config"]["lr_anneal_start"] == 2048
+
+
+def test_start_run_with_additional_steps_stores_the_resolved_target(
+    client, models_dir, monkeypatch
+):
+    started = {}
+
+    def fake_start(config, run_id, resume_from=None, **kwargs):
+        started["config"] = config
+        started["resume_from"] = resume_from
+        started.update(kwargs)
+
+    monkeypatch.setattr(client.app.state.jobs, "start_training", fake_start)
+    config = TrainingConfig.model_validate(_config_from(client))
+    manifest = _compatible_checkpoint(models_dir, config)
+
+    response = client.post(
+        "/api/runs",
+        json={"total_steps": 4096, "additional_steps": 4096, "confirm": True},
+    )
+    assert response.status_code == 200, response.text
+    assert started["resume_from"].endswith(manifest["path"])
+    assert started["config"].total_steps == 6144
+    assert started["config"].lr_anneal_start == 2048
+    run = client.get("/api/runs").json()[0]
+    assert run["total_steps"] == 6144
+
+    # an unusable request is refused before a run row is created
+    models_dir.joinpath(manifest["id"]).joinpath(checkpoints.MODEL_FILE).write_bytes(b"broken")
+    before = len(client.get("/api/runs").json())
+    response = client.post(
+        "/api/runs",
+        json={"total_steps": 4096, "additional_steps": 4096, "confirm": True},
+    )
+    assert response.status_code == 400
+    assert len(client.get("/api/runs").json()) == before
+
+
 def test_simplified_start_run_payload(client, models_dir, monkeypatch):
     """The redesigned form posts only the user-controlled values.
 

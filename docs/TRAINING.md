@@ -439,6 +439,12 @@ python -m rlai.cli resume-plan --config-file ... --steps 500000
   im Plan – genau der Fall, der früher stillschweigend nichts tat.
 * Weniger als eine Rollout-Batch (`rollout_steps × n_workers`) wird als Fehler
   abgelehnt; so ein Lauf hätte keine einzige Aktualisierung.
+* Dashboard und API können dasselbe: im Formular die Option **Add these steps
+  to the restored checkpoint**, im Request das Feld `additional_steps`
+  (`POST /api/runs` und `POST /api/runs/start-plan`). Der Server löst den Wert
+  gegen den Checkpoint auf, den der Start wirklich wiederherstellt, und
+  speichert das aufgelöste `total_steps` in der Run-Zeile – die Fortschritts-
+  anzeige stimmt dadurch auch im Web.
 
 Die API verhält sich genauso: Fehlt `resume_mode` in `POST /api/runs`, wird
 automatisch fortgesetzt, wenn ein nutzbarer Checkpoint existiert; gibt es

@@ -42,7 +42,7 @@ python -m pytest -q
 | Gegnerpool: Kapazität, PFSP-Gewichte, Elo, Serialisierung,unveränderliche und serialisierte Gewichte | `test_league.py` | bestanden |
 | Curriculum: Aufstiegskriterien, Fenster, Resume-Zähler | `test_curriculum.py` | bestanden |
 | SQLite-Store: Runs, Metriken, Logs, Episoden, Evaluationsdetails (CI) | `test_store.py` | bestanden |
-| HTTP-API inkl. Auth (Header/Bearer/SSE-Token), CORS opt-in, 409 bei parallelem Lauf, Resume-Vorschau, Checkpoint-Validierung, Reports, Suite, Budget-Grenzen, Pfad-Ablehnung, Statik, Preflight, Dry-Run, Presets | `test_api.py` | bestanden |
+| HTTP-API inkl. Auth (Header/Bearer/SSE-Token), CORS opt-in, 409 bei parallelem Lauf, Resume-Vorschau, `additional_steps`, Checkpoint-Validierung, Reports, Suite, Budget-Grenzen, Pfad-Ablehnung, Statik, Preflight, Dry-Run, Presets | `test_api.py` | bestanden |
 | Evaluation: Ergebnis, Seed-Reproduzierbarkeit, Wilson-Intervall, v1-Checkpoints, best-Regel | `test_evaluation.py` | bestanden |
 | Evaluation v2: CI-Grenzen, Layout-Erkennung, v1-Checkpoint-Evaluation, Suiten, Seiten | `test_evaluation_v2.py` | bestanden |
 | Trainer: fehlende Run-Zeile, automatischer Resume, Abbruch bei unbrauchbaren Checkpoints, Final-Dedupe, Ctrl+C-Save, fehlgeschlagener Shutdown-Save, best-Regel, Pool-Gewichte im Checkpoint | `test_trainer.py` | bestanden |
@@ -58,9 +58,9 @@ python -m pytest -q
 | Exposure-Settings: Loopback-Standard, Host-/Port-/CORS-Validierung, Token-Warnung, `serve` | `test_app_settings.py` | bestanden |
 | `--steps N` (zusätzliche Schritte ab Checkpoint, Aufrunden auf Rollout-Batches), Lernraten-Fenster, Plan-Felder, CLI-Aliase, `main.py`-Wrapper, Episode-Retention mit geschütztem Anfang, Recovery-Checkpoint, No-Touch-Truncation | `test_additional_steps.py` | bestanden |
 | Behaviour Cloning und DAgger: Expertendaten sammeln, Kreuzentropie, Learner-Rollouts mit Experten-Labels, aggregiertes Dataset, Checkpoint mit `step=0`, Resume-Priorität, CLI/`main.py` | `test_imitation.py` | bestanden |
-**Gesamt: 590 passed, 0 failed, 0 skipped** (ca. 3 min, 2 vCPU, mit
+**Gesamt: 592 passed, 0 failed, 0 skipped** (ca. 3 min, 2 vCPU, mit
 installiertem jsdom für den GUI-Smoke-Test), `ruff check src tests rlbot`
-sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (589 passed,
+sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (591 passed,
 1 skipped). Die einzige Warnung stammt aus `starlette`/`anyio`
 (Drittanbieter), nicht aus diesem Projekt.
 

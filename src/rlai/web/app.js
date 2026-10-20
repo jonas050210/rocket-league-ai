@@ -629,9 +629,12 @@ function clearTrainingState() {
   }
 }
 
-async function fetchStartPlan(totalSteps, runName) {
+async function fetchStartPlan(totalSteps, runName, additional = false) {
   const body = { total_steps: Number(totalSteps) };
   if (runName) body.run_name = runName;
+  // "N more steps" is resolved server-side against the checkpoint it would
+  // restore; the CLI flag is called --steps, the API field additional_steps.
+  if (additional) body.additional_steps = Number(totalSteps);
   return api("/api/runs/start-plan", { method: "POST", body: JSON.stringify(body) });
 }
 
@@ -740,6 +743,11 @@ views.training = async () => {
           <div class="step-suggestions" aria-label="Suggested budgets">
             ${stepSuggestions.map((s) => `<button type="button" class="button ghost step-suggestion" data-steps="${s}">${fmtNumber(s)}</button>`).join("")}
           </div>
+          <label class="field full" style="display:flex;gap:8px;align-items:center">
+            <input name="additional_steps" id="additional-steps" type="checkbox" style="width:auto;margin:0" />
+            <span style="margin:0"><strong>Add</strong> these steps to the restored checkpoint</span>
+            <small>Off: the number is the absolute total. On: a checkpoint at 2,000,000 plus 500,000 trains to 2,500,000 instead of reporting “completed” immediately.</small>
+          </label>
           <label class="field full">
             <span>Run name <em>(optional)</em></span>
             <input name="run_name" id="run-name" type="text" maxlength="80" placeholder="e.g. 1v1 baseline" value="" />
@@ -797,7 +805,7 @@ views.training = async () => {
     clearTrainingState();
     if (immediate) {
       applyPlan(null);
-      fetchStartPlan(stepsInput.value, nameInput.value)
+      fetchStartPlan(stepsInput.value, nameInput.value, additionalInput.checked)
         .then(applyPlan)
         .catch((error) => {
           applyPlan(null);
@@ -807,7 +815,7 @@ views.training = async () => {
     }
     // debounce: typing a new budget should not hammer the planning endpoint
     trainingState.planTimer = setTimeout(() => {
-      fetchStartPlan(stepsInput.value, nameInput.value)
+      fetchStartPlan(stepsInput.value, nameInput.value, additionalInput.checked)
         .then(applyPlan)
         .catch(() => { /* keep the last plan; the start is validated anyway */ });
     }, 350);
@@ -819,8 +827,10 @@ views.training = async () => {
       refreshPlan();
     });
   });
+  const additionalInput = $("#additional-steps");
   stepsInput.addEventListener("input", () => refreshPlan());
   nameInput.addEventListener("input", () => refreshPlan());
+  additionalInput.addEventListener("change", () => refreshPlan());
   refreshPlan(true);
 
   $("#training-form").addEventListener("submit", async (event) => {
@@ -836,8 +846,11 @@ views.training = async () => {
     const plan = trainingState.plan;
     const resuming = Boolean(plan && plan.will_resume);
     const blocked = Boolean(plan && plan.resume && Number(plan.resume.candidates_found || 0) > 0);
+    const additional = Boolean(additionalInput && additionalInput.checked);
     const summary = [
-      `1v1 · ${fmtNumber(totalSteps)} environment steps.`,
+      additional
+        ? `1v1 · ${fmtNumber(totalSteps)} environment steps on top of the restored checkpoint.`
+        : `1v1 · ${fmtNumber(totalSteps)} environment steps in total.`,
       resuming
         ? `Will continue from ${plan.resume.model_id} at step ${fmtNumber(plan.resume.restored_step)} (weights, optimiser and step counter are restored).`
         : blocked
@@ -856,6 +869,9 @@ views.training = async () => {
           mode: "soccer-1v1",
           allow_concurrent: false,
         };
+        // the server turns this into restored_step + N (and restarts the
+        // learning-rate anneal there), like `--steps` on the CLI
+        if (additional) payload.additional_steps = totalSteps;
         // the server refuses a start that was not confirmed; this flag is only
         // set after the user accepted the dialog above
         payload.confirm = true;

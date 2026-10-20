@@ -49,8 +49,10 @@ noch nach einem Absturz, noch wenn ein Checkpoint auftaucht. Jeder Lauf muss im
 Tab *Training* explizit gestartet und bestätigt werden.
 
 Erster sinnvoller Lauf: im Web-Dashboard unter *Training* die Ziel-Schritte
-wählen und starten (1v1 ist der einzige Modus des Workflows; alle übrigen
-Parameter kommen aus den Standardwerten), oder per CLI:
+wählen – optional mit **Add these steps to the restored checkpoint**, damit
+die Zahl wie `--steps` auf den Checkpoint aufaddiert wird statt ein absolutes
+Ziel zu sein – und starten (1v1 ist der einzige Modus des Workflows; alle
+übrigen Parameter kommen aus den Standardwerten), oder per CLI:
 
 ```bash
 python3 main.py --steps 500000      # 500.000 Schritte, Fortsetzung inklusive
@@ -281,10 +283,10 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q                    # 589 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
+python -m pytest -q                    # 591 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **589 passed, 1 skipped** in ca. 3 min (skip:
+Ergebnis in dieser Umgebung: **591 passed, 1 skipped** in ca. 3 min (skip:
 jsdom fehlt). Abgedeckt: Modi,
 Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
 PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,
