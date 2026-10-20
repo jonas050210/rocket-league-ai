@@ -431,6 +431,46 @@ Das Tor-Gate (≥ 0,30, CI-low ≥ 0,15) ist damit erstmals auf dem Punktwert
 **und** der unteren Konfidenzgrenze erfüllt; der Lauf scheiterte nur noch an
 der zweiten Bestätigung (`1/2`).
 
+### `reengage`: Abdeckung allein reicht nicht – die Policy sättigt im No-op
+
+Nach der `shooting`-Stufe ist `reengage` das nächste Gate, das nie erfüllt
+wird: `reengage = 0,00 [0,00; 0,07]` über alle Auswertungen des
+`defense`-Laufs (700 416 Schritte). Dieselbe Vermutung wie bei `shooting` –
+die Situation fehlt im Training – führte zu zwei Änderungen, die **beide
+wieder verworfen wurden**, weil sie das Gate nicht bewegen:
+
+| Lauf | Änderung | `approach`-Stufe | `reengage` (48 Trials) | Training |
+| --- | --- | --- | --- | --- |
+| 300k | keine | `control` bei Iteration 200 | – | 199:30 Tore |
+| 300k | `reach` mit 30 % Blick-weg-Starts | bei 280k **noch Stufe 0** (0,25) | 0,17 deterministisch / 0,27 stochastisch | – |
+| 300k | `reach` mit 10 % Blick-weg-Starts | `control` bei Iteration 260 | 0,10 / **0,63** | – |
+| 700k | `drill` + 10 % `recover`-Szenario | – | **0,00** | 315:420 Tore, 2,92 Kontakte/Ep. |
+| 700k | zusätzlich `reach` 10 % | – | **0,00** | 241:542 Tore, 2,15 Kontakte/Ep. |
+
+Der entscheidende Befund steckt in der Aktionsverteilung des Checkpoints im
+`reengage`-Startzustand:
+
+```
+Entropie 0,076 (Vergleich `approach`-Start: 0,815)
+Aktion 50: 99,07 %  ->  throttle 0, steer -1, air-roll  (das Auto steht)
+Aktion 16:  0,39 %     throttle 1
+```
+
+Die Policy gibt in diesem Zustand praktisch ihre ganze Masse auf eine
+No-op-Aktion; auch **stochastisches** Sampling berührte den Ball in 0/30
+Versuchen. Erst die frühe Konfrontation (10 % Blick-weg-Starts ab Stufe 0)
+erzeugt die Fähigkeit – dann aber nur stochastisch (0,63), während das Gate
+mit `argmax` misst (0,10). Die Fähigkeit ist also **erlernbar, aber die
+deterministische Policy committet sich nicht** auf die ~1–2 s dauernde
+Drehung; dafür fehlt ein dichtes Kreditsignal, nicht Abdeckung.
+
+Konsequenz: `drill/recover` und `REACH_FACING_AWAY_SHARE` wurden nicht
+ausgeliefert (Kosten: +30 % Stufe-0-Iterationen bzw. schlechtere
+Trainingsergebnisse bei 700k), das gemessene `shot`-Szenario bleibt. Der
+nächste Schritt ist ein potential-basiertes Heading-Shaping (Differenz der
+Ausrichtung Auto→Ball, nicht der Zustand selbst) oder eine eigene
+Recovery-Stufe – beides braucht einen eigenen A/B gegen genau diese Zahlen.
+
 ### Warum 80k-Schritte-A/Bs nichts beweisen (Rauschkalibrierung)
 
 Drei Läufe mit **identischer** effektiver Config und demselben Checkpoint

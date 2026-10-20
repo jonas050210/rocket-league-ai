@@ -174,7 +174,10 @@ What each probe measures:
   idle/random/chase all scored ~0.5 - no signal.)
 * **`reengage`** - the car starts 700–1500 uu from the ball **facing away**
   from it, 8 s.  Success = getting back to the ball.  This is the measurable
-  part of "recovery".
+  part of "recovery".  It is currently the wall after `shooting`: the
+  deterministic policy puts 99 % of its action probability on a no-op in that
+  state, so the gate stays at 0.00 even when the situation is added to the
+  training distribution (see `docs/STALL_ANALYSIS.md`).
 * **`match_*`** - a real match series through `rlai.evaluation`, side
   balanced, with the run's `eval_games`/`eval_match_seconds`.
 
