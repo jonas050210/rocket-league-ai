@@ -319,7 +319,7 @@ change on the user's 50M-step budget.
 
 ```
 ruff check src tests rlbot        # All checks passed
-pytest -q                         # 591 passed, 1 skipped (jsdom) — 170 s
+pytest -q                         # 592 passed, 1 skipped (jsdom) — 168 s
 ```
 
 (The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by
@@ -363,6 +363,23 @@ Auffällig: 72:1 Tore statt 13:51. Der alte Lauf kassierte gegen einen
 `defense`-Drills, in denen der Ball auf das eigene Tor rollt und eine
 zufällige Policy ihn hineinschiebt. Der 10-s-Timeout beendet diese
 Situationen früher, bevor die Policy sich selbst besiegt.
+
+### Curriculum-Stufen verzerren den First/Last-Vergleich
+
+Ein 300k-Fortsetzungslauf vom BC-Checkpoint (`f6d11b8f8ae6`: 1 669 Episoden,
+154:56 Tore, 1,59 Kontakte/Episode, 1 026 Schritte/s) zeigte im Report
+zunächst einen Rückgang von 4,54 auf 1,64 mittlerem Reward (−2,9) – der Lauf war
+im Curriculum aber von `approach` über `control` nach `shooting` gewandert.
+Jede Stufe ändert Gegner, Startzustände (reset_mode) und Horizont; die Zahlen
+beschreiben also verschiedene Aufgaben.
+
+Der Report schränkt beide Fenster jetzt auf die **aktuelle Stufe** ein
+(`learning_evidence.scope` mit `since_step`, `stage_changed`, `stage_start_step`
+und einer Notiz). Derselbe Lauf ergibt innerhalb der `shooting`-Stufe ab
+Schritt 102 400: **+0,99 Reward, +3,5 Prozentpunkte Siegquote, +0,035 Tore pro
+Episode, +0,125 Kontakte pro Episode** gegenüber dem Stufenbeginn. Der
+Fortschritt war also da – der globale Vergleich hat ihn nur von einem
+Stufenwechsel überlagert.
 
 ## Reproduction commands (isolated data)
 

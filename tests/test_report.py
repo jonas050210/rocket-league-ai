@@ -319,6 +319,37 @@ def test_incomplete_evaluations_are_listed(data_root):
 # ---------------------------------------------------------------- checkpoint
 
 
+def test_learning_evidence_is_scoped_to_the_current_curriculum_stage(data_root):
+    """A stage change alters opponents, resets and horizon: compare within it."""
+    store = _store(data_root)
+    config = _config()
+    run_id = store.create_run("stages", config.mode, config.to_dict(), config.total_steps)
+    store.update_run(run_id, status="completed", step=2000)
+    for index in range(10):
+        step = 100 + index * 10
+        store.log_episode(
+            run_id, episode=index, step=step, reward=0.0, length=50,
+            goals_for=0, goals_against=0, result="draw",
+        )
+        store.log_metric(run_id, step, "curriculum/stage", 0.0)
+    for index in range(10):
+        step = 1000 + index * 10
+        store.log_episode(
+            run_id, episode=10 + index, step=step, reward=2.0, length=50,
+            goals_for=1, goals_against=0, result="win",
+        )
+        store.log_metric(run_id, step, "curriculum/stage", 1.0)
+
+    report = build_run_report(store, run_id)
+    evidence = report["learning_evidence"]
+    assert evidence["scope"]["stage_changed"] is True
+    assert evidence["scope"]["since_step"] == 1000
+    # both windows describe the current stage only, not the easier stage 0
+    assert evidence["first_200_episodes"]["count"] == 10
+    assert evidence["first_200_episodes"]["mean_reward"] == 2.0
+    assert evidence["delta"]["mean_reward"] == 0.0
+
+
 def test_disabled_evaluation_is_not_reported_as_a_failure(data_root):
     store = _store(data_root)
     config = _config()  # eval_interval=0: no measurement was ever requested

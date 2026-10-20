@@ -592,15 +592,49 @@ def build_run_report(
     # episodes of this run look like vs the last ones, in outcomes and ball
     # interaction?  A rising reward with flat touches/goals is proxy farming,
     # and this block makes that visible at a glance.
+    # A curriculum promotes when its gates pass, and the next stage changes the
+    # opponents, the reset distribution and the horizon.  Comparing "the first
+    # 200 episodes of the run" with "the last 200" then compares different
+    # tasks - in a measured 300k continuation the reward looked 30 % *worse*
+    # for exactly that reason.  Restrict both windows to the current stage and
+    # say that the scope changed.
+    stage_points = store.metric_series(run_id, ["curriculum/stage"]).get("curriculum/stage") or []
+    stage_start_step = resumed_step
+    stage_changed = False
+    if stage_points:
+        changed_at = None
+        previous = stage_points[0]["value"]
+        for point in stage_points[1:]:
+            if point["value"] != previous:
+                # the first point of the *new* stage starts the window
+                changed_at = int(point["step"])
+                previous = point["value"]
+        if changed_at is not None:
+            stage_changed = True
+            stage_start_step = max(int(changed_at), resumed_step)
+    evidence_since = max(resumed_step, stage_start_step)
+
     first_window = store.episode_window_stats(
-        run_id, which="first", window=LEARNING_EVIDENCE_WINDOW, since_step=resumed_step
+        run_id, which="first", window=LEARNING_EVIDENCE_WINDOW, since_step=evidence_since
     )
     last_window = store.episode_window_stats(
-        run_id, which="last", window=LEARNING_EVIDENCE_WINDOW, since_step=resumed_step
+        run_id, which="last", window=LEARNING_EVIDENCE_WINDOW, since_step=evidence_since
     )
     learning_evidence: dict[str, Any] = {
         "first_200_episodes": first_window,
         "last_200_episodes": last_window,
+        "scope": {
+            "since_step": int(evidence_since),
+            "stage_changed": stage_changed,
+            "stage_start_step": int(stage_start_step) if stage_changed else None,
+            "note": (
+                "the run advanced through curriculum stages; both windows use only "
+                f"episodes from step {int(evidence_since)} (current stage), because "
+                "opponents, resets and the horizon changed before that"
+            )
+            if stage_changed
+            else None,
+        },
         "basis": (
             "training-episode outcomes of this run (not an independent "
             "evaluation); compare with the evaluation section for strength"
