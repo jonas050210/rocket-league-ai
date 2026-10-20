@@ -177,7 +177,9 @@ What each probe measures:
   part of "recovery".  It is currently the wall after `shooting`: the
   deterministic policy puts 99 % of its action probability on a no-op in that
   state, so the gate stays at 0.00 even when the situation is added to the
-  training distribution (see `docs/STALL_ANALYSIS.md`).
+  training distribution.  Training *only* on it (`reset_mode = "recover"`)
+  reaches 0.104 after 405k steps while destroying `approach` (1.00 → 0.21), so
+  no stage requires it yet - see `docs/STALL_ANALYSIS.md`.
 * **`match_*`** - a real match series through `rlai.evaluation`, side
   balanced, with the run's `eval_games`/`eval_match_seconds`.
 

@@ -436,6 +436,34 @@ def test_discounted_potentials_stay_bounded_in_discounted_sum():
     env.close()
 
 
+def test_recover_resets_always_start_facing_away():
+    """The ``reengage`` situation as its own reset distribution.
+
+    Every learning car starts 700-1500 uu from a resting ball and faces its
+    own goal.  This is the only reset mode that produces that state; a
+    policy that never sees it puts ~99 % of its action probability on a no-op
+    there (see ``docs/STALL_ANALYSIS.md``).
+    """
+    env = MatchEnv(
+        get_mode("soccer-1v1"), IdleOpponent(), seed=11, episode_seconds=8, reset_mode="recover"
+    )
+    for _ in range(30):
+        env.reset()
+        assert env.env.shared_info.get("drill_scenario") == "recover"
+        car = env.state.cars[env.policy_agents[0]].physics
+        ball = env.state.ball.position
+        offset = np.array(
+            [float(ball[0]) - float(car.position[0]),
+             float(ball[1]) - float(car.position[1])]
+        )
+        distance = float(np.linalg.norm(offset))
+        forward = np.asarray(car.forward, dtype=np.float64)[:2]
+        assert float(np.dot(forward, offset / distance)) < -0.85, "must face away"
+        assert 600.0 <= distance <= 1600.0
+        assert float(np.linalg.norm(env.state.ball.linear_velocity)) < 1.0
+    env.close()
+
+
 def test_rollouts_are_reproducible_from_the_episode_seed():
     """Same configuration, weights and seed must produce the same rollout.
 

@@ -41,6 +41,14 @@ REACH_LATERAL = 250.0
 REACH_BALL_X = (-2000.0, 2000.0)
 REACH_BALL_Y = (-2500.0, 2500.0)
 
+#: ``recover`` starts: the learning car is 700-1500 uu from the ball and faces
+#: its own goal - the ``reengage`` probe's distance band
+RECOVER_DISTANCE = (700.0, 1500.0)
+RECOVER_OPPONENT_DISTANCE = (1800.0, 3000.0)
+RECOVER_LATERAL = 400.0
+RECOVER_BALL_X = (-1500.0, 1500.0)
+RECOVER_BALL_Y = (-1000.0, 2000.0)
+
 FIELD_X_LIMIT = 3800.0
 FIELD_Y_LIMIT = 4800.0
 BALL_RADIUS_Z = 93.0
@@ -115,6 +123,51 @@ def apply_reach(state, shared_info: dict[str, Any]) -> None:
             aim=(ball_x, ball_y),
             boost=random.uniform(40.0, 100.0),
         )
+
+
+def apply_recover(state, shared_info: dict[str, Any]) -> None:
+    """Recovery starts: the learning car faces its own goal, the ball behind it.
+
+    This is the ``reengage`` probe's situation, isolated: every learning car
+    starts 700-1500 uu from a resting ball **facing away from it**, so the
+    only way to touch the ball is to turn around first.  No other reset mode
+    produces that state - ``reach``/``drill`` spawn cars facing the ball -
+    and a policy that never sees it puts ~99 % of its action probability on a
+    no-op there (see ``docs/STALL_ANALYSIS.md``).
+
+    Distance band and opponent placement mirror the probe so that a stage
+    using this mode trains the measured situation, not an approximation.
+    """
+    drill_team = int(shared_info.get("drill_team", BLUE_TEAM))
+    ball_x = random.uniform(*RECOVER_BALL_X)
+    ball_y = random.uniform(*RECOVER_BALL_Y)
+    state.ball.position = np.array([ball_x, ball_y, BALL_RADIUS_Z], dtype=np.float32)
+    state.ball.linear_velocity = np.zeros(3, dtype=np.float32)
+    state.ball.angular_velocity = np.zeros(3, dtype=np.float32)
+    shared_info["drill_scenario"] = "recover"
+    for car in state.cars.values():
+        attack = 1.0 if int(car.team_num) == BLUE_TEAM else -1.0
+        learning = int(car.team_num) == int(drill_team)
+        # the car starts on its own-goal side of the ball, i.e. "behind" it
+        distance = random.uniform(*(RECOVER_DISTANCE if learning else RECOVER_OPPONENT_DISTANCE))
+        lateral = RECOVER_LATERAL if learning else RECOVER_LATERAL * 2.0
+        car_x = float(
+            np.clip(ball_x + random.uniform(-lateral, lateral), -FIELD_X_LIMIT, FIELD_X_LIMIT)
+        )
+        car_y = float(
+            np.clip(ball_y - attack * distance, -FIELD_Y_LIMIT, FIELD_Y_LIMIT)
+        )
+        if learning:
+            # facing away from the ball == facing its own goal
+            yaw = float(np.arctan2(ball_y - car_y, ball_x - car_x) + np.pi)
+            place_car(car, (car_x, car_y, 17.0), yaw=yaw, boost=random.uniform(30.0, 100.0))
+        else:
+            place_car(
+                car,
+                (car_x, car_y, 17.0),
+                aim=(ball_x, ball_y),
+                boost=random.uniform(30.0, 100.0),
+            )
 
 
 def mirror_point(point) -> tuple[float, float, float]:

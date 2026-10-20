@@ -285,10 +285,10 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q                    # 616 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
+python -m pytest -q                    # 617 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **616 passed, 1 skipped** in ca. 3 min (skip:
+Ergebnis in dieser Umgebung: **617 passed, 1 skipped** in ca. 3 min (skip:
 jsdom fehlt). Abgedeckt: Modi,
 Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
 PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,
