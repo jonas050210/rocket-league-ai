@@ -48,6 +48,13 @@ Gewichte, sammelt die Rollouts ein und trainiert zentral.
   mehrerer kurzer. Truncations sind **keine** Terminals: `rlai.ppo.compute_gae`
   bootstrappt mit `V(s_end)` (siehe `tests/test_gae_truncation.py`), der
   Wertschätzer lernt also kein „Zeitlimit = verlorenes Spiel“.
+  **Pro Stufe überschreibbar:** eine Stufe mit weiten Startzuständen setzt
+  `no_touch_timeout` selbst (die Mastery-Stufen `shooting` … `integrated`:
+  25 s). Gemessen war der Fehler sonst teuer: im `shooting`-Lauf
+  `f6d11b8f8ae6` endeten 55 % der Episoden ohne einen einzigen Kontakt,
+  weil der laufweite 10-s-Timeout vor dem Erreichen des Balls zuschlug.
+  Der Timeout steckt in der Truncation-Bedingung, also baut der Worker die
+  Arena bei einem Stufenwechsel neu (wie bei `episode_seconds`).
 
 ## Beobachtungsversionen
 
@@ -121,6 +128,12 @@ durchgeführt.
 | 1v1 (`legacy`) | Erster Kontakt → Schießen → `chase` → gemischt → Selbstspiel |
 | 2v2, 3v3 | Erster Kontakt → `chase` → gemischt → Selbstspiel |
 | Heatseeker 2v2 | Erster Kontakt → `chase` → Selbstspiel |
+
+`shooting` startet bewusst aus `drill`-Zuständen (Attacke/Verteidigung/Race,
+Ball 700–2600 uu entfernt) und nicht aus `mixed`: `mixed` enthält zur Hälfte
+Kickoffs, deren 2500+ uu-Anfahrt ein *Reach*-Problem der ersten beiden Stufen
+ist und die gemessene Abstiegsstelle war. Kickoffs kommen mit `defense`
+zurück.
 
 Aufstieg entscheidet **nie** der Trainings-Reward, sondern eine unabhängige
 Messung: `rlai.skills` spielt geskriptete, geseedete Startsituationen auf

@@ -333,3 +333,53 @@ def test_new_safety_settings_default_to_off_and_time_based():
     assert config.lr_anneal_start == 0
     # crash protection is on by default, but only every half hour
     assert config.recovery_checkpoint_minutes == 30.0
+
+
+def test_collect_forwards_the_no_touch_timeout_to_the_worker():
+    """The stage timeout travels with the collect command, like reset_mode."""
+    from rlai.workers import WorkerPool
+
+    class FakeParent:
+        def __init__(self):
+            self.messages = []
+            self.reply = {"type": "rollout", "worker": 0, "steps": 10}
+
+        def send(self, message):
+            self.messages.append(message)
+
+        def poll(self, _timeout):
+            return True
+
+        def recv(self):
+            return self.reply
+
+    class FakeProcess:
+        exitcode = None
+
+    pool = WorkerPool.__new__(WorkerPool)
+    pool.parents = [FakeParent()]
+    pool.workers = [FakeProcess()]
+    pool.collect_timeout = 1.0
+    pool.results = pool.collect(
+        {}, 10, 7, reset_mode="drill", episode_seconds=30.0, no_touch_timeout=25.0
+    )
+    message = pool.parents[0].messages[0]
+    assert message["cmd"] == "collect"
+    assert message["no_touch_timeout"] == 25.0
+    assert message["reset_mode"] == "drill" and message["episode_seconds"] == 30.0
+    assert pool.results[0]["type"] == "rollout"
+
+
+def test_mastery_shooting_stage_uses_attacking_starts_and_a_longer_timeout():
+    """The measured bottleneck: kickoff starts plus a 10 s timeout starved it."""
+    from rlai.curriculum import MASTERY_STAGES
+
+    stages = {stage.name: stage for stage in MASTERY_STAGES}
+    shooting = stages["shooting"]
+    # ``drill`` keeps every start in an attack/defense/race situation; kickoff
+    # starts (``mixed``) put the ball 2500+ uu away, which is a reach problem.
+    assert shooting.reset_mode == "drill"
+    assert shooting.no_touch_timeout == 25.0
+    # the early stages keep the run-wide timeout: their starts are close range
+    assert stages["approach"].no_touch_timeout is None
+    assert stages["control"].no_touch_timeout is None

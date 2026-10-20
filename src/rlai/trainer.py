@@ -1145,8 +1145,8 @@ class Trainer:
     # -- opponent selection --------------------------------------------------
     def _select_opponents(
         self,
-    ) -> tuple[list[str | None], list, list[str | None], str, str, float]:
-        """Per-worker (names, weights, pool ids, stage, reset mode, seconds).
+    ) -> tuple[list[str | None], list, list[str | None], str, str, float, float]:
+        """Per-worker (names, weights, pool ids, stage, reset mode, seconds, no-touch).
 
         Every worker draws its own opponent: in `mixed` stages each worker
         independently faces chase or random, in self-play each worker gets
@@ -1158,30 +1158,42 @@ class Trainer:
         """
         count = max(1, int(self.config.n_workers))
         seconds = float(self.config.episode_seconds)
+        no_touch = float(self.config.no_touch_timeout_seconds)
         if self.curriculum is not None:
             stage = self.curriculum.stage
             reset_mode = stage.reset_mode
             if stage.episode_seconds is not None:
                 seconds = float(stage.episode_seconds)
+            if stage.no_touch_timeout is not None:
+                no_touch = float(stage.no_touch_timeout)
             if stage.opponent == "self" and self.league.usable:
                 picks = [self.league.sample(self.rng) for _ in range(count)]
                 return (
                     [None] * count,
                     [entry.state for entry in picks],
                     [entry.id for entry in picks],
-                    stage.name, reset_mode, seconds,
+                    stage.name, reset_mode, seconds, no_touch,
                 )
             if stage.opponent == "mixed":
                 names = [str(self.rng.choice(["chase", "random"])) for _ in range(count)]
-                return names, [None] * count, [None] * count, stage.name, reset_mode, seconds
+                return (
+                    names, [None] * count, [None] * count, stage.name, reset_mode,
+                    seconds, no_touch,
+                )
             if stage.opponent == "self":
                 # The pool has no playable snapshot yet (first iteration, or a
                 # checkpoint written without league states).  "self" is not a
                 # buildable opponent, so fall back to a scripted one instead
                 # of handing the worker a name it cannot resolve.
                 fallback = self._self_play_fallback()
-                return [fallback] * count, [None] * count, [None] * count, stage.name, reset_mode, seconds
-            return [stage.opponent] * count, [None] * count, [None] * count, stage.name, reset_mode, seconds
+                return (
+                    [fallback] * count, [None] * count, [None] * count, stage.name,
+                    reset_mode, seconds, no_touch,
+                )
+            return (
+                [stage.opponent] * count, [None] * count, [None] * count, stage.name,
+                reset_mode, seconds, no_touch,
+            )
         reset_mode = str(self.config.reset_mode)
         if self.config.self_play and self.league.usable:
             picks = [self.league.sample(self.rng) for _ in range(count)]
@@ -1189,12 +1201,18 @@ class Trainer:
                 [None] * count,
                 [entry.state for entry in picks],
                 [entry.id for entry in picks],
-                "self-play", reset_mode, seconds,
+                "self-play", reset_mode, seconds, no_touch,
             )
         if self.config.opponent == "self":
             fallback = self._self_play_fallback()
-            return [fallback] * count, [None] * count, [None] * count, "fixed", reset_mode, seconds
-        return [self.config.opponent] * count, [None] * count, [None] * count, "fixed", reset_mode, seconds
+            return (
+                [fallback] * count, [None] * count, [None] * count, "fixed", reset_mode,
+                seconds, no_touch,
+            )
+        return (
+            [self.config.opponent] * count, [None] * count, [None] * count, "fixed",
+            reset_mode, seconds, no_touch,
+        )
 
     def _self_play_fallback(self) -> str:
         """Scripted opponent to use while no self-play snapshot exists yet."""
@@ -1694,6 +1712,7 @@ class Trainer:
                     stage_name,
                     reset_mode,
                     episode_seconds,
+                    no_touch_seconds,
                 ) = self._select_opponents()
                 started = time.perf_counter()
                 rollouts = self.pool.collect(
@@ -1706,6 +1725,7 @@ class Trainer:
                     opponent_execution=self._opponent_execution(),
                     reset_mode=reset_mode,
                     episode_seconds=episode_seconds,
+                    no_touch_timeout=no_touch_seconds,
                 )
                 collect_seconds = time.perf_counter() - started
 
