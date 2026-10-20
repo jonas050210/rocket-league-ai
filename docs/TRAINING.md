@@ -237,6 +237,25 @@ python3 main.py train --config-file configs/1v1-mastery-1v1.json \
     --resume-from <pretrain-checkpoint> --resume-mode continue --steps 500000
 ```
 
+Dasselbe gibt es ohne Terminal:
+
+* **Dashboard** – Models → „Warm start (behaviour cloning)“: Experte,
+  Episoden, Epochen, Lernrate; der Button startet den Job und der
+  Checkpoint erscheint danach in der Liste.
+* **API** – `POST /api/pretrain` (Auth wie bei den anderen Mutationen):
+
+  ```json
+  {"episodes": 100, "epochs": 3, "expert": "chase", "learning_rate": 0.001}
+  ```
+
+  Antwort: `{"job_id": "pt-…", "status": "started", "expected_minutes": …}`.
+  `config` kann eine vollständige Trainingskonfiguration mitgeben; ohne sie
+  gilt der Backend-Standard für 1v1. Erlaubte Experten sind die gescripteten
+  Gegner (`chase`, `idle`, `random`); ein Checkpoint als Experte wird mit 400
+  abgelehnt, `episodes` ist auf 2000 begrenzt. Der Job läuft als eigener
+  Prozess (wie Training und Evaluation), damit die API bedienbar bleibt.
+
+
 Warum: eine frische Policy ist fast gleichverteilt (Entropie 4,21 von
 ln 90 = 4,50 nach 150k Schritten) und berührt den Ball in kurzen Läufen
 selten – der gemessene Chaser kommt auf ~7,9 Kontakte pro Episode. Der

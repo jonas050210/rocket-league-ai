@@ -248,6 +248,74 @@ class JobManager:
         )
         return eval_id
 
+    # -- warm start (behaviour cloning) -------------------------------------
+    def start_pretraining(
+        self,
+        *,
+        config_path: Path,
+        episodes: int,
+        epochs: int,
+        expert: str = "chase",
+        learning_rate: float = 1e-3,
+        max_decisions: int | None = None,
+        dagger_rounds: int = 0,
+        device: str | None = None,
+        label: str = "api",
+    ) -> str:
+        """Collect demonstrations and write a ``pretrain`` checkpoint.
+
+        Behaviour cloning is the one step that reliably improves a policy in
+        this project (a warm start reached 3.4 touches/episode where a fresh
+        PPO run managed 0.8).  It runs as its own subprocess for the same
+        reason training does: the API must stay responsive, and a crash in
+        the simulator must not take the server down.  The checkpoint lands in
+        the models directory and is picked up by ``/api/models``.
+        """
+        job_id = f"pt-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        run_dir = self._run_dir(f"pretrain-{job_id}")
+        log_path = run_dir / "stdout.log"
+        log_file = open(log_path, "ab")
+        command = [
+            sys.executable,
+            "-m",
+            "rlai.cli",
+            "pretrain",
+            "--config-file",
+            str(config_path),
+            "--episodes",
+            str(int(episodes)),
+            "--epochs",
+            str(int(epochs)),
+            "--expert",
+            str(expert),
+            "--learning-rate",
+            str(float(learning_rate)),
+        ]
+        if max_decisions:
+            command += ["--max-decisions", str(int(max_decisions))]
+        if int(dagger_rounds) > 0:
+            command += ["--dagger-rounds", str(int(dagger_rounds))]
+        if device:
+            command += ["--device", str(device)]
+        process = subprocess.Popen(
+            command,
+            cwd=str(project_root()),
+            env=self._env(),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+        )
+        log_file.close()
+        with self._lock:
+            self.processes[job_id] = process
+        self.store.log(
+            None,
+            "INFO",
+            f"pretraining {job_id} started ({label}): expert={expert} "
+            f"episodes={int(episodes)} epochs={int(epochs)} pid={process.pid}",
+        )
+        return job_id
+
     def job_alive(self, run_id: str) -> bool:
         with self._lock:
             process = self.processes.get(run_id)

@@ -784,3 +784,54 @@ def test_omitted_resume_mode_starts_fresh_only_without_any_checkpoint(
     assert response.status_code == 200, response.text
     assert started["resume_mode"] == "fresh"
     assert started["resume_from"] is None
+
+
+def test_pretrain_starts_a_background_job(monkeypatch, client, data_root):
+    """Behaviour cloning must be a job, not a blocking request."""
+    from rlai.jobs import JobManager
+
+    captured = {}
+
+    def fake_start(self, **kwargs):
+        captured.update(kwargs)
+        return "pt-test-1"
+
+    monkeypatch.setattr(JobManager, "start_pretraining", fake_start)
+    response = client.post(
+        "/api/pretrain",
+        json={"episodes": 40, "epochs": 2, "expert": "chase", "learning_rate": 0.002},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["job_id"] == "pt-test-1"
+    assert payload["status"] == "started"
+    assert payload["expert"] == "chase" and payload["episodes"] == 40
+    assert captured["episodes"] == 40 and captured["epochs"] == 2
+    assert captured["learning_rate"] == 0.002
+    # the job gets a real config file, so the checkpoint records what it was
+    # collected and trained under
+    config_path = captured["config_path"]
+    assert config_path.is_file()
+    restored = TrainingConfig.load(config_path)
+    assert restored.mode == "soccer-1v1"
+    assert restored.policy.hidden  # a complete config, not a fragment
+
+
+def test_pretrain_rejects_a_checkpoint_as_expert(client):
+    response = client.post("/api/pretrain", json={"expert": "model:m-123"})
+    assert response.status_code == 400
+    assert "scripted opponent" in response.json()["detail"]
+
+
+def test_pretrain_rejects_an_invalid_config(client):
+    response = client.post("/api/pretrain", json={"config": {"mode": "hoops"}})
+    assert response.status_code == 400
+    response = client.post("/api/pretrain", json={"episodes": 0})
+    assert response.status_code == 422
+
+
+def test_pretrain_requires_the_token(monkeypatch, data_root, models_dir):
+    monkeypatch.setenv("RLAI_AUTH_TOKEN", "secret")
+    app = create_app()
+    with TestClient(app) as client:
+        assert client.post("/api/pretrain", json={}).status_code == 401

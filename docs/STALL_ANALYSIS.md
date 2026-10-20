@@ -319,7 +319,7 @@ change on the user's 50M-step budget.
 
 ```
 ruff check src tests rlbot        # All checks passed
-pytest -q                         # 602 passed, 1 skipped (jsdom) — 185 s
+pytest -q                         # 606 passed, 1 skipped (jsdom) — 171 s
 ```
 
 (The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by

@@ -83,7 +83,9 @@ python -m rlai.cli pretrain --config-file configs/1v1-mastery-1v1.json \
     --episodes 100 --epochs 3          # schreibt einen Checkpoint mit Label "pretrain"
 ```
 
-Der Checkpoint hat `step = 0` und ist ein ganz normaler Checkpoint: `train`
+Im Dashboard liegt derselbe Schritt unter **Models → Warm start** (Experte,
+Episoden, Epochen, Lernrate), und `POST /api/pretrain` macht ihn
+skriptbar. Der Checkpoint hat `step = 0` und ist ein ganz normaler Checkpoint: `train`
 bzw. `python3 main.py --steps N` setzt ihn fort, echte Trainings-Checkpoints
 haben wegen ihres höheren Schritts weiter Vorrang. Für längere Läufe gibt es
 `configs/1v1-selfplay.json` (10M Schritte, Selbstspiel-Pool, Batch 8192,
@@ -283,10 +285,10 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q                    # 602 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
+python -m pytest -q                    # 606 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **602 passed, 1 skipped** in ca. 3 min (skip:
+Ergebnis in dieser Umgebung: **606 passed, 1 skipped** in ca. 3 min (skip:
 jsdom fehlt). Abgedeckt: Modi,
 Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
 PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,
