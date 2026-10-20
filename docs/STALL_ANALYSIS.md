@@ -425,6 +425,23 @@ Ein `--config-file` mit anderen Werten wird beim Fortsetzen **nicht**
 angewandt (Log: `source=inherited`); dafür braucht es `--override-config`.
 Das ist Absicht (Reproduzierbarkeit), hat aber drei Testläufe gekostet.
 
+### 24 Gate-Trials sind ein Münzwurf
+
+Zwei Beobachtungen aus identischen Konfigurationen:
+
+* Frischer Lauf, 150k Schritte: `approach` 0,125 (25k) → **1,00** (150k),
+  Stufe 1 erreicht.
+* Frischer Lauf derselben Config, 400k Schritte: `approach` 0,00 (25k und
+  120k) → **1,00** (145k), dann wieder 0,00 in der Folgeauswertung.
+
+Ein Probe-Trial ist 1–1,5 s, 24 Trials ergeben bei einer Rate von 0,5 ein
+95-%-Band von ±0,2. Nahe der Schwelle (0,80 mit CI-Untergrenze 0,60)
+entscheidet damit der Zufall, ob eine Stufe weitergeht. Deshalb ist
+`curriculum_gate_trials` jetzt **48** (Standard und Mastery-Config): das Band
+halbiert sich auf ±0,14, die Probe kostet weiter nur Sekunden. Die Schwellen
+selbst bleiben unverändert – mehr Trials machen die Entscheidung präziser,
+nicht leichter.
+
 ### 20-s-Evaluationen überschätzen eine passive Policy
 
 Der BC-Checkpoint galt als „5W/7L/8D gegen idle+chase" – gemessen über 20 s

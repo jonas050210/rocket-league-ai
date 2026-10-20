@@ -46,7 +46,7 @@
   "curriculum": true,
   "curriculum_preset": "mastery",
   "curriculum_gate_interval": 25,
-  "curriculum_gate_trials": 24,
+  "curriculum_gate_trials": 48,
   "reset_mode": "reach",
   "side_randomization": true,
   "eval_opponent": "chase",

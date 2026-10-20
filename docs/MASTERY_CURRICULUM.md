@@ -182,9 +182,12 @@ A stage promotes only when **all** of these hold:
    `RETENTION_TOLERANCE = 0.15`.
 
 Gate evaluations run every `curriculum_gate_interval` iterations (default 25)
-with `curriculum_gate_trials` trials per probe (default 24, i.e. 12 per
-side).  At 24 trials the 95 % interval is roughly ±0.2 around a 50 % rate,
-which is why the CI bounds sit 0.15–0.20 below the point estimates.
+with `curriculum_gate_trials` trials per probe (default 48, i.e. 24 per
+side).  The CI bounds sit 0.15–0.20 below the point estimates, so the bound
+has to survive the sampling noise: at 24 trials the 95 % interval is roughly
+±0.2 around a 50 % rate, and two identical runs of one configuration measured
+`approach` rates of 0.00 and 1.00 at the same step budget.  48 trials halve
+that interval and cost a few seconds per probe.
 
 ### When a stage does not promote
 

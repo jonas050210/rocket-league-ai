@@ -237,9 +237,12 @@ class TrainingConfig(BaseModel):
     #: stages do not have - it would block forever and say so)
     curriculum_gate_interval: int = Field(default=25, ge=0, le=10_000)
     #: trials per skill probe in a gate evaluation (both sides together).
-    #: 24 trials give a 95 % interval of roughly +/-0.2 at a 50 % rate; the
-    #: gate confidence bounds were chosen for this sample size.
-    curriculum_gate_trials: int = Field(default=24, ge=4, le=400)
+    #: 48 trials give a 95 % interval of roughly +/-0.14 at a 50 % rate.
+    #: 24 was too few: two identical runs of the same configuration measured
+    #: approach rates of 0.00 and 1.00 at the same step budget, so the stage
+    #: decision was a coin flip near the threshold.  A probe costs 1-6 s, so
+    #: the extra trials are cheap next to a 25-iteration gate interval.
+    curriculum_gate_trials: int = Field(default=48, ge=4, le=400)
     #: starting-state distribution when no curriculum stage overrides it:
     #: ``kickoff`` (standard), ``drill`` (randomized attacking setups that
     #: teach ball contact far faster), ``reach`` (close-range starts for the

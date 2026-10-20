@@ -152,8 +152,9 @@ Eine Stufe steigt erst auf, wenn
    (Retention – ein Gate misst deshalb immer auch die früheren Stufen mit).
 
 Gate-Messungen laufen alle `curriculum_gate_interval` Iterationen
-(Standard 25) mit `curriculum_gate_trials` Trials pro Probe (Standard 24,
-also 12 pro Seite). `curriculum_gate_interval = 0` wird zusammen mit einem
+(Standard 25) mit `curriculum_gate_trials` Trials pro Probe (Standard 48,
+also 24 pro Seite; 24 Trials waren zu wenig – zwei identische Läufe derselben
+Config maßen bei gleichem Schrittstand `approach` 0,00 bzw. 1,00). `curriculum_gate_interval = 0` wird zusammen mit einem
 gated Preset schon bei der Konfigurationsprüfung abgelehnt, weil sonst keine
 Stufe je verlassen werden könnte. Blockierte Aufstiege nennen den exakten
 Grund inklusive Messwert, Sollwert und Konfidenzintervall
@@ -387,6 +388,26 @@ Checkpoint, nicht die Datei. Wer es ändern will, muss es nennen:
 python3 main.py train --config-file configs/1v1-mastery-1v1.json \
   --steps 500000 --override-config entropy_coef
 ```
+
+### Validierungslauf mit den neuen Standardwerten (405 504 Schritte, frisch)
+
+Gemessen auf 2 vCPU (`1v1-mastery-1v1`, `--steps 400000`, 680 s, 1 825
+Episoden, 148:60 Tore im Training):
+
+* Zwei Promotionen: `approach` → `control` → **`shooting`**; die Gates
+  `approach` (0,80) und `progress` (0,70) wurden also auf beiden Feldseiten
+  bestanden. Im `shooting`-Lauf steht `progress` bei 0,58 und `shooting` bei
+  0,00 – dort ist die Stufe zu Recht blockiert.
+* Verbesserung innerhalb der laufenden Stufe (Report-Fenster ab Schritt
+  204 800): **+0,29 Reward, +2,5 Prozentpunkte Siegquote, +0,025 Tore pro
+  Episode**.
+* Match-Evaluation (10 Spiele × 60 s, beide Seiten, feste Seeds) vor dem
+  ersten Update: 0W 8L 2D, **2:24 Tore**. Am Ende: 0W 0L 10D, **0:0** – die
+  Policy kassiert nicht mehr, trifft aber auch nicht. Das ist ehrlich
+  „Defensive gelernt, Offensive nicht", und es ist nach 0,4M Schritten genau
+  das, was ein PPO-Lauf in dieser Größenordnung liefern kann.
+* `curriculum_gate_trials` ist von 24 auf 48 erhöht (siehe
+  `docs/STALL_ANALYSIS.md`, Abschnitt „24 Gate-Trials sind ein Münzwurf").
 
 ## Checkpoints und Resume
 
