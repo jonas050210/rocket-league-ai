@@ -222,6 +222,17 @@ class Trainer:
         self.resume_mode = resume_mode
         self.resume_plan: ResumePlan | None = resume_plan
         self.device = torch.device(config.resolved_device())
+        # Seed the *global* RNGs before the model exists: policy
+        # initialisation and the minibatch shuffling in ``ppo.update`` both
+        # draw from torch's default generator, which starts from OS entropy.
+        # Two runs of one configuration therefore began from different
+        # weights (measured: identical 4096-step runs disagreed from the very
+        # first iteration), so a metric change could never be attributed to a
+        # code change.  A resume restores the saved RNG state afterwards
+        # (``_restore_rng``), so a continued run stays reproducible too.
+        torch.manual_seed(int(config.seed))
+        random.seed(int(config.seed))
+        np.random.seed(int(config.seed) % (2**32 - 1))
         self.model = (
             PolicyConfig.from_dict(config.policy_config().to_dict()).build().to(self.device)
         )
@@ -1402,6 +1413,21 @@ class Trainer:
                 + "; ".join(f"{row['name']} {row['reason']}" for row in failing)
                 + f" - stage {stage_name!r} is NOT counted as mastered; the "
                 "confirmation counter was reset"
+            )
+        elif event == "inconclusive":
+            # The drop is inside the confidence interval: promotion stays
+            # blocked, but the confirmations earned so far are kept.
+            failing = [
+                row
+                for row in self.curriculum.retention_rows()
+                if not row["ok"]
+            ]
+            self._log(
+                "INFO",
+                "retention within sampling noise: "
+                + "; ".join(f"{row['name']} {row['reason']}" for row in failing)
+                + f" - promotion still blocked, {self.curriculum.gates.passes_in_a_row} "
+                "confirmation(s) kept",
             )
         self._flush_metrics()
         return measurements

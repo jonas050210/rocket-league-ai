@@ -148,6 +148,15 @@ with `mixed` and the run-wide 10 s no-touch timeout, 55 % of the episodes in a
 measured run ended before the first contact and the stage could not leave
 (`progress/rate` 0.29).  Kickoffs return with `defense`, where they belong.
 
+`drill` also has to *contain* the situation a gate measures.  It samples four
+scenarios (45 % attack / 20 % **shot** / 20 % defense / 15 % race); the `shot`
+scenario puts the ball in the attacking third with a keeper in the goal mouth,
+i.e. exactly the `shooting` setup.  Before it existed, `attack` (uniform over
+the field) placed the ball beyond `y = 3000` in ~7 % of episodes and never
+spawned a keeper, so a run with 148 goals measured `shooting` 0.00 - the gate
+was not wrong about the policy, it asked for a situation training never
+produced.
+
 What each probe measures:
 
 * **`approach`** - ball at rest 800/1300/1800/2400 uu away with a lateral
@@ -206,9 +215,13 @@ same information is in the run report under `curriculum.diagnostics` and in
 the GUI.  After `stagnation_iterations` (250) the trainer additionally logs a
 WARNING naming the blocking criterion.
 
-If a *retention* check fails, the run logs a WARNING
+If a *retention* check fails **conclusively**, the run logs a WARNING
 (`skill regression: retention:approach/rate 0.42 dropped below 0.65 …`),
 resets the confirmation counter and does **not** count the stage as mastered.
+If the failed rate is still inside its confidence interval
+(`retention:approach/rate 0.80 dropped below 0.85 … - within sampling noise`),
+the stage is likewise not promoted for that evaluation, but the log line is
+INFO and the confirmations earned so far are kept.
 
 ---
 
@@ -225,15 +238,23 @@ play a match.  Therefore:
   as the retention baseline (`curriculum.gates.baselines`, persisted in the
   checkpoint);
 * on every later evaluation, any earlier skill more than 0.15 below its
-  baseline blocks promotion and is logged as a regression;
+  baseline blocks promotion.  Only a **conclusive** drop resets the
+  confirmation counter and is logged as a regression: the drop must be
+  visible at the optimistic end of the 95 % confidence interval too
+  (`ci95[1] < baseline - 0.15`).  With 48 trials a true 0.90 rate lands below
+  a 0.85 floor often enough that three retention gates in a row would reset
+  the counter on sampling noise alone; an inconclusive drop still blocks the
+  promotion for that evaluation but keeps the confirmations that were
+  already earned (`curriculum.last_event == "inconclusive"`);
 * the later stages keep the earlier skills in their own gate list
   (`pressure` and `integrated` both re-require `shooting` and `defense`), so
   the final stage cannot be reached with a policy that only defends or only
   shoots.
 
-The metrics are exported as `curriculum/retention/<skill>` and
-`curriculum/gate/<gate>`, so a regression is visible in the charts and not
-only in the log.
+The metrics are exported as `curriculum/retention/<skill>` (plus
+`…/ok` and `…/conclusive`) and `curriculum/gate/<gate>`, so a regression -
+and whether it is distinguishable from noise at all - is visible in the charts
+and not only in the log.
 
 ---
 

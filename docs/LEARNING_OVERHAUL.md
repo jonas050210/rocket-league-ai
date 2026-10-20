@@ -197,9 +197,10 @@ and the true log-probabilities.
 ## Curriculum transfer & sample diversity
 
 Drill resets were attack-only: the agent never practised defending in
-training but conceded 0:10 in evaluation. Drills are now 55 % attack /
-25 % defense (ball rolling at the learning team's goal with speed) /
-20 % midfield race; the `chase`/`mixed` stages train on `mixed` resets
+training but conceded 0:10 in evaluation. Drills are now 45 % attack /
+20 % shot (ball in the attacking third, a keeper in the goal mouth) /
+20 % defense (ball rolling at the learning team's goal with speed) /
+15 % midfield race; the `chase`/`mixed` stages train on `mixed` resets
 (kickoff + drills) instead of pure kickoffs. Every worker also draws its
 **own** opponent (mixed/self-play stages), with league results recorded
 per snapshot — one batch is no longer 100 % correlated against a single

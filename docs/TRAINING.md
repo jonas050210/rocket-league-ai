@@ -167,9 +167,13 @@ Jede Stufe setzt außerdem Gegner, Startverteilung und Episodenlänge. `reach`
 (neu) startet den Lernenden 250–900 uu hinter einem ruhenden Ball – gemessen
 der entscheidende Hebel für frühe Ballkontakte
 (`docs/MASTERY_CURRICULUM.md`, Experiment 7: 1.34 statt 0.46 Berührungen pro
-Episode, 3 Seeds). `drill`-Starts sind randomisierte Spielsituationen in drei
-Szenarien: Angriff (55 %), Verteidigung gegen einen aufs eigene Tor rollenden
-Ball (25 %) und Mittelfeld-Rennen (20 %); `mixed` mischt Kickoff und Drills.
+Episode, 3 Seeds). `drill`-Starts sind randomisierte Spielsituationen in vier
+Szenarien: Angriff (45 %), **Abschluss** (20 %: Ball im Angriffsdrittel,
+Torwart in der Torlinie – genau die Situation, die die `shooting`-Probe
+misst; vorher lag der Ball nur in ~7 % der Episoden über `y = 3000`, und ein
+Keeper wurde nie erzeugt), Verteidigung gegen einen aufs eigene Tor
+rollenden Ball (20 %) und Mittelfeld-Rennen (15 %); `mixed` mischt Kickoff
+und Drills.
 Jeder Worker zieht außerdem seinen eigenen Gegner (`mixed` = chase/random pro
 Worker, Selbstspiel = eigene PFSP-Losung), damit ein Batch nicht gegen genau
 einen Gegner korreliert ist.
@@ -366,6 +370,13 @@ Regeln:
 * Beim Fortsetzen werden alle Punkte, die **hinter** dem wiederhergestellten
   Schritt liegen, sofort angewandt – der Lauf startet auf der richtigen
   Aufgabe.
+* `--steps N` kürzt den Lauf gegebenenfalls unter das Ende der Leiter. Punkte,
+  die hinter dem neuen Ziel liegen, könnten nie greifen; sie werden für
+  diesen Lauf entfernt, statt die Konfiguration abzulehnen. Die CLI druckt
+  dazu eine `WARNING` mit den betroffenen Schritten, der Resume-Plan führt
+  dieselbe Information in `notes`.  Damit ist ein Smoke-Test wie
+  `python3 main.py train --config-file configs/1v1-task-ladder.json
+  --steps 1000000` ohne Änderung der 20M-Config möglich.
 
 `configs/1v1-task-ladder.json` ist die Vorlage dazu (20M Schritte, Punkte bei
 2M / 6M / 12M, ohne Curriculum, damit die Leiter allein steuert).
@@ -427,6 +438,16 @@ Episoden, 148:60 Tore im Training):
   das, was ein PPO-Lauf in dieser Größenordnung liefern kann.
 * `curriculum_gate_trials` ist von 24 auf 48 erhöht (siehe
   `docs/STALL_ANALYSIS.md`, Abschnitt „24 Gate-Trials sind ein Münzwurf").
+
+### Nachmessung nach dem `shot`-Drill (301 056 Schritte, frisch)
+
+Derselbe Aufbau, `--steps 300000`, 476 s, 1 742 Episoden, 199:30 Tore. Der
+Lauf erreicht wieder `shooting` (zwei Promotionen) und steht dort nach der
+ersten Gate-Auswertung auf `progress` **1,00** [0,93; 1,00] und `shooting`
+**0,54** [0,40; 0,67] – Gate-Punktwert und untere Konfidenzgrenze erfüllt,
+blockiert nur noch durch die zweite Bestätigung (`1/2`). Vor dem vierten
+Drill-Szenario maß derselbe Aufbau bei 405 504 Schritten `shooting` 0,00.
+Details in `docs/STALL_ANALYSIS.md`.
 
 ## Checkpoints und Resume
 
@@ -580,6 +601,39 @@ python -m rlai.cli resume-plan --config-file ... --steps 500000
   gegen den Checkpoint auf, den der Start wirklich wiederherstellt, und
   speichert das aufgelöste `total_steps` in der Run-Zeile – die Fortschritts-
   anzeige stimmt dadurch auch im Web.
+
+### Reproduzierbarkeit: gleiche Config, gleicher Seed, gleicher Lauf
+
+Ein Lauf war bisher nicht wiederholbar: Torch startet seinen globalen
+Generator aus OS-Entropie (Policy-Initialisierung, Minibatch-Shuffle), und
+jeder Worker zog seine Aktionsstichproben aus dem eigenen, ungeseedeten
+Generator. Drei Läufe mit identischer Config und identischem Checkpoint
+ergaben **2,31 / 1,91 / 3,84 Kontakte pro Episode**.
+
+Jetzt gilt:
+
+* `Trainer.__init__` seedet `torch`, `random` und `numpy` aus `config.seed`,
+  **bevor** das Modell gebaut wird; ein Resume stellt den gespeicherten
+  RNG-Zustand anschließend wieder her (`_restore_rng`).
+* `collect_rollout` zieht seine Aktionen aus einem `torch.Generator`, der aus
+  dem Rollout-Seed (Worker-Seed + Worker-Index) geseedet ist – der
+  Prozess-Zustand spielt keine Rolle mehr, verschiedene Seeds explorieren
+  weiterhin verschieden.
+* Gemessen: zwei 4 096-Schritte-Läufe mit identischer Config haben
+  identische Rollout-Serien (Reward, Tore, Kontakte, `charts/*`). Die
+  Loss-Zahlen unterscheiden sich nur in der letzten Float32-Stelle, weil
+  CPU-Reduktionen über Threads laufen; mit
+  `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1` ist der komplette Lauf bit-identisch
+  (nur die Wanduhr-Metriken `time/*` unterscheiden sich).
+* Ein **Resume** ist reproduzierbar (gleicher Checkpoint, gleiche Config ⇒
+  gleicher weiterer Lauf), aber nicht identisch mit einem ununterbrochenen
+  Lauf: die Worker starten neu und zählen ihre Episoden wieder ab 0, also
+  unterscheiden sich die Reset-Seeds nach dem Neustart. Das war vorher schon
+  so und ist der Grund, warum Resume-Vergleiche über mehrere Läufe nur mit
+  der geseedeten Match-Evaluation belastbar sind.
+* `tests/test_trainer.py::test_identical_configurations_start_from_identical_weights`
+  und `tests/test_overhaul.py::test_rollouts_are_reproducible_from_the_episode_seed`
+  halten das fest.
 
 Die API verhält sich genauso: Fehlt `resume_mode` in `POST /api/runs`, wird
 automatisch fortgesetzt, wenn ein nutzbarer Checkpoint existiert; gibt es

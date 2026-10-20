@@ -138,6 +138,70 @@ def test_a_small_drop_inside_the_tolerance_still_promotes():
     ) == MASTERY_STAGES[2].name
 
 
+def test_a_noisy_drop_keeps_the_confirmations_that_were_already_earned():
+    """A 48-trial probe cannot tell 0.88 from 0.90; that must not reset."""
+    curriculum = ready_curriculum()
+    curriculum.record_gate({"approach": measurement(1.0)})
+    assert curriculum.record_gate({"approach": measurement(1.0)}) == "control"
+    curriculum.observe(episodes(60))
+    curriculum.stage_iterations = 100
+    # first confirmation on stage 2
+    assert (
+        curriculum.record_gate(
+            {"approach": measurement(0.97), "progress": measurement(0.95)}
+        )
+        is None
+    )
+    assert curriculum.gates.passes_in_a_row == 1
+    # 0.80 is below the 0.85 floor, but its 95 % CI reaches 0.94: noise, not
+    # a regression.  Promotion stays blocked for this evaluation, yet the
+    # confirmation earned above survives.
+    noisy = measurement(0.80, low=0.66, trials=48)
+    assert (
+        curriculum.record_gate({"approach": noisy, "progress": measurement(0.95)})
+        is None
+    )
+    assert curriculum.last_event == "inconclusive"
+    assert curriculum.gates.passes_in_a_row == 1
+    rows = {row["name"]: row for row in curriculum.retention_rows()}
+    row = rows["retention:approach/rate"]
+    assert row["ok"] is False and row["conclusive"] is False
+    assert "within sampling noise" in row["reason"]
+    metrics = curriculum.metrics()
+    assert metrics["curriculum/retention/approach/ok"] == 0.0
+    assert metrics["curriculum/retention/approach/conclusive"] == 0.0
+    # the next clean evaluation completes the promotion instead of starting over
+    assert (
+        curriculum.record_gate(
+            {"approach": measurement(0.97), "progress": measurement(0.95)}
+        )
+        == MASTERY_STAGES[2].name
+    )
+
+
+def test_a_conclusive_regression_still_resets_the_counter():
+    curriculum = ready_curriculum()
+    curriculum.record_gate({"approach": measurement(1.0)})
+    assert curriculum.record_gate({"approach": measurement(1.0)}) == "control"
+    curriculum.observe(episodes(60))
+    curriculum.stage_iterations = 100
+    curriculum.record_gate(
+        {"approach": measurement(0.97), "progress": measurement(0.95)}
+    )
+    assert curriculum.gates.passes_in_a_row == 1
+    # 0.40 with a CI of 0.25..0.55: even the optimistic end is far below 0.85
+    collapsed = measurement(0.40, low=0.25, trials=48)
+    assert (
+        curriculum.record_gate({"approach": collapsed, "progress": measurement(0.95)})
+        is None
+    )
+    assert curriculum.last_event == "regression"
+    assert curriculum.gates.passes_in_a_row == 0
+    rows = {row["name"]: row for row in curriculum.retention_rows()}
+    assert rows["retention:approach/rate"]["conclusive"] is True
+    assert "within sampling noise" not in rows["retention:approach/rate"]["reason"]
+
+
 def test_required_skills_accumulate_the_retention_probes():
     curriculum = Curriculum(MASTERY_STAGES, start_index=2)
     assert curriculum.required_skills() == ("approach", "progress", "shooting")

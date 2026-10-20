@@ -41,11 +41,13 @@ python -m pytest -q
 | Checkpoints: atomar (auch bei Save-Fehler), latest-Zeiger, Promotion, Löschschutz, best-Zeiger, Retention mit Ankern und Ladbarkeitsprüfung, Auswahl nach Schritt | `test_checkpoints.py` | bestanden |
 | Gegnerpool: Kapazität, PFSP-Gewichte, Elo, Serialisierung,unveränderliche und serialisierte Gewichte | `test_league.py` | bestanden |
 | Curriculum: Aufstiegskriterien, Fenster, Resume-Zähler | `test_curriculum.py` | bestanden |
+| Mastery-Gates: CI-Grenzen, Bestätigungen, Retention mit Rauschunterscheidung (nur schlüssige Regressionen setzen den Zähler zurück), Diagnose | `test_curriculum_gates.py` | bestanden |
 | SQLite-Store: Runs, Metriken, Logs, Episoden, Evaluationsdetails (CI) | `test_store.py` | bestanden |
 | HTTP-API inkl. Auth (Header/Bearer/SSE-Token), CORS opt-in, 409 bei parallelem Lauf, Resume-Vorschau, `additional_steps`, Checkpoint-Validierung, Reports, Suite, Budget-Grenzen, Pfad-Ablehnung, Statik, Preflight, Dry-Run, Presets | `test_api.py` | bestanden |
 | Evaluation: Ergebnis, Seed-Reproduzierbarkeit, Wilson-Intervall, v1-Checkpoints, best-Regel | `test_evaluation.py` | bestanden |
 | Evaluation v2: CI-Grenzen, Layout-Erkennung, v1-Checkpoint-Evaluation, Suiten, Seiten | `test_evaluation_v2.py` | bestanden |
 | Trainer: fehlende Run-Zeile, automatischer Resume, Abbruch bei unbrauchbaren Checkpoints, Final-Dedupe, Ctrl+C-Save, fehlgeschlagener Shutdown-Save, best-Regel, Pool-Gewichte im Checkpoint | `test_trainer.py` | bestanden |
+| Reproduzierbarkeit: identische Config seedet die Policy-Initialisierung; gleicher Rollout-Seed ⇒ gleiche Aktionen, unabhängig vom globalen Torch-RNG | `test_trainer.py`, `test_overhaul.py` | bestanden |
 | CLI: automatischer Resume, Exit 3 bei unbrauchbaren Checkpoints, `--resume-mode fresh`, `--resume-from`, `--plan-only`, `resume-plan`, `report`, Suite-Evaluation, `live --preflight/--dry-run/--list` | `test_cli.py` | bestanden |
 | RLBot-Parität: Packet → Beobachtung (1v1, 3v3, Heatseeker) | `test_rlbot_adapter.py` | bestanden |
 | Bot: sicheres Laden (Pickle-Ablehnung), Inferenz, deterministische Aktionen, Spiegelung je Team, Fehlerrobustheit, `initialize`, fehlendes/externes Modell | `test_rlbot_bot.py` | bestanden |
@@ -56,11 +58,11 @@ python -m pytest -q
 | Launcher `--dry-run` mit RLBot-Parser, Rückgabecodes | `test_live.py`, `test_cli.py` | bestanden |
 | Live-Start außerhalb Windows wird mit 501 abgelehnt | `test_api.py` | bestanden |
 | Exposure-Settings: Loopback-Standard, Host-/Port-/CORS-Validierung, Token-Warnung, `serve` | `test_app_settings.py` | bestanden |
-| `--steps N` (zusätzliche Schritte ab Checkpoint, Aufrunden auf Rollout-Batches), Lernraten-Fenster, Plan-Felder, CLI-Aliase, `main.py`-Wrapper, Episode-Retention mit geschütztem Anfang, Recovery-Checkpoint, No-Touch-Truncation | `test_additional_steps.py` | bestanden |
+| `--steps N` (zusätzliche Schritte ab Checkpoint, Aufrunden auf Rollout-Batches), Lernraten-Fenster, Plan-Felder, CLI-Aliase, `main.py`-Wrapper, Episode-Retention mit geschütztem Anfang, Recovery-Checkpoint, No-Touch-Truncation, Kürzen der Aufgaben-Leiter (unerreichbare `escalation`-Punkte fallen weg) | `test_additional_steps.py` | bestanden |
 | Behaviour Cloning und DAgger: Expertendaten sammeln, Kreuzentropie, Learner-Rollouts mit Experten-Labels, aggregiertes Dataset, Checkpoint mit `step=0`, Resume-Priorität, CLI/`main.py` | `test_imitation.py` | bestanden |
-**Gesamt: 607 passed, 0 failed, 0 skipped** (ca. 3 min, 2 vCPU, mit
+**Gesamt: 613 passed, 0 failed, 0 skipped** (ca. 3 min, 2 vCPU, mit
 installiertem jsdom für den GUI-Smoke-Test), `ruff check src tests rlbot`
-sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (606 passed,
+sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (612 passed,
 1 skipped). Die einzige Warnung stammt aus `starlette`/`anyio`
 (Drittanbieter), nicht aus diesem Projekt.
 
