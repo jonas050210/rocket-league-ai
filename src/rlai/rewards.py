@@ -19,6 +19,17 @@ Design (rewritten after the 2M-step stall analysis, see
   toward the opponent goal; a hard touch in the attacking half pays an
   additional ``shot`` bonus; a touch that stops a ball heading for the own
   goal pays ``defense``.  Touches toward the own goal pay almost nothing.
+* **Heading is an optional potential, off by default.**  ``heading`` (car
+  forward vs. direction to the ball) was added for the ``reengage`` wall: a
+  policy spawned facing away from the ball never turns around (99 % of the
+  action probability on a no-op, 0/48 at the gate).  It is paid as a
+  potential difference ``gamma*Phi' - Phi`` with ``Phi = forward . to_ball``,
+  so it telescopes exactly like ``progress`` and cannot be farmed by
+  spinning - but **measured at 0.5 it made things worse**: 0 promotions in
+  300k steps, ``approach`` never above 0.17.  In a ``reach`` start the car
+  already faces the ball, so the only thing left to pay for is *not* turning
+  away, which suppresses the exploration that finds the ball.  Hence the
+  default of 0; see ``docs/STALL_ANALYSIS.md``.
 * **Legacy terms.**  ``alignment`` and ``approach`` are kept (default **0**)
   so a pre-overhaul configuration still reproduces its old behaviour on an
   exact ``continue`` resume.  They are per-step state bonuses and are
@@ -54,6 +65,7 @@ _COMPONENTS = (
     "progress",
     "alignment",
     "approach",
+    "heading",
     "boost",
     "defense",
     "bump",
@@ -116,6 +128,26 @@ def _toward(velocity, target, origin) -> float:
     return (float(velocity[0]) * dx + float(velocity[1]) * dy + float(velocity[2]) * dz) / norm
 
 
+def _heading(car, ball_pos) -> float:
+    """Cosine between the car's forward axis and the direction to the ball.
+
+    ``1.0`` = driving straight at the ball, ``-1.0`` = facing exactly away.
+    Cars that stand on top of the ball (distance ~0) have no meaningful
+    heading; they return 0 so the potential neither pays nor charges.
+    """
+    forward = car.physics.forward
+    dx = float(ball_pos[0]) - float(car.physics.position[0])
+    dy = float(ball_pos[1]) - float(car.physics.position[1])
+    dz = float(ball_pos[2]) - float(car.physics.position[2])
+    norm = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if norm < 1e-3:
+        return 0.0
+    value = (
+        float(forward[0]) * dx + float(forward[1]) * dy + float(forward[2]) * dz
+    ) / norm
+    return max(-1.0, min(1.0, value))
+
+
 def _distance(a, b) -> float:
     return math.sqrt(
         (float(a[0]) - float(b[0])) ** 2
@@ -140,6 +172,15 @@ class RewardWeights:
     shot: float = 1.0
     #: touch that stops/reverses a ball heading for the own goal (event).
     defense: float = 0.5
+    #: potential difference of the car's *facing*, ``forward . to_ball`` in
+    #: [-1, 1].  Opt-in and default **0**: measured at 0.5 it stalled the
+    #: first curriculum stage (0 promotions in 300k steps, gate max 0.17)
+    #: because the only thing it can pay for in a ``reach`` start - where the
+    #: car already faces the ball - is *not* turning away, so it suppresses
+    #: the exploration that finds the ball.  It is a potential, so the
+    #: telescoping property holds; the problem is the objective, not the
+    #: bookkeeping.  Kept for experiments, see ``docs/STALL_ANALYSIS.md``.
+    heading: float = 0.0
     # --- legacy state bonuses (farmable; kept for exact-resume compat) ----
     alignment: float = 0.0
     approach: float = 0.0
@@ -174,6 +215,7 @@ class RewardWeights:
 @dataclass
 class _AgentMemory:
     prev_ball_offset: np.ndarray | None = None
+    prev_heading: float | None = None
     prev_ball_pos: np.ndarray | None = None
     prev_ball_vel: np.ndarray | None = None
     prev_boost: float = 0.0
@@ -222,6 +264,7 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
             car = initial_state.cars[agent]
             mem = self._memory[agent]
             mem.prev_ball_offset = initial_state.ball.position - car.physics.position
+            mem.prev_heading = _heading(car, initial_state.ball.position)
             mem.prev_ball_pos = initial_state.ball.position.copy()
             mem.prev_ball_vel = initial_state.ball.linear_velocity.copy()
             mem.prev_boost = float(car.boost_amount)
@@ -283,6 +326,7 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
         progress = 0.0
         alignment = 0.0
         approach = 0.0
+        heading = 0.0
         boost = 0.0
         defense = 0.0
         bump = 0.0
@@ -382,6 +426,18 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
                         / 1000.0
                     )
 
+            # Facing potential: ``Phi = forward . to_ball``.  Spawning facing
+            # the own goal is the one state in which no other term helps: the
+            # car has to turn first, and a turn pays nothing until the ball is
+            # touched.  ``gamma*Phi' - Phi`` gives that turn a gradient while
+            # still telescoping to zero for a full circle.
+            if w.heading:
+                phi = _heading(car, ball.position)
+                if mem.prev_heading is not None:
+                    gamma = self.potential_gamma
+                    heading = w.heading * (gamma * phi - mem.prev_heading)
+                mem.prev_heading = phi
+
             # Legacy state bonuses (weights default to 0; see module docs).
             if w.alignment or w.approach:
                 dist_to_ball = _distance(offset, (0.0, 0.0, 0.0))
@@ -426,6 +482,7 @@ class SoccerReward(RewardFunction[AgentID, GameState, float]):
             progress,
             alignment,
             approach,
+            heading,
             boost,
             defense,
             bump,

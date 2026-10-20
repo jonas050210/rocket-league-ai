@@ -97,6 +97,103 @@ def test_touch_reward_is_an_event_not_a_constant():
     assert all(abs(value) < 0.25 for value in after.values())
 
 
+def test_heading_is_a_potential_not_a_state_bonus(monkeypatch):
+    """Turning toward the ball pays once; a full circle nets zero.
+
+    A per-step heading bonus would pay a car that stands still and faces the
+    ball forever.  The potential ``gamma*Phi' - Phi`` pays the turn and
+    nothing else, which is what the ``reengage`` situation needs: a car
+    spawned facing its own goal has to turn *before* any touch can happen.
+    """
+    import rlai.rewards as rewards_module
+
+    env = _env()
+    reward = SoccerReward(
+        env.spec,
+        RewardWeights(heading=0.5, goal=0.0, concede=0.0, touch=0.0,
+                      ball_progress=0.0, progress=0.0),
+    )
+    state = copy.deepcopy(env.env.state)
+    agents = list(state.cars)
+    agent = agents[0]
+    shared = {}
+
+    # the car starts facing exactly away from the ball
+    monkeypatch.setattr(rewards_module, "_heading", lambda car, ball: -1.0)
+    reward.reset(agents, state, shared)
+
+    def step_with(phi: float) -> float:
+        monkeypatch.setattr(rewards_module, "_heading", lambda car, ball: phi)
+        shared["reward_stats_by_agent"] = {}
+        reward.get_rewards(agents, state, {}, {}, shared)
+        return shared["reward_stats_by_agent"][agent]["heading"]
+
+    # standing still: the potential does not change, so nothing is paid
+    assert step_with(-1.0) == pytest.approx(0.0, abs=1e-9)
+    assert step_with(-1.0) == pytest.approx(0.0, abs=1e-9)
+    # half of the turn toward the ball: a one-time gain of 0.5 * 2 * 0.5
+    assert step_with(0.0) == pytest.approx(0.5, abs=1e-6)
+    assert step_with(1.0) == pytest.approx(0.5, abs=1e-6)
+    # facing the ball and staying there pays nothing more
+    assert step_with(1.0) == pytest.approx(0.0, abs=1e-9)
+    # a full circle back to the start: everything earned is paid back
+    assert step_with(0.0) == pytest.approx(-0.5, abs=1e-6)
+    assert step_with(-1.0) == pytest.approx(-0.5, abs=1e-6)
+
+
+def test_heading_weight_zero_disables_the_potential(monkeypatch):
+    import rlai.rewards as rewards_module
+
+    env = _env()
+    reward = SoccerReward(
+        env.spec,
+        RewardWeights(heading=0.0, goal=0.0, concede=0.0, touch=0.0,
+                      ball_progress=0.0, progress=0.0),
+    )
+    state = copy.deepcopy(env.env.state)
+    agents = list(state.cars)
+    shared = {}
+    monkeypatch.setattr(rewards_module, "_heading", lambda car, ball: -1.0)
+    reward.reset(agents, state, shared)
+    monkeypatch.setattr(rewards_module, "_heading", lambda car, ball: 1.0)
+    shared["reward_stats_by_agent"] = {}
+    reward.get_rewards(agents, state, {}, {}, shared)
+    assert shared["reward_stats_by_agent"][agents[0]]["heading"] == 0.0
+
+
+def test_heading_helper_measures_the_angle_to_the_ball():
+    from rlai.rewards import _heading
+
+    class _Physics:
+        position = (0.0, 0.0, 0.0)
+        forward = (0.0, 1.0, 0.0)
+
+    class _Car:
+        physics = _Physics()
+
+    assert _heading(_Car(), (0.0, 1000.0, 0.0)) == pytest.approx(1.0)
+    assert _heading(_Car(), (0.0, -1000.0, 0.0)) == pytest.approx(-1.0)
+    assert _heading(_Car(), (1000.0, 0.0, 0.0)) == pytest.approx(0.0)
+    # standing on top of the ball has no meaningful heading
+    assert _heading(_Car(), (0.0, 0.0, 0.0)) == 0.0
+
+
+def test_heading_is_opt_in_because_it_stalled_the_first_stage():
+    """Default 0: at 0.5 the first curriculum stage never promoted.
+
+    Measured with `1v1-mastery-1v1` and a fresh policy: 0 promotions in
+    300k steps and an `approach` gate that never exceeded 0.17 (11
+    evaluations), against two promotions in the same 300k steps without the
+    term.  In a `reach` start the car already faces the ball, so the only
+    thing the potential can pay for is *not turning away*, which suppresses
+    the exploration that finds the ball.
+    """
+    from rlai.rewards import RewardWeights as Weights
+
+    assert Weights().heading == 0.0
+    assert "heading" in Weights().to_dict()  # configurable, just off by default
+
+
 def test_reward_components_match_the_documented_order():
     from rlai.rewards import _COMPONENTS
 

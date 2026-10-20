@@ -13,7 +13,7 @@ python -m pytest -q
 | Bereich | Datei | Ergebnis |
 | --- | --- | --- |
 | Trainingszeit: monotoner Timer, Akkumulation über Sitzungen, unbekannte Historie, Sitzungs-CRUD | `test_timing.py` | bestanden |
-| Trainingszeit end-to-end: gemessene Sitzung, Checkpoint-Metadaten, Fortsetzung, Safe-Stop, Absturz-Rettung, kein Zählen der Standby-Zeit | `test_trainer_timing.py` | bestanden (slow) |
+| Trainingszeit end-to-end: gemessene Sitzung, Checkpoint-Metadaten, Fortsetzung, Safe-Stop, Absturz-Rettung, kein Zählen der Standby-Zeit (Last-unabhängig geprüft: Wanduhr minus akkumulierte Zeit ≥ Pause) | `test_trainer_timing.py` | bestanden (slow) |
 | Statistik (Stats-Tab): Zeit, Fortschritt, Lernkurven, Checkpoints, Evaluation, Retention, unbekannte Werte | `test_stats.py` | bestanden |
 | Merkmale: Bot-Brain, Schwierigkeiten, Team-Builder, Spielerspeicher, Rivalen, adaptive Dynamik | `test_features.py` | bestanden |
 | Match-/Replay-Analyse: nur echte Messwerte, Replay-Parsing explizit nicht verfügbar | `test_analysis.py` | bestanden |
@@ -26,7 +26,7 @@ python -m pytest -q
 | Aktionstabelle (90 Aktionen, Grenzen, Mapping aller Indizes) | `test_actions.py` | bestanden |
 | Alle vier Modi: Reset/Step, Beobachtungsform, Padding, Seed | `test_env_modes.py` | bestanden |
 | Heatseeker: Homing, Tempoplus, Tor, unendlich Boost | `test_heatseeker.py` | bestanden |
-| Belohnungen: Tor/Gegentor, Shaping ohne Tor, Touch als Event | `test_rewards.py` | bestanden |
+| Belohnungen: Tor/Gegentor, Shaping ohne Tor, Touch als Event, `heading`-Potential (teleskopiert, standardmäßig aus) | `test_rewards.py` | bestanden |
 | PPO: GAE, Dones, Truncation-Bootstrap, Early Stop, ein Update | `test_ppo.py` | bestanden |
 | GAE über Zeitlimits: Maske für Bootstrap **und** Rekursion getrennt, Oracle | `test_gae_truncation.py` | bestanden |
 | Beobachtungs-Spiegelung: 180° um z, Invarianzen, Boost-Pad-Reihenfolge | `test_obs_mirror.py` | bestanden |
@@ -60,9 +60,9 @@ python -m pytest -q
 | Exposure-Settings: Loopback-Standard, Host-/Port-/CORS-Validierung, Token-Warnung, `serve` | `test_app_settings.py` | bestanden |
 | `--steps N` (zusätzliche Schritte ab Checkpoint, Aufrunden auf Rollout-Batches), Lernraten-Fenster, Plan-Felder, CLI-Aliase, `main.py`-Wrapper, Episode-Retention mit geschütztem Anfang, Recovery-Checkpoint, No-Touch-Truncation, Kürzen der Aufgaben-Leiter (unerreichbare `escalation`-Punkte fallen weg) | `test_additional_steps.py` | bestanden |
 | Behaviour Cloning und DAgger: Expertendaten sammeln, Kreuzentropie, Learner-Rollouts mit Experten-Labels, aggregiertes Dataset, Checkpoint mit `step=0`, Resume-Priorität, CLI/`main.py` | `test_imitation.py` | bestanden |
-**Gesamt: 613 passed, 0 failed, 0 skipped** (ca. 3 min, 2 vCPU, mit
+**Gesamt: 617 passed, 0 failed, 0 skipped** (ca. 3 min, 2 vCPU, mit
 installiertem jsdom für den GUI-Smoke-Test), `ruff check src tests rlbot`
-sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (612 passed,
+sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (616 passed,
 1 skipped). Die einzige Warnung stammt aus `starlette`/`anyio`
 (Drittanbieter), nicht aus diesem Projekt.
 
