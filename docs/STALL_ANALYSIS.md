@@ -319,7 +319,7 @@ change on the user's 50M-step budget.
 
 ```
 ruff check src tests rlbot        # All checks passed
-pytest -q                         # 616 passed, 1 skipped (jsdom) — 171 s
+pytest -q                         # 617 passed, 1 skipped (jsdom) — 171 s
 ```
 
 (The skip is `tests/test_gui_smoke.py`, which needs `jsdom`; it is skipped by
@@ -494,9 +494,44 @@ Optimallösung (die alte `alignment`-Falle, nur sauber teleskopierend).
 `heading` bleibt deshalb **standardmäßig 0**; der Term ist implementiert und
 per `"heading": 0.5` in der Rewards-Config einschaltbar, die drei
 Unit-Tests in `tests/test_rewards.py` halten Teleskopierung und
-Opt-in-Verhalten fest. Für `reengage` ist der nächste sinnvolle Hebel eine
-eigene **Recovery-Stufe** mit kurzem Horizont (der Aufstieg *ist* die
-Belohnung), nicht ein weiterer globaler Dichteterm.
+Opt-in-Verhalten fest.
+
+### Die Recovery-Situation isoliert trainieren: `reset_mode = "recover"`
+
+Der dritte Versuch war, die Situation selbst zur Verteilung zu machen
+(`reset_mode = "recover"`: jedes lernende Auto startet 700–1500 uu vom
+ruhenden Ball und schaut zum eigenen Tor; `src/rlai/scenarios.py`,
+`apply_recover`). Ab dem 301k-Checkpoint des Basislaufs, 8-s-Episoden,
+Curriculum aus:
+
+| Finetune | Schritte | Entropie | `reengage` | `approach` |
+| --- | --- | --- | --- | --- |
+| `entropy_coef = 0.001` | 104k | 4,50 → **0,37** | 0,000 | 0,000 |
+| `entropy_coef = 0.01` | 104k | 4,50 → 1,82 | 0,000 | 1,000 |
+| `entropy_coef = 0.01` | +301k (gesamt 405k) | – | **0,104** | 0,208 |
+
+Zwei Dinge stehen darin:
+
+1. **Die Situation ist erlernbar, aber extrem langsam.** Nach 405k Schritten
+   *ausschließlich* auf dieser Verteilung steht das deterministische Gate bei
+   0,104 (gefordert 0,70) – und `approach` ist dabei von 1,00 auf 0,21
+   eingebrochen. Eine Curriculum-Stufe dafür würde die Leiter für immer
+   blockieren; sie wurde deshalb **nicht** eingebaut.
+2. **Der Kollaps bei `entropy_coef = 0.001` hat eine konkrete Ursache:** das
+   `progress`-Potential (Auto→Ball) zahlt beim Start in dieser Situation
+   **negativ** (gemessen −1,12 pro Episode), weil die naheliegende Aktion
+   „Gas nach vorn" vom Ball *weg*führt. Der billigste Ausweg aus der Strafe
+   ist Stehenbleiben; die Entropie fällt auf 0,37, die Kontakte auf 0. Mit
+   0,01 bleibt die Entropie bei 1,8, `progress` wird positiv (+0,10) – aber
+   die deterministische Policy committet sich weiterhin nicht.
+
+`recover` bleibt trotzdem im Projekt: es ist der einzige Weg, diese
+Situation überhaupt zu trainieren (probe-identische Distanz, getestet in
+`tests/test_overhaul.py`), und die Zahlen oben sind ohne ihn nicht
+reproduzierbar. Für die Zukunft braucht `reengage` entweder eine
+asymmetrische Variante des `progress`-Potentials (nur Annäherung zahlen,
+Rückzug nicht bestrafen – dann aber farmbar) oder eine deutlich längere,
+dedizierte Trainingsphase.
 
 ### Warum 80k-Schritte-A/Bs nichts beweisen (Rauschkalibrierung)
 

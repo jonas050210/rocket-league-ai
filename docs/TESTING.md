@@ -25,6 +25,7 @@ python -m pytest -q
 | Moduskatalog, Konfigurationsvalidierung | `test_modes.py` | bestanden |
 | Aktionstabelle (90 Aktionen, Grenzen, Mapping aller Indizes) | `test_actions.py` | bestanden |
 | Alle vier Modi: Reset/Step, Beobachtungsform, Padding, Seed | `test_env_modes.py` | bestanden |
+| `recover`-Resets: Lernender startet mit Blick zum eigenen Tor in der `reengage`-Distanz, Ball ruht | `test_overhaul.py` | bestanden |
 | Heatseeker: Homing, Tempoplus, Tor, unendlich Boost | `test_heatseeker.py` | bestanden |
 | Belohnungen: Tor/Gegentor, Shaping ohne Tor, Touch als Event, `heading`-Potential (teleskopiert, standardmäßig aus) | `test_rewards.py` | bestanden |
 | PPO: GAE, Dones, Truncation-Bootstrap, Early Stop, ein Update | `test_ppo.py` | bestanden |
@@ -62,7 +63,7 @@ python -m pytest -q
 | Behaviour Cloning und DAgger: Expertendaten sammeln, Kreuzentropie, Learner-Rollouts mit Experten-Labels, aggregiertes Dataset, Checkpoint mit `step=0`, Resume-Priorität, CLI/`main.py` | `test_imitation.py` | bestanden |
 **Gesamt: 617 passed, 0 failed, 0 skipped** (ca. 3 min, 2 vCPU, mit
 installiertem jsdom für den GUI-Smoke-Test), `ruff check src tests rlbot`
-sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (616 passed,
+sauber. Ohne jsdom wird der GUI-Smoke-Test übersprungen (617 passed,
 1 skipped). Die einzige Warnung stammt aus `starlette`/`anyio`
 (Drittanbieter), nicht aus diesem Projekt.
 

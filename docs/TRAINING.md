@@ -185,7 +185,10 @@ Torwart in der Torlinie – genau die Situation, die die `shooting`-Probe
 misst; vorher lag der Ball nur in ~7 % der Episoden über `y = 3000`, und ein
 Keeper wurde nie erzeugt), Verteidigung gegen einen aufs eigene Tor
 rollenden Ball (20 %) und Mittelfeld-Rennen (15 %); `mixed` mischt Kickoff
-und Drills.
+und Drills. Dazu kommt `recover`: Jedes lernende Auto startet 700–1500 uu
+vom ruhenden Ball entfernt und schaut zum **eigenen** Tor – die
+`reengage`-Situation isoliert, gedacht für eine eigene Recovery-Stufe
+(siehe `docs/STALL_ANALYSIS.md`).
 Jeder Worker zieht außerdem seinen eigenen Gegner (`mixed` = chase/random pro
 Worker, Selbstspiel = eigene PFSP-Losung), damit ein Batch nicht gegen genau
 einen Gegner korreliert ist.

@@ -33,7 +33,7 @@ from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMuta
 
 from .modes import ModeSpec
 from .obs import OBS_VERSION, SoccerObsBuilder
-from .scenarios import apply_reach, apply_scenario
+from .scenarios import apply_reach, apply_recover, apply_scenario
 from .rewards import RewardWeights, SoccerReward
 
 GOAL_HALF_WIDTH = 892.755
@@ -104,7 +104,7 @@ class ModeRocketSimEngine(RocketSimEngine):
 #: ``reach`` and the exact scenarios of :mod:`rlai.scenarios` exist because a
 #: fresh policy's bottleneck is the distance between "drive at the ball" and
 #: "touch the ball" - measured in docs/MASTERY_CURRICULUM.md, experiment 1.
-RESET_MODES = ("kickoff", "drill", "reach", "mixed")
+RESET_MODES = ("kickoff", "drill", "reach", "recover", "mixed")
 
 
 class ResetMutator(KickoffMutator):
@@ -164,6 +164,9 @@ class ResetMutator(KickoffMutator):
             mode = "drill" if random.random() < 0.5 else "kickoff"
         if mode == "reach":
             apply_reach(state, shared_info)
+            return
+        if mode == "recover":
+            apply_recover(state, shared_info)
             return
         if mode != "drill":
             super().apply(state, shared_info)
