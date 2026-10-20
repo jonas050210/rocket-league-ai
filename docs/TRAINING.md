@@ -371,9 +371,17 @@ belastbaren A/B derselben Länge fehlte auf 2 vCPU die Zeit – die Richtung ist
 über alle Läufe aber eindeutig.)
 
 Der Bonus ist bei einer warm gestarteten Policy also der dominante Gradient,
-wenn die Aufgabe dicht aber schwach belohnt ist. `entropy_coef` ist ein
-**geerbtes** Feld: beim Fortsetzen gewinnt der Checkpoint, nicht die Datei.
-Wer es ändern will, muss es nennen:
+wenn die Aufgabe dicht aber schwach belohnt ist. Dasselbe Bild von Null
+(je 150k Schritte, identische Config): mit `0.01` blieb die Entropie bei
+4,50 → 4,44 (Maximum ln 90 = 4,50), Kontakte/Episode 0,92 → 0,82, Stufe 0;
+mit `0.001` fiel sie auf 3,26, Kontakte stiegen 1,03 → 1,17, die Policy
+bestand die `approach`-Gate und erreichte Stufe 1.
+
+Deshalb ist der **Standard seit diesem Commit 0.001**, und die 1v1-Configs,
+die lernen sollen, setzen ihn explizit. (`1v1-selfplay`, 2v2/3v3 und
+Heatseeker bleiben bei 0.01 – für die Modi wurde nichts gemessen.)
+`entropy_coef` ist ein **geerbtes** Feld: beim Fortsetzen gewinnt der
+Checkpoint, nicht die Datei. Wer es ändern will, muss es nennen:
 
 ```bash
 python3 main.py train --config-file configs/1v1-mastery-1v1.json \

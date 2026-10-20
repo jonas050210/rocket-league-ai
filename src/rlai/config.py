@@ -151,7 +151,12 @@ class TrainingConfig(BaseModel):
     gae_lambda: float = Field(default=0.95, gt=0, lt=1)
     clip_coef: float = Field(default=0.2, gt=0, le=1)
     value_coef: float = Field(default=0.5, ge=0, le=10)
-    entropy_coef: float = Field(default=0.01, ge=0, le=1)
+    #: entropy bonus.  0.01 (the RLGym-PPO default) kept a fresh policy at
+    #: ln(90)=4.50 nats and drove a *warm-started* policy towards uniform in a
+    #: measured run (entropy 1.73 -> 2.39 while touches fell 3.83 -> 2.29);
+    #: 0.001 let the same policy sharpen and improved ball contact in both a
+    #: fresh and a continuation run (docs/TRAINING.md).
+    entropy_coef: float = Field(default=0.001, ge=0, le=1)
     epochs: int = Field(default=4, ge=1, le=30)
     minibatch_size: int = Field(default=1024, ge=64, le=65536)
     max_grad_norm: float = Field(default=0.5, gt=0, le=10)
