@@ -379,6 +379,29 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pretrain(args: argparse.Namespace) -> int:
+    """Warm-start the actor by imitating a scripted expert (behaviour cloning)."""
+    from .imitation import run_pretraining
+
+    config = TrainingConfig.load(args.config_file)
+    try:
+        summary = run_pretraining(
+            config,
+            episodes=args.episodes,
+            epochs=args.epochs,
+            expert=args.expert,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            device=args.device,
+            max_decisions=args.max_decisions,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    _print(summary)
+    return 0
+
+
 def cmd_evaluate(args: argparse.Namespace) -> int:
     from .evaluation import evaluate_model, evaluate_suite, load_policy
 
@@ -626,6 +649,29 @@ def build_parser() -> argparse.ArgumentParser:
     _add_step_arguments(plan)
     plan.add_argument("--override-config", default=None, help="see train --override-config")
     plan.set_defaults(func=cmd_resume_plan)
+
+    pretrain = sub.add_parser(
+        "pretrain",
+        help="warm-start the actor by imitating a scripted expert (behaviour cloning)",
+    )
+    pretrain.add_argument("--config-file", required=True)
+    pretrain.add_argument("--episodes", type=int, default=200, help="demonstration episodes")
+    pretrain.add_argument("--epochs", type=int, default=3, help="cross-entropy epochs")
+    pretrain.add_argument(
+        "--expert",
+        default="chase",
+        help="scripted expert to imitate (default: chase, the strongest built-in)",
+    )
+    pretrain.add_argument("--batch-size", type=int, default=256)
+    pretrain.add_argument("--learning-rate", type=float, default=1e-3)
+    pretrain.add_argument(
+        "--max-decisions",
+        type=int,
+        default=None,
+        help="stop collecting after this many samples (quick experiments)",
+    )
+    pretrain.add_argument("--device", default=None, help="default: the config's device")
+    pretrain.set_defaults(func=cmd_pretrain)
 
     report = sub.add_parser("report", help="print the persisted training statistics report")
     report.add_argument("--run-id", default=None, help="defaults to the newest run")

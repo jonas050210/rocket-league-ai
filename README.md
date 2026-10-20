@@ -55,6 +55,8 @@ Parameter kommen aus den Standardwerten), oder per CLI:
 ```bash
 python3 main.py --steps 500000      # 500.000 Schritte, Fortsetzung inklusive
 python3 main.py --plan-only         # was würde passieren? (trainiert nicht)
+# Warmstart: der Actor imitiert zuerst den gescripteten Chaser
+python -m rlai.cli pretrain --config-file configs/1v1-mastery-1v1.json --episodes 100
 python -m rlai.cli train --config-file configs/smoke-1v1.json
 python -m rlai.cli evaluate --model data/models/<id>/model.pt --games 2 --match-seconds 20
 python -m rlai.cli benchmark --mode heatseeker-2v2 --workers 2 --seconds 2
@@ -64,6 +66,28 @@ python -m rlai.cli benchmark --mode heatseeker-2v2 --workers 2 --seconds 2
 `configs/1v1-mastery-1v1.json`, wenn beides fehlt, und funktioniert auch ohne
 `pip install -e .` (Torch/RocketSim müssen trotzdem installiert sein). Die
 vollständige CLI bleibt `python -m rlai.cli`.
+
+### Warmstart: `pretrain` (Behaviour Cloning)
+
+Eine frisch initialisierte Policy ist nahezu gleichverteilt über 90 Aktionen;
+in kurzen Läufen berührt sie den Ball fast nie, und PPO hat dann kaum ein
+Signal, aus dem „fahr zum Ball“ entstehen könnte. `pretrain` nimmt dem
+gescripteten Chaser (dem stärksten eingebauten Gegner, ~8 Ballkontakte pro
+Episode) `(Beobachtung, Aktion)`-Paare ab und trainiert den Actor per
+Kreuzentropie darauf:
+
+```bash
+python -m rlai.cli pretrain --config-file configs/1v1-mastery-1v1.json \
+    --episodes 100 --epochs 3          # schreibt einen Checkpoint mit Label "pretrain"
+```
+
+Der Checkpoint hat `step = 0` und ist ein ganz normaler Checkpoint: `train`
+bzw. `python3 main.py --steps N` setzt ihn fort, echte Trainings-Checkpoints
+haben wegen ihres höheren Schritts weiter Vorrang. Gemessen (gleiche Config,
+gleicher Seed, 30.000 PPO-Schritte): **3,4 statt 0,8 Ballkontakte pro Episode
+und 45 statt 7 Tore**, mittlerer Return +4,9 statt 0,0; die reine
+BC-Policy gewinnt gegen `idle` 3 von 10 Spielen (4:0 Tore) und spielt gegen
+`chase` 2:7 bei 6:9 Toren. Details und Einschränkungen: `docs/TRAINING.md`.
 
 ### Schrittbudget: `--steps` oder `--max-steps`
 
@@ -255,10 +279,10 @@ funktionieren auch dort und zeigen echte Ergebnisse.
 ## Tests
 
 ```bash
-python -m pytest -q                    # 582 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
+python -m pytest -q                    # 587 passed, 1 skipped, ca. 3 min (2 vCPU, keine GPU)
 ```
 
-Ergebnis in dieser Umgebung: **582 passed, 1 skipped** in ca. 3 min (skip:
+Ergebnis in dieser Umgebung: **587 passed, 1 skipped** in ca. 3 min (skip:
 jsdom fehlt). Abgedeckt: Modi,
 Aktionen, Beobachtung v1/v2 inkl. Parität und **Spiegelung**, Belohnungs-Events,
 PPO inkl. **GAE über Truncations** und Early Stop, Checkpoint-Schutz,

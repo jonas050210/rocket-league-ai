@@ -210,6 +210,48 @@ python -m rlai.cli evaluate --model <pfad> --opponent idle --games 4 --match-sec
 `--stochastic` sampelt Aktionen gemäß der Policy. Beide Werte gehören getrennt
 berichtet; der deterministische Wert ist die Deployment-Metrik.
 
+## Behaviour Cloning (Warmstart)
+
+`rlai pretrain` (auch über `main.py pretrain`) trainiert den Actor per
+Kreuzentropie auf den Aktionen des gescripteten Chasers und schreibt einen
+normalen Checkpoint mit `label="pretrain"` und `step=0`:
+
+```bash
+python -m rlai.cli pretrain --config-file configs/1v1-mastery-1v1.json \
+    --episodes 100 --epochs 3 --expert chase
+python3 main.py train --config-file configs/1v1-mastery-1v1.json \
+    --resume-from <pretrain-checkpoint> --resume-mode continue --steps 500000
+```
+
+Warum: eine frische Policy ist fast gleichverteilt (Entropie 4,21 von
+ln 90 = 4,50 nach 150k Schritten) und berührt den Ball in kurzen Läufen
+selten – der gemessene Chaser kommt auf ~7,9 Kontakte pro Episode. Der
+Warmstart liefert diese Fähigkeit ohne Explorationsbudget.
+
+Gemessen mit `configs/learning-smoke-1v1.json`-Ableitung (obs v4, drill
+resets, 2 Worker, `no_touch_timeout_seconds=10`, `idle`-Gegner, gleicher
+Seed), je 30 720 PPO-Schritte:
+
+| Metrik | von Null | nach `pretrain` |
+| --- | --- | --- |
+| Episoden | 193 | 183 |
+| Ballkontakte pro Episode (letzte 200) | 0,84 | **3,38** |
+| Tore im Training | 7 | **45** |
+| Mittlerer Return | 0,00 | **4,94** |
+| Siegquote (Tore mehr als Gegner) | 3,6 % | 24,6 % |
+| approx KL | 0,0006 | 0,001–0,002 |
+
+Das BC-Training selbst: 22 967 Paare aus 100 Episoden, drei Epochen,
+79 % Trefferquote (Zufall: 1/90), 12 s auf 2 vCPU. Die reine BC-Policy
+gewinnt gegen `idle` 3 von 10 Spielen bei 4:0 Toren und spielt gegen
+`chase` 2:7 Siege bei 6:9 Toren.
+
+Einschränkungen, damit die Zahlen nicht überlesen werden: eine Saat, kurze
+Läufe, nur ein Modus, und der Experte ist ein einfacher Chaser – BC kann
+nicht besser werden als sein Lehrer. Es ist ein Startpunkt für PPO, kein
+Ersatz für Training; für längere Läufe gilt weiter, dass Spielstärke nicht
+gemessen ist (siehe `docs/STALL_ANALYSIS.md`).
+
 ## Checkpoints und Resume
 
 * Checkpoints liegen unter `data/models/<model-id>/` und enthalten Modell,

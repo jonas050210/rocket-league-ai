@@ -37,6 +37,7 @@ COMMANDS = {
     "train",
     "headless",
     "resume-plan",
+    "pretrain",
     "report",
     "evaluate",
     "benchmark",
@@ -44,7 +45,7 @@ COMMANDS = {
     "live",
 }
 #: commands that need a configuration file
-CONFIG_COMMANDS = {"train", "headless", "resume-plan"}
+CONFIG_COMMANDS = {"train", "headless", "resume-plan", "pretrain"}
 
 
 def _prepare_argv(argv: list[str]) -> list[str]:
